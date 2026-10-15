@@ -1,0 +1,31 @@
+name: Docusaurus dependency audit
+'on':
+  workflow_call:
+    outputs:
+      validation_passed:
+        description: Whether candidate validation passed.
+        value: ${{ jobs.audit.outputs.validation_passed }}
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      validation_passed: ${{ steps.proposal.outputs.validation_passed }}
+    steps:
+    - name: Validate manual dispatch ref
+      env:
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: "set -euo pipefail\nexpected_ref=\"refs/heads/$DEFAULT_BRANCH\"\nif [ \"\
+        $GITHUB_EVENT_NAME\" = \"workflow_dispatch\" ] && [ \"$GITHUB_REF\" != \"\
+        $expected_ref\" ]; then\n  echo \"::error::Manual dispatch must target the\
+        \ repository default branch ($expected_ref); got $GITHUB_REF.\" >&2\n  exit\
+        \ 1\nfi\n"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Audit, propose upgrades, and build
+      id: proposal
+      uses: $/docusaurus/audit

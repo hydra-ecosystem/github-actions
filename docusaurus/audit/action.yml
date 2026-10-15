@@ -1,0 +1,52 @@
+name: Docusaurus audit
+description: Prepare and validate a dependency proposal for the calling repository.
+outputs:
+  validation_passed:
+    description: Whether frozen installation and production build passed.
+    value: ${{ steps.proposal.outputs.validation_passed }}
+runs:
+  using: composite
+  steps:
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+    with:
+      python-version: '3.13'
+  - name: Read project configuration
+    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"
+    shell: bash
+  - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    with:
+      node-version: ${{ env.DOCUSAURUS_NODE_VERSION }}
+  - name: Enable the project's pinned pnpm
+    run: corepack enable
+    shell: bash
+  - name: Install audit report parser
+    run: python -m pip install PyYAML==6.0.3
+    shell: bash
+  - name: Audit, propose upgrades, and build
+    id: proposal
+    run: 'python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory
+      "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --github-output
+      "$GITHUB_OUTPUT"
+
+      cat "$RUNNER_TEMP/dependency-audit-pr.md" >> "$GITHUB_STEP_SUMMARY"
+
+      '
+    shell: bash
+  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: dependency-audit-dependencies
+      if-no-files-found: error
+      path: '${{ env.NPM_PROJECT }}/package.json
+
+        ${{ env.NPM_PROJECT }}/package-lock.json
+
+        ${{ env.NPM_PROJECT }}/pnpm-lock.yaml
+
+        ${{ env.NPM_PROJECT }}/pnpm-workspace.yaml
+
+        '
+  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: dependency-audit-report
+      if-no-files-found: error
+      path: ${{ runner.temp }}/dependency-audit-pr.md

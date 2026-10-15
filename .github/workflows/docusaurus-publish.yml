@@ -1,0 +1,93 @@
+name: Publish Docusaurus dependency proposal
+'on':
+  workflow_call:
+    inputs:
+      validation-passed:
+        required: true
+        type: string
+      app-client-id:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      app-private-key:
+        required: false
+permissions:
+  contents: read
+jobs:
+  pull-request:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - name: Create repository-scoped publisher token
+      if: ${{ inputs.app-client-id != '' }}
+      id: app-token
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+      with:
+        client-id: ${{ inputs.app-client-id }}
+        private-key: ${{ secrets.app-private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-contents: write
+        permission-pull-requests: write
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        token: ${{ steps.app-token.outputs.token || github.token }}
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+    - name: Verify audit dependency state
+      env:
+        AUDIT_SHA: ${{ github.sha }}
+        BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      run: "set -euo pipefail\ngit fetch --no-tags origin \"$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH\"\
+        \ngit checkout --detach \"refs/remotes/origin/$BASE_BRANCH\"\nif ! git cat-file\
+        \ -e \"${AUDIT_SHA}^{commit}\" 2>/dev/null; then\n  echo \"Triggering audit\
+        \ revision ${AUDIT_SHA} is not available locally; fetching it.\"\n  if ! git\
+        \ fetch --no-tags origin \"$AUDIT_SHA\"; then\n    echo \"::error::Unable\
+        \ to fetch the triggering audit revision; refusing stale publication.\"\n\
+        \    exit 1\n  fi\nfi\nif ! git cat-file -e \"${AUDIT_SHA}^{commit}\" 2>/dev/null;\
+        \ then\n  echo \"::error::The triggering audit revision could not be resolved;\
+        \ refusing publication.\"\n  exit 1\nfi\nif git diff --quiet \"$AUDIT_SHA\"\
+        \ HEAD -- .; then\n  :\nelse\n  comparison_status=$?\n  if [ \"$comparison_status\"\
+        \ -eq 1 ]; then\n    echo \"::error::The default branch repository inputs\
+        \ changed since ${AUDIT_SHA}; rerun the audit from the current default branch.\"\
+        \n  else\n    echo \"::error::Unable to compare default-branch repository\
+        \ inputs with ${AUDIT_SHA}; refusing publication.\"\n  fi\n  exit 1\nfi\n"
+    - name: Read project configuration
+      uses: $/docusaurus/project
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: dependency-audit-dependencies
+        path: ${{ env.NPM_PROJECT }}
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: dependency-audit-report
+        path: ${{ runner.temp }}
+    - name: Open or update the umbrella PR
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        GH_REPO: ${{ github.repository }}
+        BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        PR_BRANCH: maintenance/dependency-audit
+        PR_TITLE: 'Docusaurus maintenance: security audit and dependency upgrades'
+        VALIDATION_PASSED: ${{ inputs.validation-passed }}
+        PR_FOOTER: 'The audit workflow performs the frozen install and production
+          build;
+
+          review their results above before merging. Failed candidates are drafts
+
+          and fail this workflow. Successful reruns leave existing draft status
+
+          for human review. Normal PR checks remain enabled. Post-merge CI and deployment
+
+          use the normal workflows. Nothing is merged automatically.
+
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+          github.run_id }}
+
+          '
+      uses: $/docusaurus/publish
+    timeout-minutes: 15
