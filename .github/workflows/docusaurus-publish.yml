@@ -73,20 +73,8 @@ jobs:
         PR_BRANCH: maintenance/dependency-audit
         PR_TITLE: 'Docusaurus maintenance: security audit and dependency upgrades'
         VALIDATION_PASSED: ${{ inputs.validation-passed }}
-        PR_FOOTER: 'The audit workflow performs the frozen install and production
-          build;
-
-          review their results above before merging. Failed candidates are drafts
-
-          and fail this workflow. Successful reruns leave existing draft status
-
-          for human review. Normal PR checks remain enabled. Post-merge CI and deployment
-
-          use the normal workflows. Nothing is merged automatically.
-
-
-          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
-          github.run_id }}
+        PR_FOOTER: '[Workflow run](${{ github.server_url }}/${{ github.repository
+          }}/actions/runs/${{ github.run_id }})
 
           '
       uses: $/docusaurus/publish

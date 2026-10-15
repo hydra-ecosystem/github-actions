@@ -1099,7 +1099,13 @@ def format_audit(data: dict | str, lock: dict) -> str:
             if isinstance(via, dict):
                 findings.append(
                     f"  - [{via['title']}]({via['url']}); "
-                    f"{via['severity']}; affected range `{via['range']}`."
+                    f"{via['severity']}; "
+                    + (
+                        f"locked `{name}@{versions(lock, via)}`; "
+                        if source == "pnpm"
+                        else ""
+                    )
+                    + f"affected range `{via['range']}`."
                     + (f" {via['fixStatus']}" if via.get("fixStatus") else "")
                 )
             else:
@@ -1159,6 +1165,119 @@ def format_remaining_audit(data: dict | str, lock: dict) -> str:
         "\n".join(lines)
         or f"{source} supplied no direct advisory details; see the full findings below."
     )
+
+
+def format_audit_summary(before: dict | str, after: dict | str, source: str) -> str:
+    if isinstance(after, str):
+        return f"**Security:** {after}"
+    counts = after["metadata"]["vulnerabilities"]
+    total = sum(counts.get(level, 0) for level in SEVERITY_ORDER)
+    label = "registry advisories" if source == "pnpm" else "affected package entries"
+    if total == 1:
+        label = "registry advisory" if source == "pnpm" else "affected package entry"
+    remaining = ", ".join(
+        f"{counts[level]} {level}" for level in SEVERITY_ORDER if counts.get(level)
+    )
+
+    def entries(data):
+        if isinstance(data, str):
+            return []
+        return [
+            (detail["url"] if source == "pnpm" else name, name, detail)
+            for name, vulnerability in data.get("vulnerabilities", {}).items()
+            for detail in (
+                [via for via in vulnerability.get("via", []) if isinstance(via, dict)]
+                if source == "pnpm"
+                else [vulnerability]
+            )
+        ]
+
+    old, current = entries(before), entries(after)
+    old_ids, current_ids = {row[0] for row in old}, {row[0] for row in current}
+    comparable = (
+        isinstance(before, dict)
+        and (
+            bool(old)
+            or not any(
+                before["metadata"]["vulnerabilities"].get(level, 0)
+                for level in SEVERITY_ORDER
+            )
+        )
+        and (bool(current) or total == 0)
+    )
+    resolved_ids = old_ids - current_ids if comparable else set()
+    new_ids = current_ids - old_ids if comparable else set()
+
+    def names(rows, selected):
+        packages = sorted({name for identity, name, _ in rows if identity in selected})
+        return ", ".join(f"`{name}`" for name in packages[:5]) + (
+            f", and {len(packages) - 5} more packages" if len(packages) > 5 else ""
+        )
+
+    resolved = (
+        f"{len(resolved_ids)} ({names(old, resolved_ids)})"
+        if resolved_ids
+        else "none"
+        if comparable
+        else "unconfirmed; initial or detailed audit evidence unavailable"
+    )
+    summary = f"**Resolved:** {resolved}. **Remaining:** {total} {label}" + (
+        f" ({remaining})." if remaining else "."
+    )
+    if new_ids:
+        summary += f" **New:** {len(new_ids)} ({names(current, new_ids)})."
+
+    def reason(detail):
+        status = detail.get("fixStatus", "")
+        if "Blocked by retained override" in status:
+            return "A retained override blocks the published patch."
+        if "no single patch satisfies all" in status:
+            parents = sorted(set(re.findall(r"`([^`]+)` requires `[^`]+`", status)))
+            if len(parents) == 1:
+                return f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint."
+            return "No published patch fits all checked parent constraints."
+        if status.startswith("No published stable patch"):
+            return "No published patch matches the fix range."
+        if status.startswith("No patched version declared"):
+            return "The registry supplies no patched version."
+        if "could not be fully verified" in status:
+            return "Patch compatibility still needs verification."
+        if status.startswith("Published patch:"):
+            return "A published patch is available; selection needs review."
+        candidate = detail.get("fixAvailable")
+        if isinstance(candidate, dict) and candidate.get("isSemVerMajor"):
+            return "The offered fix requires a major upgrade."
+        if source == "npm" and not candidate:
+            return "No fix offered by npm."
+        return "Fix availability or resolution needs manual review."
+
+    groups: dict = {}
+    for identity, name, detail in current:
+        groups.setdefault(name, {})[identity] = detail
+    if groups:
+        summary += "\n\n| Still open | Why |\n| --- | --- |\n"
+        ordered = sorted(
+            groups,
+            key=lambda name: (
+                min(
+                    SEVERITY_ORDER.get(detail["severity"], 5)
+                    for detail in groups[name].values()
+                ),
+                name,
+            ),
+        )
+        for name in ordered[:5]:
+            details = list(groups[name].values())
+            severities = ", ".join(
+                f"{sum(detail['severity'] == level for detail in details)} {level}"
+                for level in SEVERITY_ORDER
+                if any(detail["severity"] == level for detail in details)
+            )
+            reasons = " ".join(dict.fromkeys(reason(detail) for detail in details))
+            summary += f"| `{name}` ({severities}) | {reasons} |\n"
+        if len(ordered) > 5:
+            summary += f"\n{len(ordered) - 5} more affected packages are listed in the audit details."
+    return summary
 
 
 def eligible_version(directory, name, latest, snapshot, notes, deadline):
@@ -1507,60 +1626,67 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
         "parent packages. These are not counts of distinct advisories or "
         "demonstrated exploit paths."
     )
-    return (
-        "# Documentation dependency audit\n\n"
-        f"Project: `{directory}`; package manager: `{package_manager}`\n\n"
-        f"Run: {datetime.now(timezone.utc).isoformat()}\n\n"
-        "This is a best-effort upgrade drive. Remaining vulnerabilities are accepted "
-        "between maintenance reviews; this report does not certify that the project is "
-        "free of vulnerabilities. Review compatibility and validation before merging.\n\n"
-        "## Security findings and fixes\n\n"
-        "### Changes to affected dependencies\n\n"
+    change_sections = []
+    if security_changes:
+        change_sections.append(
+            "## Security findings and fixes\n\n" + "\n".join(security_changes)
+        )
+    other_changes = [line for name, line in changes if name not in affected]
+    if other_changes:
+        change_sections.append(
+            "## Other stable dependency upgrades\n\n" + "\n".join(other_changes)
+        )
+    if locked_updates:
+        change_sections.append(
+            "## Locked dependency changes\n\n" + "\n".join(locked_updates)
+        )
+    report = (
+        f"`{directory}` · `{package_manager}`\n\n"
+        f"- **Changes:** {len(changes)} direct / {len(locked_updates)} locked dependencies.\n"
+        f"- {format_audit_summary(before, after, package_manager)}\n\n"
+        f"## Production build\n\n{build_status}\n\n"
+    )
+    if not initial_audit_available:
+        report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
+    if change_sections:
+        report += (
+            "<details>\n<summary>Dependency changes</summary>\n\n"
+            + "\n\n".join(change_sections)
+            + "\n\n</details>\n\n"
+        )
+    before_audit = format_audit(before, before_lock)
+    after_audit = format_audit(after, after_lock)
+    # Keep the complete final findings once, including npm propagated packages.
+    remaining = (
+        (
+            "Registry advisory counts: "
+            if package_manager == "pnpm"
+            else "Affected package entries: "
+        )
+        + after_audit
+        if isinstance(after, dict) and after.get("vulnerabilities")
+        else format_remaining_audit(after, after_lock)
+    )
+    report += (
+        f"<details>\n<summary>Full before/after {package_manager} audit</summary>\n\n"
+        f"## Remaining advisories\n\n{remaining}\n\n"
         + (
-            "Initial audit evidence was unavailable; any retained security-fix "
-            "changes are unconfirmed and cannot be attributed to affected "
-            "dependencies. The final audit below describes only the final "
-            "dependency state.\n\n"
-            if not initial_audit_available
+            "Before and after findings are unchanged.\n\n"
+            if before_audit == after_audit
+            else f"### Before\n\n{before_audit}\n\n"
+        )
+        + "</details>\n\n"
+        "<details>\n<summary>Audit evidence</summary>\n\n"
+        f"Run: {datetime.now(timezone.utc).isoformat()}\n\n"
+        f"{count_explanation}\n\n"
+        + (
+            "\n".join(f"- {note}" for note in dict.fromkeys(notes)) + "\n\n"
+            if notes
             else ""
         )
-        + (
-            "\n".join(security_changes)
-            or (
-                "Affected dependency changes cannot be confirmed because initial "
-                "audit evidence was unavailable."
-                if not initial_audit_available
-                else "No upgrades to affected dependencies resolved."
-            )
-        )
-        + "\n\n"
-        f"{count_explanation} Fix candidates can require manual migrations.\n\n"
-        "## Other stable dependency upgrades\n\n"
-        + (
-            "\n".join(line for name, line in changes if name not in affected)
-            or "No other direct dependency upgrades resolved."
-        )
-        + "\n\n"
-        "## Locked dependency changes\n\n"
-        + ("\n".join(locked_updates) or "No locked dependency version changes.")
-        + "\n\n"
-        f"## Remaining advisories\n\n{format_remaining_audit(after, after_lock)}\n\n"
-        f"## Production build\n\n{build_status}\n\n"
-        "## Remaining work\n\n"
-        "Review retained overrides and peer constraints, transitive dependency fixes, "
-        "and any major-version migration requirements. Build and installation logs "
-        "are available in the workflow run.\n\n"
-        + (
-            "\n".join(f"- {note}" for note in notes)
-            or "No additional tool errors recorded."
-        )
-        + "\n"
-        f"\n<details>\n<summary>Full before/after {package_manager} audit</summary>\n\n"
-        f"### Before\n\n{format_audit(before, before_lock)}\n\n"
-        f"### After\n\n{format_audit(after, after_lock)}\n\n"
-        "</details>\n"
-        f"\n<details>\n<summary>Candidate dependency files (SHA-256)</summary>\n\n{fingerprints}\n\n</details>\n"
+        + f"### Candidate dependency files (SHA-256)\n\n{fingerprints}\n\n</details>\n"
     )
+    return report
 
 
 def main() -> None:

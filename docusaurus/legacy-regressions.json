@@ -2,7 +2,7 @@
   "tests/test_dependency_audit.py": {
     "source_sha256": "54f474d342ff76ce731cf25a20742697248028b8b4821cf5be3621a41fcca4e7",
     "transferred_path": "docusaurus/tests/test_dependency_audit.py",
-    "transferred_sha256": "07404b1fe4d46b052a1bb79395652a86c98b8fad3e64e7ff1309813131879322"
+    "transferred_sha256": "a5a2c76b7c35719059e2f613a2cc6740913b7dfaa3402a7e36a65287a4664755"
   },
   "tests/test_dependency_audit_invariants.py": {
     "source_sha256": "229cdaa093eac2696febd15e72786886b6c2619ef27e79b4153d4f39f07b3b27",
