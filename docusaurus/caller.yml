@@ -1,0 +1,30 @@
+name: Docusaurus dependency audit
+
+'on':
+  schedule: []  # Rendered from the consumer project configuration.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    permissions:
+      contents: read
+    uses: __CENTRAL_REPOSITORY__/.github/workflows/docusaurus-audit.yml@__CENTRAL_REVISION__
+
+  pull-request:
+    needs: audit
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: __CENTRAL_REPOSITORY__/.github/workflows/docusaurus-publish.yml@__CENTRAL_REVISION__
+    with:
+      validation-passed: ${{ needs.audit.outputs.validation_passed }}
+      app-client-id: ${{ vars.DOCUSAURUS_APP_CLIENT_ID }}
+    secrets:
+      app-private-key: ${{ secrets.DOCUSAURUS_APP_PRIVATE_KEY }}

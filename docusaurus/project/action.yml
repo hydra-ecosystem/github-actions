@@ -1,0 +1,7 @@
+name: Read Docusaurus project
+description: Validate the calling repository's documentation project configuration.
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"

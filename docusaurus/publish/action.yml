@@ -1,0 +1,7 @@
+name: Publish Docusaurus proposal
+description: Open or update the calling repository's dependency proposal.
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: bash "$GITHUB_ACTION_PATH/publish.sh"
