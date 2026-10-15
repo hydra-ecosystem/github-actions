@@ -110,6 +110,96 @@ def test_pnpm_remaining_versions_are_scoped_to_each_advisory(
     }
 
 
+@pytest.mark.parametrize("changed", [False, True], ids=["unchanged", "changed"])
+def test_pnpm_report_keeps_advisory_versions_in_complete_audit(
+    pnpm_project, monkeypatch, changed
+):
+    before_versions = ("1.0.0", "2.0.0")
+    after_versions = ("1.1.0", "2.1.0") if changed else before_versions
+    lockfile = pnpm_project / "pnpm-lock.yaml"
+    lock = yaml.safe_load(lockfile.read_bytes())
+    lock["packages"] = {
+        f"renderer@{version}": {} for version in (*before_versions, *after_versions)
+    }
+    lockfile.write_text(yaml.safe_dump(lock))
+
+    def findings(versions):
+        details = [
+            ("First advisory", "first", versions[0]),
+            ("Second advisory", "second", versions[1]),
+        ]
+        advisories = {
+            key: {
+                "module_name": "renderer",
+                "severity": "high",
+                "title": title,
+                "url": f"https://github.com/advisories/{key}",
+                "vulnerable_versions": "*",
+                "patched_versions": "<0.0.0",
+                "findings": [{"version": version}],
+            }
+            for title, key, version in details
+        }
+        return {
+            "metadata": {"vulnerabilities": {"high": 2, "total": 2}},
+            "advisories": advisories,
+            "package_manager": "pnpm",
+            "vulnerabilities": {
+                "renderer": {
+                    "severity": "high",
+                    "range": "*",
+                    "nodes": [f"renderer@{version}" for _, _, version in details],
+                    "via": [
+                        {
+                            "title": title,
+                            "url": f"https://github.com/advisories/{key}",
+                            "severity": "high",
+                            "range": "*",
+                            "nodes": [f"renderer@{version}"],
+                            "patchedRange": "<0.0.0",
+                        }
+                        for title, key, version in details
+                    ],
+                    "fixAvailable": False,
+                }
+            },
+        }
+
+    audit_results = iter(
+        [findings(before_versions), findings(after_versions), findings(after_versions)]
+    )
+
+    def fake_audit(*args, **kwargs):
+        return next(audit_results)
+
+    module_globals = prepare.__globals__
+    monkeypatch.setitem(module_globals, "audit", fake_audit)
+    monkeypatch.setitem(
+        module_globals,
+        "fix_security",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setitem(
+        module_globals, "describe_pnpm_fixes", lambda *args, **kwargs: None
+    )
+
+    def fake_run(directory, *args, **kwargs):
+        stdout = '"1.0.0"' if args[:1] == ("view",) else ""
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setitem(module_globals, "run", fake_run)
+    report = prepare(pnpm_project)
+
+    for title, before_version, after_version in (
+        ("First advisory", before_versions[0], after_versions[0]),
+        ("Second advisory", before_versions[1], after_versions[1]),
+    ):
+        lines = [line for line in report.splitlines() if f"[{title}]" in line]
+        assert lines
+        assert any(f"locked `renderer@{before_version}`" in line for line in lines)
+        assert any(f"locked `renderer@{after_version}`" in line for line in lines)
+
+
 def fake_npm(monkeypatch, *, install=0, build=0, audit_error=False):
     def invoke(command, *, cwd, **kwargs):
         args = command[4:]
@@ -445,7 +535,7 @@ def test_summary_reports_partial_security_lock_upgrades(
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    summary = prepare(project).split("<details>")[0]
+    summary = prepare(project).split("<summary>Full before/after")[0]
 
     if changed:
         old = ", ".join(sorted({"1.0.0", initial_patched}))
@@ -456,7 +546,7 @@ def test_summary_reports_partial_security_lock_upgrades(
         assert "No upgrades to affected dependencies resolved." not in summary
     else:
         assert "- leaf:" not in summary
-        assert "No upgrades to affected dependencies resolved." in summary
+        assert "## Security findings and fixes" not in summary
 
 
 @pytest.mark.parametrize("package_manager", ["npm", "pnpm"])
@@ -540,7 +630,7 @@ def test_summary_reports_path_changes_with_unchanged_version_sets(
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    summary = prepare(project).split("<details>")[0]
+    summary = prepare(project).split("<summary>Full before/after")[0]
     if changed:
         assert (
             "leaf: dependency paths changed; installed versions `1.0.0, 2.0.0`"
@@ -550,7 +640,7 @@ def test_summary_reports_path_changes_with_unchanged_version_sets(
         assert "No upgrades to affected dependencies resolved." not in summary
     else:
         assert "- leaf:" not in summary
-        assert "No upgrades to affected dependencies resolved." in summary
+        assert "## Security findings and fixes" not in summary
 
 
 @pytest.mark.parametrize("package_manager", ["npm", "pnpm"])
@@ -659,12 +749,11 @@ def test_summary_uses_final_manifest_and_stable_phase_security_findings(
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    summary = prepare(project).split("<details>")[0]
-    security, other = summary.split("## Other stable dependency upgrades")
-    other = other.split("## Locked dependency changes")[0]
+    summary = prepare(project).split("<summary>Full before/after")[0]
+    security = summary.split("## Locked dependency changes")[0]
     final = "3.0.0" if patched else "2.0.0"
     assert f"- renderer: `1.0.0` → `{final}`;" in security
-    assert "- renderer:" not in other
+    assert "## Other stable dependency upgrades" not in summary
     assert (
         "still reported" in security
         if not patched
@@ -720,7 +809,7 @@ def test_multiple_stable_candidates_preserve_security_snapshot(
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    summary = prepare(pnpm_project).split("<details>")[0]
+    summary = prepare(pnpm_project).split("<summary>Full before/after")[0]
     result = json.loads(manifest_path.read_text())
     assert result["dependencies"]["renderer"] == "2.0.0"
     assert result[section]["second"] == "2.0.0"
@@ -763,14 +852,146 @@ def test_summary_precedes_collapsed_full_audit(npm_project, monkeypatch):
     report = prepare(npm_project)
     summary, details = report.split("<details>", 1)
 
-    assert "renderer: `1.0.0` → `2.0.0`" in summary
-    assert "## Remaining advisories" in summary
+    assert "**Changes:** 1 direct / 0 locked dependencies." in summary
+    assert "**Resolved:** none. **Remaining:** 0 affected package entries." in summary
     assert "## Production build\n\nPassed." in summary
-    assert summary.index("Security findings") < summary.index("Other stable")
+    assert len(summary) < 600
+    assert "renderer: `1.0.0` → `2.0.0`" in details
+    assert "No upgrades to affected dependencies" not in report
+    assert "No additional tool errors recorded" not in report
+    assert "This is a best-effort" not in report
     assert "### Before" not in summary and "### After" not in summary
-    assert "### Before" in details and "### After" in details
+    assert "Before and after findings are unchanged." in details
     assert details.endswith("</details>\n")
     assert not (npm_project / "dependency-audit.md").exists()
+
+
+@pytest.mark.parametrize(
+    "package_manager, label",
+    [("pnpm", "registry advisories"), ("npm", "affected package entries")],
+)
+def test_compact_security_summary_keeps_severity_and_count_meaning(
+    package_manager, label
+):
+    summarize = audit_module["format_audit_summary"]
+    before = {"metadata": {"vulnerabilities": {"critical": 3, "high": 2, "total": 5}}}
+    after = {
+        "metadata": {
+            "vulnerabilities": {"critical": 2, "high": 1, "moderate": 1, "total": 4}
+        }
+    }
+    result = summarize(before, after, package_manager)
+    assert f"**Remaining:** 4 {label} (2 critical, 1 high, 1 moderate)." in result
+    assert "**Resolved:** unconfirmed" in result
+    assert "Audit unavailable" in summarize(
+        before, "Audit unavailable (exit 1).", package_manager
+    )
+
+
+def test_unchanged_findings_are_rendered_once(npm_project, monkeypatch):
+    fake_npm(monkeypatch)
+    report = prepare(npm_project)
+    assert report.count("No known vulnerabilities reported by npm.") == 1
+    assert report.count("<details>") == report.count("</details>")
+
+
+@pytest.fixture
+def security_findings():
+    def make(rows):
+        data = {"metadata": {"vulnerabilities": {}}, "vulnerabilities": {}}
+        counts = data["metadata"]["vulnerabilities"]
+        for name, identity, severity, status in rows:
+            counts[severity] = counts.get(severity, 0) + 1
+            package = data["vulnerabilities"].setdefault(name, {"via": []})
+            package["via"].append(
+                {
+                    "url": f"https://github.com/advisories/{identity}",
+                    "severity": severity,
+                    "fixStatus": status,
+                }
+            )
+        return data
+
+    return make
+
+
+def test_security_outcomes_distinguish_resolved_and_new_with_equal_counts(
+    security_findings,
+):
+    before = security_findings([("old-package", "old", "high", "")])
+    after = security_findings([("new-package", "new", "high", "")])
+    result = audit_module["format_audit_summary"](before, after, "pnpm")
+    assert "**Resolved:** 1 (`old-package`)" in result
+    assert "**New:** 1 (`new-package`)" in result
+    assert "**Remaining:** 1 registry advisory" in result
+
+
+def test_security_outcomes_keep_shared_advisory_open_after_path_change(
+    security_findings,
+):
+    before = security_findings([("old-path", "same", "critical", "")])
+    after = security_findings([("new-path", "same", "critical", "")])
+    result = audit_module["format_audit_summary"](before, after, "pnpm")
+    assert "**Resolved:** none." in result
+    assert "**New:**" not in result
+
+
+def test_security_outcomes_report_partial_resolution_for_one_package(security_findings):
+    first = ("leaf", "first", "high", "")
+    second = ("leaf", "second", "high", "")
+    result = audit_module["format_audit_summary"](
+        security_findings([first, second]), security_findings([first]), "pnpm"
+    )
+    assert "**Resolved:** 1 (`leaf`)" in result
+    assert "**Remaining:** 1 registry advisory" in result
+    assert "| `leaf` (1 high) |" in result
+
+
+def test_security_outcomes_keep_missing_initial_evidence_unconfirmed(security_findings):
+    result = audit_module["format_audit_summary"](
+        "Audit unavailable", security_findings([]), "pnpm"
+    )
+    assert "**Resolved:** unconfirmed" in result
+    assert "**Resolved:** none" not in result
+
+
+def test_security_outcomes_summarize_concrete_blockers(security_findings):
+    constraints = "Published patches exist, but no single patch satisfies all checked parent constraints. Blocked by existing parent constraints: `@docusaurus/core@3.10.2` requires `tinypool ^1.0.2`."
+    before = security_findings(
+        [
+            ("tinypool", "first", "critical", constraints),
+            ("tinypool", "second", "critical", constraints),
+            (
+                "braces",
+                "third",
+                "high",
+                "No published stable patch matches registry range `>=3.0.4`.",
+            ),
+        ]
+    )
+    result = audit_module["format_audit_summary"](before, before, "pnpm")
+    assert (
+        "| `tinypool` (2 critical) | Blocked by the `@docusaurus/core` version constraint. |"
+        in result
+    )
+    assert "No published patch matches the fix range." in result
+    assert result.count("| `tinypool`") == 1
+
+
+def test_security_outcomes_bound_the_visible_package_list(security_findings):
+    data = security_findings([(f"package-{i}", str(i), "high", "") for i in range(7)])
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
+    assert "**Remaining:** 7 registry advisories" in result
+    assert "2 more affected packages are listed in the audit details." in result
+    assert result.count("| `package-") == 5
+
+
+def test_publisher_footer_is_only_a_run_link():
+    workflow = load_workflow()
+    footer = workflow["jobs"]["pull-request"]["steps"][-1]["env"]["PR_FOOTER"]
+    assert footer.strip() == (
+        "[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+    )
 
 
 @pytest.mark.parametrize("install, build", [(1, 0), (0, 1)])
@@ -827,7 +1048,8 @@ def test_summary_marks_security_fix_unconfirmed_when_initial_audit_is_unavailabl
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    summary = prepare(pnpm_project).split("<details>")[0]
+    report = prepare(pnpm_project)
+    summary = report.split("<details>")[0]
 
     assert "Initial audit evidence was unavailable" in summary
     assert "retained security-fix changes are unconfirmed" in summary
@@ -835,7 +1057,7 @@ def test_summary_marks_security_fix_unconfirmed_when_initial_audit_is_unavailabl
     assert "No additional tool errors recorded." not in summary
     assert (
         "## Remaining advisories\n\nNo known vulnerabilities reported by pnpm."
-        in summary
+        in report
     )
 
 
