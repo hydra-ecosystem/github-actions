@@ -4,6 +4,18 @@ Audit dependencies, propose upgrades, and build the website before reviewing
 one maintenance PR. Your repository keeps its project pins, build script,
 schedule, and deployment. Works with organization-owned and personal repositories.
 
+## Why use this workflow?
+
+Review **one maintenance PR per website** that combines security fixes and
+routine dependency upgrades. Reruns update that PR, with a frozen-install check,
+production build, and a report of resolved advisories, pin decisions, and
+blocked fixes. Your chosen schedule controls when routine maintenance arrives.
+
+[Dependabot can also group updates](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/customizing-dependabot-security-prs).
+This workflow packages the updates, Docusaurus build evidence, and security
+decisions into one maintenance review. It targets the selected documentation
+project; use other dependency tooling for the rest of your repository.
+
 ## Set it up
 
 The examples below use `website` as the documentation directory. Replace that
