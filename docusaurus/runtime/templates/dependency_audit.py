@@ -1208,7 +1208,7 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     resolved_ids = old_ids - current_ids if comparable else set()
     new_ids = current_ids - old_ids if comparable else set()
 
-    summary = f"{'🔴' if total else '🟢'} **Remaining:** {total} {label}" + (
+    summary = f"After merging: **{total} {label} remaining**" + (
         f" ({remaining})." if remaining else "."
     )
     if not comparable:
@@ -1244,6 +1244,12 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
         if source == "npm" and not candidate:
             return "No fix offered by npm."
         return "Fix availability or resolution needs manual review."
+
+    def needs_review(action):
+        return any(
+            word in action.lower()
+            for word in ("review", "verification", "major upgrade")
+        )
 
     resolved_groups: dict = {}
     for identity, name, detail in old:
@@ -1285,7 +1291,9 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
         if name in groups:
             action += " Other findings for this package remain below."
         summary += f"| 🟢\u00a0Resolved | `{name}` ({severities}) | {action} |\n"
-    for name in pinned + outcome_packages + others[:5]:
+    visible = set(pinned + outcome_packages + others[:5])
+    review_count = blocked_count = 0
+    for name in pinned + outcome_packages + others:
         details = list(groups[name].values())
         severities = severity_counts(details)
         statuses = [detail.get("fixStatus", "") for detail in details]
@@ -1328,14 +1336,20 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             badge = "🟠\u00a0Review"
         else:
             action = " ".join(dict.fromkeys(reason(detail) for detail in details))
-            badge = (
-                "🟠\u00a0Review"
-                if any(
-                    word in action.lower()
-                    for word in ("review", "verification", "major upgrade")
-                )
-                else "🔴\u00a0Blocked"
-            )
+            badge = "🟠\u00a0Review" if needs_review(action) else "🔴\u00a0Blocked"
+        unpinned_reasons = [
+            reason(detail)
+            for detail in details
+            if "Blocked by retained override" not in detail.get("fixStatus", "")
+        ]
+        if any(not needs_review(action) for action in unpinned_reasons) or any(
+            "no single patch satisfies all" in status for status in statuses
+        ):
+            blocked_count += 1
+        if name not in pinned and any(
+            needs_review(action) for action in unpinned_reasons
+        ):
+            review_count += 1
         new_count = len(new_ids.intersection(groups[name]))
         if new_count:
             unit = "advisory" if source == "pnpm" else "affected package entry"
@@ -1343,12 +1357,44 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
                 unit = "advisories" if source == "pnpm" else "affected package entries"
             action = f"{new_count} new {unit}. " + action
             badge = "🔴\u00a0New"
-        summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
+        if name in visible:
+            summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
     if len(others) > 5:
         extra = len(others) - 5
         noun = "package is" if extra == 1 else "packages are"
         summary += f"\n{extra} more affected {noun} listed in the audit details."
-    return summary
+
+    def finding_label(number):
+        if source == "pnpm":
+            return "advisory" if number == 1 else "advisories"
+        return "affected package entry" if number == 1 else "affected package entries"
+
+    if comparable:
+        headline = (
+            f"🟢 **Fixes {len(resolved_ids)} {finding_label(len(resolved_ids))}**"
+        )
+        if not resolved_ids:
+            headline = (
+                f"⚪ **No {finding_label(0)} fixed**"
+                if total
+                else f"🟢 **No {finding_label(0)} reported**"
+            )
+    else:
+        headline = "🟠 **Fixes unconfirmed**"
+    if new_ids:
+        headline += f" · 🔴 **{len(new_ids)} new {finding_label(len(new_ids))}**"
+    if pinned:
+        pins = "pin needs" if len(pinned) == 1 else "pins need"
+        headline += f" · 🟠 **{len(pinned)} {pins} your review**"
+    if review_count:
+        packages = "package needs" if review_count == 1 else "packages need"
+        headline += f" · 🟠 **{review_count} {packages} your review**"
+    if blocked_count:
+        packages = "package" if blocked_count == 1 else "packages"
+        headline += f" · 🔴 **Fixes blocked for {blocked_count} {packages}**"
+    if total and not groups:
+        headline += " · 🟠 **Blockers unconfirmed**"
+    return headline + "\n\n" + summary
 
 
 def eligible_version(directory, name, latest, snapshot, notes, deadline):
@@ -1711,10 +1757,27 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
         change_sections.append(
             "## Locked dependency changes\n\n" + "\n".join(locked_updates)
         )
+    if isinstance(before, dict) and isinstance(after, dict):
+        security_packages = affected | set(after.get("vulnerabilities", {}))
+        maintenance_updates = [
+            line
+            for line in locked_updates
+            if line[2:].split(": ", 1)[0] not in security_packages
+        ]
+        updates = "update" if len(maintenance_updates) == 1 else "updates"
+        maintenance = (
+            f"**Maintenance:** {len(maintenance_updates)} additional package {updates} "
+            f"({len(locked_updates)} total)."
+        )
+    else:
+        maintenance = (
+            f"**Dependency updates:** {len(locked_updates)} packages; "
+            "security classification unconfirmed."
+        )
     report = (
         f"`{directory}` · `{package_manager}`\n\n"
-        f"🟢 **Changes:** {len(changes)} direct / {len(locked_updates)} locked dependencies.\n\n"
         f"{format_audit_summary(before, after, package_manager)}\n\n"
+        f"{maintenance}\n\n"
         f"## Production build\n\n{build_status} {'✅' if build_status == 'Passed.' else '❌'}\n\n"
     )
     if not initial_audit_available:
