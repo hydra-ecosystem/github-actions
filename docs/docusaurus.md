@@ -1,36 +1,59 @@
 # Docusaurus dependency maintenance
 
-Audit dependencies, propose upgrades, and build the website before reviewing
-one maintenance PR. Your repository keeps its project pins, build script,
-schedule, and deployment. Works with organization-owned and personal repositories.
+Add dependency maintenance to an existing Docusaurus website. Each run attempts
+security fixes, optionally proposes routine upgrades, and validates the result
+with a frozen install and your website's build script. Reruns update one
+maintenance PR for the website.
+
+Your repository keeps its dependency pins, build checks, schedule, and deployment
+workflow. The shared workflows support organization-owned and personal
+repositories on GitHub.com.
 
 ## Why use this workflow?
 
-Review **one maintenance PR per website** that combines security fixes and
-routine dependency upgrades. Reruns update that PR, with a frozen-install check,
-production build, and a report of resolved advisories, pin decisions, and
-blocked fixes. Your chosen schedule controls when routine maintenance arrives.
+Review security fixes, routine upgrades, build evidence, and blocked fixes in one
+PR. Choose security-only maintenance or limit routine direct upgrades to patch,
+minor, or major versions. [Dependabot also supports grouped updates](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/customizing-dependabot-security-prs);
+this workflow adds the selected website's build and security-fix report to that
+review. Use other dependency tooling for the rest of your repository.
 
-[Dependabot can also group updates](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/customizing-dependabot-security-prs).
-This workflow packages the updates, Docusaurus build evidence, and security
-decisions into one maintenance review. It targets the selected documentation
-project; use other dependency tooling for the rest of your repository.
+## Before you start
+
+Check the website project, not just the repository root:
+
+| Requirement | What to check |
+| --- | --- |
+| Docusaurus | The website's `package.json` declares `@docusaurus/core`. |
+| Standalone pnpm project | The website owns `package.json`, `pnpm-lock.yaml` version 9.0, and `pnpm-workspace.yaml` with one `.` package. A multi-package workspace is not supported. |
+| Node | A supported version is declared in `.nvmrc` or `.node-version`: Node 22, at least 22.13.0, or Node 24. |
+| pnpm | The website's `packageManager` pins exactly 11.20.0 or 11.21.0. Corepack is available locally. |
+| Build | An existing package script runs all required checks and the production build. The default script name is `build`. |
+
+If the website needs an npm/Yarn, pnpm-major, or Node migration, complete and
+verify that change before installing this workflow. The configuration selects
+and checks tools; it does not migrate the website.
 
 ## Set it up
 
-The examples below use `website` as the documentation directory. Replace that
-value if your site lives elsewhere.
+The steps below use `website` as the project directory. Change that value if your
+site lives elsewhere. Preserve existing supported versions and project settings
+when merging the examples.
 
-### 1. Prepare the website
+### 1. Verify the website locally
 
-You need a Docusaurus project with its own pnpm lockfile and a package script
-that runs all required checks and build steps. Choose a [supported toolchain](#toolchain-selection) already used by your project.
-The script defaults to `build`; select another existing script with
-[`buildScript`](#build-and-maintenance-options).
-Node 22 or 24 and pnpm 11.20.0 or 11.21.0 are the initial tested combinations.
-Node 22 must be at least 22.13.0.
+The default configuration follows the website's Node and pnpm declarations.
+For a project using Node 24, `website/.nvmrc` can contain:
 
-Keep an exact supported pnpm version in `website/package.json`, for example:
+```text
+24
+```
+
+Keep an existing supported `.nvmrc` or `.node-version` instead of adding a
+conflicting declaration. A declaration in a parent directory also works; see
+[toolchain selection](#toolchain-selection).
+
+Merge an exact pnpm pin into `website/package.json`, keeping its existing scripts
+and dependencies. For example:
 
 ```json
 {
@@ -38,10 +61,8 @@ Keep an exact supported pnpm version in `website/package.json`, for example:
 }
 ```
 
-Merge the following settings into `website/pnpm-workspace.yaml`. Preserve your
-existing overrides and exact-version release-age exceptions. This component
-expects a standalone website pnpm project with one `.` package, rather than a
-multi-package pnpm workspace.
+Merge the baseline below into `website/pnpm-workspace.yaml`. Keep your existing
+overrides, exact-version release-age exceptions, and dependency-script approvals:
 
 ```yaml
 packages:
@@ -56,41 +77,56 @@ allowBuilds:
   fsevents: false
 ```
 
-These settings apply a ten-day release delay and require explicit decisions
-about dependency install scripts. Review any additional script approvals your
-site needs; keep its existing approved settings.
+This applies a ten-day release delay and requires explicit decisions about
+additional dependency install scripts. Review the approvals your own site needs.
 
-From the website directory, update the lockfile and verify your normal build:
+Activate the declared Node version with your normal version manager. From the
+website directory, confirm the tools, refresh the lockfile after any
+settings changes, then verify a frozen install and build:
 
 ```sh
 cd website
+node --version
+corepack pnpm --version
 corepack pnpm install
+corepack pnpm install --frozen-lockfile
 corepack pnpm run build
 ```
 
-Commit the working manifest, `pnpm-lock.yaml`, and workspace settings. If you
-use npm or Yarn today, migrate and verify the website before adding this workflow.
+If your script is named `docs:build`, run `corepack pnpm run docs:build` instead
+and select that name in the next step. Put prerequisites and checks in that
+package script. Commit the working declarations, manifest, lockfile, and workspace
+settings along with the setup files below.
 
 ### 2. Add the project configuration
 
-Create `.github/docusaurus.json` in your repository:
+Create `.github/docusaurus.json` at the repository root:
 
 ```json
 {
   "directory": "website",
   "toolchain": {},
+  "buildScript": "build",
+  "maintenance": {
+    "mode": "security-and-maintenance",
+    "upgradeScope": "major"
+  },
   "schedule": ["0 2 30 1 *"]
 }
 ```
 
-This example uses the default cadence: January 30 at 02:00 UTC. You can also run
-the audit manually at any time. To use another cadence, change the cron expression
-here **and** in the workflow below. Editing this JSON file alone does not change
-GitHub's schedule.
+`"toolchain": {}` follows the project declarations verified in step 1. The build
+and maintenance values shown are the defaults; change them using the
+[options reference](#build-and-maintenance-options).
+
+The example runs once a year, on January 30 at 02:00 UTC. Manual runs are also
+available. To use another cadence, change the cron expression **both here and in
+the caller workflow below**. GitHub reads scheduled triggers from the workflow
+file; changing this JSON alone does not reschedule the audit.
 
 ### 3. Add the caller workflow
 
-Create `.github/workflows/dependency-audit.yml`:
+Create `.github/workflows/dependency-audit.yml` at the repository root:
 
 ```yaml
 name: Docusaurus dependency audit
@@ -111,14 +147,14 @@ jobs:
   audit:
     permissions:
       contents: read
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@REVIEWED_FULL_COMMIT_SHA
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@9135994afb455c04c4010b3ee98742dce6e6c9af
 
   pull-request:
     needs: audit
     permissions:
       contents: write
       pull-requests: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@REVIEWED_FULL_COMMIT_SHA
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@9135994afb455c04c4010b3ee98742dce6e6c9af
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}
       app-client-id: ${{ vars.DOCUSAURUS_APP_CLIENT_ID }}
@@ -126,51 +162,55 @@ jobs:
       app-private-key: ${{ secrets.DOCUSAURUS_APP_PRIVATE_KEY }}
 ```
 
-Replace both `REVIEWED_FULL_COMMIT_SHA` placeholders with the same reviewed
-40-character commit SHA that contains integration contract version 3.
-Both calls use the same full commit SHA, so the implementation stays fixed until
-you choose to update it. The audit job has read access. Only the publisher has
-permission to push the dependency branch and open a PR.
+Both calls pin [the same merged revision](https://github.com/hydra-ecosystem/github-actions/commit/9135994afb455c04c4010b3ee98742dce6e6c9af),
+which contains integration contract version 3 and its toolchain and maintenance
+options. The implementation stays fixed until you update both references.
 
-The App variable and secret can remain unset for the initial setup. The workflow
-then publishes with the repository's built-in `GITHUB_TOKEN`.
+The audit job has read access. Only the publisher can push the maintenance branch
+and open its PR. For the initial setup, leave the App variable and secret unset;
+the publisher uses the repository's built-in `GITHUB_TOKEN`.
 
-### 4. Allow PR creation
+### 4. Allow the workflow to open PRs
 
-For the built-in token, open **Settings → Actions → General → Workflow permissions**
-and enable **Allow GitHub Actions to create and approve pull requests**. You can
-keep the default token permissions read-only; the caller grants the publisher
-the two write permissions it needs. This workflow does not approve or merge PRs.
+In the consumer repository, open **Settings → Actions → General → Workflow
+permissions**. Enable **Allow GitHub Actions to create and approve pull requests**.
+You can keep the default token permissions read-only; the caller grants the
+publisher its required write permissions. The workflow does not approve or merge
+maintenance PRs.
 
-If your repository restricts allowed actions, permit the shared workflows in
+If the repository restricts allowed actions, permit the shared workflows in
 `hydra-ecosystem/github-actions` and the GitHub-owned `actions/*` dependencies
-they use. Organization policy can restrict these repository settings. See
+they use. An organization policy can override repository settings. See
 [GitHub's Actions settings guide](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
 
-### 5. Run the first audit
+### 5. Run and inspect the first audit
 
-Merge the setup files into your default branch. Open **Actions → Docusaurus
-dependency audit → Run workflow** and select that branch.
+Merge the website preparation and setup files into your default branch. Open
+**Actions → Docusaurus dependency audit → Run workflow** and select that branch.
+Manual dispatch from another branch is rejected.
 
-The run resolves dependencies, performs a frozen install, builds your site, and
-publishes the report. Expect one of these results:
-
-| Result | What to inspect |
+| Result | What to do |
 | --- | --- |
-| Changes pass validation | An open maintenance PR with the proposed dependency changes. |
-| Install or build fails | A draft PR and a failed run, with the failure recorded. |
-| No dependency changes | The new report in the run summary and artifacts; an existing PR stays unchanged. |
+| Dependency changes pass validation | Review the maintenance PR and its report before merging. |
+| Frozen install or build fails | Inspect the report and logs. The workflow fails and publishes a draft proposal when it can retain a candidate. |
+| No dependency changes | Read the new report in the run summary or artifacts. An existing PR and its report stay unchanged. |
+| Configuration or toolchain is rejected | Fix the diagnostic before rerunning; dependency changes have not started. |
 
-The PR is called **Docusaurus maintenance: security audit and dependency
-upgrades**. Reruns reuse the same maintenance branch and open PR. A successful
-rerun leaves an existing draft for human review. Remaining advisories do not
-mean the build failed; the report explains what remains blocked. A passing build
-does not establish that every dependency vulnerability is resolved.
+The PR is titled **Docusaurus maintenance: security audit and dependency
+upgrades**. Reruns reuse the same branch and open PR. A successful rerun leaves
+an existing draft for human review. Remaining advisories do not by themselves
+mean the build failed; inspect the reported blockers. A passing build does not
+establish that all vulnerabilities are resolved.
+
+With the built-in token, PR workflows triggered by opening or updating the PR
+require approval. A user with write access can select **Approve workflows to
+run** in the PR. See [GitHub's token behavior](https://docs.github.com/en/actions/concepts/security/github_token).
+To avoid that token-specific prompt, use the optional App below.
 
 ## Toolchain selection
 
-New installations include `"toolchain": {}` in `.github/docusaurus.json`.
-Both omitted settings default to **follow project**:
+With a `toolchain` object, omitted Node and pnpm settings default to **follow
+project**. These explicit values have the same effect as `"toolchain": {}`:
 
 ```json
 {
@@ -179,28 +219,23 @@ Both omitted settings default to **follow project**:
 }
 ```
 
-| Setting | Project declaration | Supported values |
+| Setting | Declaration used | Supported values |
 | --- | --- | --- |
-| Node | Nearest `.nvmrc` or `.node-version`, starting in the website directory and stopping at the repository root | Major 22 or 24, or an exact stable version in those majors; minimum 22.13.0 |
-| pnpm | Website `package.json` → `packageManager` | Exact 11.20.0 or 11.21.0, including an optional Corepack integrity suffix |
+| Node | Nearest `.nvmrc` or `.node-version`, from the website directory up to the repository root | Major 22 or 24, or an exact stable release in those majors; minimum 22.13.0 |
+| pnpm | Website `package.json` → `packageManager` | Exact 11.20.0 or 11.21.0, with an optional Corepack integrity suffix |
 
-Both pnpm versions are tested with both Node majors. The audit requires pnpm
-lockfile version 9.0. It checks the actual installed versions and website
-`engines.node` before changing dependencies.
+Both pnpm versions are tested with both Node majors. The workflow verifies the
+installed tools, website `engines.node`, and pnpm lockfile version 9.0 before
+changing dependencies.
 
-A website declaration takes precedence over declarations in its parent directories.
+A website Node declaration takes precedence over one in a parent directory.
 If `.nvmrc` and `.node-version` are both present in the selected directory, they
-must agree. A major and an exact version within that major agree; the exact pin
-wins. Different majors or different exact versions stop the run.
+must agree. A major and an exact release within it agree; the exact pin wins.
+Different majors or exact releases stop the run. Use numeric declarations;
+symbolic aliases such as `lts/*` do not select a runtime. Missing declarations
+stop with a diagnostic.
 
-Use numeric majors or exact stable versions in these files. Symbolic aliases
-such as `lts/*` and broad engine ranges do not select a runtime. Missing runtime
-declarations stop with instructions; the workflow does not guess or fall back
-to a different version. Engine checks accept stable numeric comparisons,
-major/minor families, `^`, `~`, wildcards and `||`; unsupported range syntax
-stops with a diagnostic.
-
-To require explicit values, set either setting independently:
+To require specific supported versions, set either option independently:
 
 ```json
 {
@@ -209,114 +244,102 @@ To require explicit values, set either setting independently:
 }
 ```
 
-An explicit value is a requirement. It must agree with the project's declarations
-and the installed tools. Node `24` requires that major; an exact Node value
-requires that exact release. pnpm requires an exact version. Conflicts fail
-before dependency resolution; the action does not rewrite declarations to match.
+Explicit values must agree with the project declarations and installed tools.
+The workflow does not rewrite declarations to resolve a conflict. Keep website
+build/deployment CI on the same declaration, for example with
+`node-version-file: website/.nvmrc` in `actions/setup-node` and the project's
+pinned pnpm through Corepack.
 
-Before enabling or changing these settings:
-
-1. Align the website's Node declaration and `engines.node`, if present.
-2. Align `packageManager` with the selected supported pnpm version.
-3. Make website build/deployment CI use the same declaration. For example, use
-   `node-version-file: website/.nvmrc` with `actions/setup-node`, then run the
-   project's pinned pnpm through Corepack. Keep one source for the Node pin.
-4. Run a frozen install and the normal production build with those tools.
-
-Changing a setting does not perform a migration. npm/Yarn, pnpm major changes,
-incompatible lockfiles and other tool versions require a separately verified
-migration before adoption.
-
-Existing configurations **without a `toolchain` object** keep the legacy Node 24
-and pnpm 11.21.0 selection. Updating the shared SHA alone does not opt them into
-project-derived versions. To opt in, first review and align the declarations and
-website CI, pin a contract-version-2 revision, then add `"toolchain": {}`.
+Existing configurations **without a `toolchain` object** retain the legacy
+Node 24 and pnpm 11.21.0 selection. To opt in to project selection, align the
+project declarations and website CI, verify a frozen install and build, pin
+version 2 or later of the integration contract, then add `"toolchain": {}`.
+The merged revision in step 3 supports both toolchain selection and the version 3
+build and maintenance options.
 
 ## Build and maintenance options
 
-Set these options in `.github/docusaurus.json`. They are available starting with
-integration contract version 3. Each omitted option uses the default below:
-
-```json
-{
-  "directory": "website",
-  "buildScript": "build",
-  "maintenance": {
-    "mode": "security-and-maintenance",
-    "upgradeScope": "major"
-  }
-}
-```
+These options live in `.github/docusaurus.json` and require integration contract
+version 3 or later. Each omitted value uses the default shown in step 2.
 
 | Setting | Values and behavior |
 | --- | --- |
-| `buildScript` | An existing, nonempty script in the selected website's `package.json`. For example, `"docs:build"` runs `pnpm run docs:build` in that website. |
-| `maintenance.mode` | `"security-and-maintenance"` attempts security fixes followed by routine upgrades. `"security-only"` attempts security fixes and skips routine version lookups and upgrade resolution. |
-| `maintenance.upgradeScope` | The maximum routine **direct dependency** change: `"patch"` stays within the current major and minor; `"minor"` includes patches within the current major; `"major"` permits all stable levels. |
+| `buildScript` | Default `"build"`. Names an existing, nonempty script in the selected website's `package.json`. For example, `"docs:build"` runs `pnpm run docs:build` in that website. |
+| `maintenance.mode` | Default `"security-and-maintenance"`: attempt security fixes, then routine upgrades. `"security-only"` skips routine version lookups and upgrade resolution. |
+| `maintenance.upgradeScope` | Default `"major"`. Maximum routine **direct dependency** change: `"patch"` stays within the current major and minor; `"minor"` includes patches within the current major; `"major"` permits all stable levels. |
 
-Put prerequisites and checks in the selected package script. The configuration
-does not accept shell commands or arbitrary hooks. Script names must start with
-an ASCII letter or digit and contain only letters, digits, `:`, `_`, `.`, or `-`.
-Invalid options or a missing selected script stop the run before dependency changes.
+The script name starts with an ASCII letter or digit and contains only letters,
+digits, `:`, `_`, `.`, or `-`. Put commands in the package script, not this setting.
+There are no arbitrary shell hooks. Invalid options or a missing selected script
+stop the run before dependency changes.
 
-Routine scope uses the resolved direct dependency versions after the initial
-security fix attempt. It restricts candidate selection and checks the actual
-resolved proposal. If resolution crosses the limit, the workflow restores the
-accepted security proposal and reports the rejected routine upgrade. Changes to
-transitive dependencies can accompany an allowed direct upgrade. An unverifiable
-direct version is retained for manual review when scope is restricted.
+Routine scope uses the resolved direct versions after the initial security fix
+attempt. It limits candidate selection and checks the actual resolved proposal.
+If resolution crosses the limit or changes an unverifiable direct reference, the
+workflow restores the accepted security proposal and reports the rejection.
+Transitive changes can accompany an allowed direct upgrade.
 
 Security fixes use the existing compatibility rules independently of routine
 scope. For example, `"patch"` does not block a compatible security fix that needs
 a minor update. Security resolution can change related dependencies. Unresolved
-or unconfirmed findings remain in the report. Both modes retain the frozen install,
-selected build script, release-age policy, project pins and publication checks.
+or unconfirmed findings stay visible. Both modes retain the release-age policy,
+project pins, frozen installation, selected build script, and publication checks.
 
-Existing configurations without these options keep the `build` script and
-security fixes plus routine upgrades at all stable levels. Selecting these options
-does not require new workflow inputs or a separate maintenance PR.
+Existing configurations without these options retain the `build` script and
+security fixes plus routine upgrades at all stable levels. No additional caller
+inputs or separate PR are needed for these options.
 
 ## Optional: publish with a GitHub App
 
-GitHub may require approval before running checks on PRs created with
-`GITHUB_TOKEN`. To let those checks start without that workflow-token prompt,
-configure an App for publication:
+Use an App if generated PR workflows should start without the built-in token's
+approval prompt:
 
-1. Create an App with repository **Contents: read/write** and **Pull requests:
+1. Create a GitHub App with repository **Contents: read/write** and **Pull requests:
    read/write** permissions. Metadata read access is implicit. Webhooks and user
    authorization are not required.
-2. Install it on each repository it will maintain, including personal repositories.
+2. Install it on each consumer repository you want it to maintain.
 3. Set the repository Actions variable `DOCUSAURUS_APP_CLIENT_ID` to its Client ID.
 4. Set the repository Actions secret `DOCUSAURUS_APP_PRIVATE_KEY` to its PEM key.
 
-The caller above already supplies these values. The publisher creates a token
-limited to the calling repository and revokes it when the job finishes. The
-dependency installation and build job never receive the key or publisher token.
-An App authentication failure stops publication; it does not fall back to the
-built-in token. Other repository approval policies still apply.
+The caller in step 3 already supplies these values. The publisher creates a token
+limited to that repository and revokes it when the job finishes. The audit and
+build job never receive the App key or publisher token. App authentication failure
+stops publication rather than falling back to the built-in token. Other repository
+approval policies still apply.
 
 ## Update an existing installation
 
-Review the proposed shared revision, compare its
+Review the proposed shared revision. Compare its
 [`docusaurus/contract.json`](../docusaurus/contract.json) and
-[`caller.yml`](../docusaurus/caller.yml) with your installed revision, then update
-**both** caller SHA references together. Check whether the toolchain requirements
-changed. If the integration version changed, apply the corresponding caller and
-configuration changes too.
+[`caller.yml`](../docusaurus/caller.yml) with the installed revision, then update
+**both caller SHA references together**. Apply any required configuration changes
+before running the new revision. A shared-repository update never moves consumer
+pins automatically.
 
-An update does not need a new integration version when the caller interface is
-unchanged. After merging an update, run a manual audit and inspect the result.
-Shared code changes do not update your repository's pinned references automatically.
+After merging the update into the consumer's default branch, run a manual audit
+and inspect its report and PR. Changing a toolchain setting is not a migration;
+verify any tool or lockfile migration separately first.
+
+## Troubleshooting
+
+| Symptom | Next step |
+| --- | --- |
+| Missing Node declaration or conflicting versions | Check `.nvmrc` / `.node-version`, website `packageManager` and `engines.node`, the `toolchain` options, and website CI. Use supported versions that agree. |
+| Missing build script | Set `buildScript` to an existing nonempty website script, then run that script locally. |
+| pnpm rejects workspace policy or lockfile | Merge the standalone workspace settings, retain project policy, and refresh and verify the lockfile locally. |
+| Dependency installation scripts need approval | Review the named packages and record the required decisions in website `allowBuilds`; keep existing approvals. |
+| PR creation is denied | Check the repository setting in step 4 and any overriding organization policy. |
+| Generated PR checks are waiting for approval | Select **Approve workflows to run**, or configure the optional GitHub App. |
+| Default branch changed during the audit | Rerun from the current default branch; the publisher refuses a stale proposal. |
 
 ## Reference
 
 - [Maintenance policy](../docusaurus/maintenance.md): repair rules, reports, and publication behavior.
 - [Caller template](../docusaurus/caller.yml): the reusable workflow interface.
-- [Toolchain](../docusaurus/runtime/toolchain.json): current Node, pnpm, and release-delay values.
-- [Workspace settings](../docusaurus/runtime/templates/pnpm-workspace.yaml): the baseline to merge with project policy.
+- [Integration contract](../docusaurus/contract.json): configuration version and defaults.
+- [Toolchain](../docusaurus/runtime/toolchain.json): supported Node and pnpm combinations.
+- [Workspace settings](../docusaurus/runtime/templates/pnpm-workspace.yaml): baseline to merge with project policy.
 
-The workflows use GitHub.com's `$/` references to keep supporting actions and
-scripts bound to the selected shared commit. GitHub Enterprise Server is not
-supported by this implementation.
-
-The Docusaurus implementation retains its BSD 3-Clause license.
+The implementation uses GitHub.com's `$/` references to bind supporting actions
+and scripts to the selected shared commit. GitHub Enterprise Server is not
+supported. The Docusaurus implementation retains its BSD 3-Clause license.
