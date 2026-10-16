@@ -6,14 +6,16 @@ approvals. Application dependency versions, site configuration, overrides and
 exact security exceptions remain project configuration.
 
 `.github/docusaurus.json` selects the documentation directory. The website owns
-its normal `build` script and all build prerequisites; the audit runs that script
+its selected package script and all build prerequisites; the audit runs that script
 without configuring or duplicating the website's build internals.
+`buildScript` defaults to `build`. An invalid selection stops before dependency
+changes. Put checks and prerequisites in the package script.
 
 The project configuration sets the audit schedule; new deployments without a
 schedule default to January 30 at 02:00 UTC. The single `Docusaurus dependency
 audit` workflow also supports manual dispatch on the default branch. It attempts
 security fixes at all severities
-before other stable upgrades, performs a frozen installation and production
+before other stable upgrades by default, performs a frozen installation and production
 build, and reports the results in an umbrella PR. Failed candidates are published
 as drafts and fail the workflow after the report is retained. Successful reruns
 leave an existing draft for human review. No report is committed.
@@ -21,6 +23,14 @@ The PR is titled `Docusaurus maintenance: security audit and dependency upgrades
 distinct from individual Dependabot update PRs and security alerts.
 Only the project's manifest, lockfile and required pnpm security exceptions enter
 that dependency PR. Findings and validation failures remain visible.
+
+Set `maintenance.mode` to `security-only` to skip routine upgrades. Its default
+is `security-and-maintenance`. `maintenance.upgradeScope` limits routine direct
+upgrades to `patch`, `minor` (including patches), or `major` (the default, including
+all levels). Restricted scopes check the actual resolved proposal against the
+accepted security snapshot; a violation restores that snapshot. Transitive
+changes can accompany allowed direct upgrades. Security-fix compatibility remains
+independent of this limit. See the [configuration guide](../docs/docusaurus.md#build-and-maintenance-options).
 
 Documentation vulnerabilities are accepted between maintenance reviews. Scope
 Dependabot update suppression and alert dismissal to this deployment's lockfile;

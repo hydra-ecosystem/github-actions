@@ -35,7 +35,13 @@ def test_project_directory_is_configuration_and_build_is_opaque(tmp_path):
     before = (directory / "package.json").read_bytes()
     actual, baseline = read_project(tmp_path)
     assert actual == directory
-    assert baseline == {"node": "24", "pnpm": "11.21.0", "minimumReleaseAge": 14400}
+    assert baseline == {
+        "node": "24",
+        "pnpm": "11.21.0",
+        "minimumReleaseAge": 14400,
+        "buildScript": "build",
+        "maintenance": {"mode": "security-and-maintenance", "upgradeScope": "major"},
+    }
     assert (directory / "package.json").read_bytes() == before
     env = tmp_path / "environment"
     subprocess.run(
@@ -51,7 +57,7 @@ def test_project_directory_is_configuration_and_build_is_opaque(tmp_path):
     )
     assert (
         env.read_text()
-        == "NPM_PROJECT=docs/site with spaces\nDOCUSAURUS_NODE_VERSION=24\nDOCUSAURUS_PNPM_VERSION=11.21.0\n"
+        == "NPM_PROJECT=docs/site with spaces\nDOCUSAURUS_NODE_VERSION=24\nDOCUSAURUS_PNPM_VERSION=11.21.0\nDOCUSAURUS_BUILD_SCRIPT=build\nDOCUSAURUS_MAINTENANCE_MODE=security-and-maintenance\nDOCUSAURUS_UPGRADE_SCOPE=major\n"
     )
 
 
@@ -250,7 +256,13 @@ def test_follow_project_supported_matrix(website, node, pnpm):
     data["packageManager"] = f"pnpm@{pnpm}"
     path.write_text(json.dumps(data))
     _, selected = module["project"](root)
-    assert selected == {"node": node, "pnpm": pnpm, "minimumReleaseAge": 14400}
+    assert selected == {
+        "node": node,
+        "pnpm": pnpm,
+        "minimumReleaseAge": 14400,
+        "buildScript": "build",
+        "maintenance": {"mode": "security-and-maintenance", "upgradeScope": "major"},
+    }
 
 
 def test_closest_runtime_declaration_wins_and_root_is_fallback(website):

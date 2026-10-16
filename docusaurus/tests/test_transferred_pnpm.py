@@ -18,7 +18,12 @@ valid_snapshot = audit_module["valid_snapshot"]
 @pytest.fixture
 def npm_project(tmp_path):
     (tmp_path / "package.json").write_text(
-        json.dumps({"dependencies": {"renderer": "1.0.0"}})
+        json.dumps(
+            {
+                "scripts": {"build": "docusaurus build"},
+                "dependencies": {"renderer": "1.0.0"},
+            }
+        )
     )
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
     return tmp_path
@@ -215,7 +220,11 @@ def test_validation_restores_valid_mutations(
 def pnpm_project(tmp_path):
     (tmp_path / "package.json").write_text(
         json.dumps(
-            {"packageManager": "pnpm@11.21.0", "dependencies": {"renderer": "^1.0.0"}}
+            {
+                "scripts": {"build": "docusaurus build"},
+                "packageManager": "pnpm@11.21.0",
+                "dependencies": {"renderer": "^1.0.0"},
+            }
         )
     )
     (tmp_path / "pnpm-lock.yaml").write_text(

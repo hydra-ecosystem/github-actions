@@ -1,7 +1,12 @@
 {
   "schema_version": 1,
   "component": "docusaurus",
-  "integration_version": 2,
+  "integration_version": 3,
+  "build_script_default": "build",
+  "maintenance_defaults": {
+    "mode": "security-and-maintenance",
+    "upgradeScope": "major"
+  },
   "toolchain_config": "toolchain",
   "toolchain_defaults": {
     "node": "project",

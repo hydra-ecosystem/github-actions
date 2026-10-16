@@ -16,7 +16,11 @@ module = runpy.run_path(
 def project(tmp_path):
     (tmp_path / "package.json").write_text(
         json.dumps(
-            {"packageManager": "pnpm@11.21.0", "dependencies": {"renderer": "^1.0.0"}}
+            {
+                "scripts": {"build": "docusaurus build"},
+                "packageManager": "pnpm@11.21.0",
+                "dependencies": {"renderer": "^1.0.0"},
+            }
         )
     )
     (tmp_path / "pnpm-workspace.yaml").write_text(

@@ -23,8 +23,10 @@ value if your site lives elsewhere.
 
 ### 1. Prepare the website
 
-You need a Docusaurus project with its own pnpm lockfile and a `build` script
+You need a Docusaurus project with its own pnpm lockfile and a package script
 that runs all required checks and build steps. Choose a [supported toolchain](#toolchain-selection) already used by your project.
+The script defaults to `build`; select another existing script with
+[`buildScript`](#build-and-maintenance-options).
 Node 22 or 24 and pnpm 11.20.0 or 11.21.0 are the initial tested combinations.
 Node 22 must be at least 22.13.0.
 
@@ -125,7 +127,7 @@ jobs:
 ```
 
 Replace both `REVIEWED_FULL_COMMIT_SHA` placeholders with the same reviewed
-40-character commit SHA that contains integration contract version 2.
+40-character commit SHA that contains integration contract version 3.
 Both calls use the same full commit SHA, so the implementation stays fixed until
 you choose to update it. The audit job has read access. Only the publisher has
 permission to push the dependency branch and open a PR.
@@ -229,6 +231,50 @@ Existing configurations **without a `toolchain` object** keep the legacy Node 24
 and pnpm 11.21.0 selection. Updating the shared SHA alone does not opt them into
 project-derived versions. To opt in, first review and align the declarations and
 website CI, pin a contract-version-2 revision, then add `"toolchain": {}`.
+
+## Build and maintenance options
+
+Set these options in `.github/docusaurus.json`. They are available starting with
+integration contract version 3. Each omitted option uses the default below:
+
+```json
+{
+  "directory": "website",
+  "buildScript": "build",
+  "maintenance": {
+    "mode": "security-and-maintenance",
+    "upgradeScope": "major"
+  }
+}
+```
+
+| Setting | Values and behavior |
+| --- | --- |
+| `buildScript` | An existing, nonempty script in the selected website's `package.json`. For example, `"docs:build"` runs `pnpm run docs:build` in that website. |
+| `maintenance.mode` | `"security-and-maintenance"` attempts security fixes followed by routine upgrades. `"security-only"` attempts security fixes and skips routine version lookups and upgrade resolution. |
+| `maintenance.upgradeScope` | The maximum routine **direct dependency** change: `"patch"` stays within the current major and minor; `"minor"` includes patches within the current major; `"major"` permits all stable levels. |
+
+Put prerequisites and checks in the selected package script. The configuration
+does not accept shell commands or arbitrary hooks. Script names must start with
+an ASCII letter or digit and contain only letters, digits, `:`, `_`, `.`, or `-`.
+Invalid options or a missing selected script stop the run before dependency changes.
+
+Routine scope uses the resolved direct dependency versions after the initial
+security fix attempt. It restricts candidate selection and checks the actual
+resolved proposal. If resolution crosses the limit, the workflow restores the
+accepted security proposal and reports the rejected routine upgrade. Changes to
+transitive dependencies can accompany an allowed direct upgrade. An unverifiable
+direct version is retained for manual review when scope is restricted.
+
+Security fixes use the existing compatibility rules independently of routine
+scope. For example, `"patch"` does not block a compatible security fix that needs
+a minor update. Security resolution can change related dependencies. Unresolved
+or unconfirmed findings remain in the report. Both modes retain the frozen install,
+selected build script, release-age policy, project pins and publication checks.
+
+Existing configurations without these options keep the `build` script and
+security fixes plus routine upgrades at all stable levels. Selecting these options
+does not require new workflow inputs or a separate maintenance PR.
 
 ## Optional: publish with a GitHub App
 
