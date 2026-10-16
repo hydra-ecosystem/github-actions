@@ -1169,7 +1169,7 @@ def format_remaining_audit(data: dict | str, lock: dict) -> str:
 
 def format_audit_summary(before: dict | str, after: dict | str, source: str) -> str:
     if isinstance(after, str):
-        return f"**Security:** {after}"
+        return f"🟠 **Security:** {after}"
     counts = after["metadata"]["vulnerabilities"]
     total = sum(counts.get(level, 0) for level in SEVERITY_ORDER)
     label = "registry advisories" if source == "pnpm" else "affected package entries"
@@ -1221,11 +1221,12 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
         if comparable
         else "unconfirmed; initial or detailed audit evidence unavailable"
     )
-    summary = f"**Resolved:** {resolved}. **Remaining:** {total} {label}" + (
+    summary = f"{'🔴' if total else '🟢'} **Remaining:** {total} {label}" + (
         f" ({remaining})." if remaining else "."
     )
+    summary += f"\n\n{'🟢' if resolved_ids else '⚪' if comparable else '🟠'} **Resolved:** {resolved}."
     if new_ids:
-        summary += f" **New:** {len(new_ids)} ({names(current, new_ids)})."
+        summary += f" 🔴 **New:** {len(new_ids)} ({names(current, new_ids)})."
 
     def reason(detail):
         status = detail.get("fixStatus", "")
@@ -1254,19 +1255,70 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     groups: dict = {}
     for identity, name, detail in current:
         groups.setdefault(name, {})[identity] = detail
-    if groups:
-        summary += "\n\n| Still open | Why |\n| --- | --- |\n"
-        ordered = sorted(
-            groups,
-            key=lambda name: (
-                min(
-                    SEVERITY_ORDER.get(detail["severity"], 5)
-                    for detail in groups[name].values()
-                ),
-                name,
+    ordered = sorted(
+        groups,
+        key=lambda name: (
+            min(
+                SEVERITY_ORDER.get(detail["severity"], 5)
+                for detail in groups[name].values()
             ),
+            name,
+        ),
+    )
+    pinned = [
+        name
+        for name in ordered
+        if any(
+            "Blocked by retained override" in detail.get("fixStatus", "")
+            for detail in groups[name].values()
         )
-        for name in ordered[:5]:
+    ]
+    if pinned:
+        summary += (
+            "\n\n**🟠 Your attention — project pins**\n\n"
+            "Published fixes exist. Pins were preserved; removing them has not "
+            "been validated.\n\n"
+            "| Package | Pin → published fix | Recommendation |\n"
+            "| --- | --- | --- |\n"
+        )
+        for name in pinned:
+            statuses = [detail.get("fixStatus", "") for detail in groups[name].values()]
+            pins = sorted(
+                {
+                    match
+                    for status in statuses
+                    for match in re.findall(
+                        rf"`pnpm-workspace\.yaml overrides\.{re.escape(name)}` = `([^`]+)`",
+                        status,
+                    )
+                }
+            )
+            patches = sorted(
+                {
+                    match
+                    for status in statuses
+                    for match in re.findall(
+                        rf"Published patch: `{re.escape(name)}@([^`]+)`", status
+                    )
+                }
+            )
+            candidate = ", ".join(patches) or "see advisory details"
+            pin = ", ".join(pins) or "see advisory details"
+            # Keep Markdown columns intact for disjunctive override ranges.
+            pin, candidate = (
+                value.replace("|", "&#124;") for value in (pin, candidate)
+            )
+            summary += f"| `{name}` | `{pin}` → `{candidate}` | Review removal; safety unverified. |\n"
+        summary += "\nNo pins were changed."
+    others = [name for name in ordered if name not in pinned]
+    if others:
+        summary += (
+            "\n\n**🔴 Other blockers**\n"
+            if pinned
+            else "\n\n**🔴 Remaining findings**\n"
+        )
+        summary += "\n| Still open | Why |\n| --- | --- |\n"
+        for name in others[:5]:
             details = list(groups[name].values())
             severities = ", ".join(
                 f"{sum(detail['severity'] == level for detail in details)} {level}"
@@ -1275,8 +1327,8 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             )
             reasons = " ".join(dict.fromkeys(reason(detail) for detail in details))
             summary += f"| `{name}` ({severities}) | {reasons} |\n"
-        if len(ordered) > 5:
-            summary += f"\n{len(ordered) - 5} more affected packages are listed in the audit details."
+        if len(others) > 5:
+            summary += f"\n{len(others) - 5} more affected packages are listed in the audit details."
     return summary
 
 
@@ -1642,9 +1694,9 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
         )
     report = (
         f"`{directory}` · `{package_manager}`\n\n"
-        f"- **Changes:** {len(changes)} direct / {len(locked_updates)} locked dependencies.\n"
-        f"- {format_audit_summary(before, after, package_manager)}\n\n"
-        f"## Production build\n\n{build_status}\n\n"
+        f"🟢 **Changes:** {len(changes)} direct / {len(locked_updates)} locked dependencies.\n\n"
+        f"{format_audit_summary(before, after, package_manager)}\n\n"
+        f"## Production build\n\n{build_status} {'✅' if build_status == 'Passed.' else '❌'}\n\n"
     )
     if not initial_audit_available:
         report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
