@@ -47,10 +47,15 @@ def test_auditor_never_declares_publisher_secrets():
 def test_public_contract_identifies_the_consumer_interface():
     contract = json.loads((ROOT / "docusaurus/contract.json").read_text())
     assert contract["schema_version"] == 1
-    assert contract["integration_version"] == 2
+    assert contract["integration_version"] == 3
     assert contract["component"] == "docusaurus"
     assert (ROOT / contract["caller_template"]).is_file()
     assert contract["consumer_config"] == ".github/docusaurus.json"
+    assert contract["build_script_default"] == "build"
+    assert contract["maintenance_defaults"] == {
+        "mode": "security-and-maintenance",
+        "upgradeScope": "major",
+    }
 
 
 def test_toolchain_defaults_and_pre_mutation_enforcement():

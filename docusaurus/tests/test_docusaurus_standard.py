@@ -387,7 +387,12 @@ def test_publisher_refreshes_base_and_rejects_stale_or_unreadable_inputs(
 @pytest.fixture
 def npm_project(tmp_path):
     (tmp_path / "package.json").write_text(
-        json.dumps({"dependencies": {"renderer": "1.0.0"}})
+        json.dumps(
+            {
+                "scripts": {"build": "docusaurus build"},
+                "dependencies": {"renderer": "1.0.0"},
+            }
+        )
     )
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
     return tmp_path
@@ -470,7 +475,9 @@ def test_summary_reports_partial_security_lock_upgrades(
     request, monkeypatch, package_manager, initial_patched, final_patched, changed
 ):
     project = request.getfixturevalue(f"{package_manager}_project")
-    (project / "package.json").write_text('{"dependencies": {}}')
+    (project / "package.json").write_text(
+        '{"scripts": {"build": "docusaurus build"}, "dependencies": {}}'
+    )
     lockfile = project / (
         "pnpm-lock.yaml" if package_manager == "pnpm" else "package-lock.json"
     )
@@ -555,7 +562,9 @@ def test_summary_reports_path_changes_with_unchanged_version_sets(
     request, monkeypatch, package_manager, changed
 ):
     project = request.getfixturevalue(f"{package_manager}_project")
-    (project / "package.json").write_text('{"dependencies": {}}')
+    (project / "package.json").write_text(
+        '{"scripts": {"build": "docusaurus build"}, "dependencies": {}}'
+    )
     lockfile = project / (
         "pnpm-lock.yaml" if package_manager == "pnpm" else "package-lock.json"
     )
@@ -1144,7 +1153,11 @@ def test_failed_mutation_restores_valid_files_and_reports_partial_work(
 def pnpm_project(tmp_path):
     (tmp_path / "package.json").write_text(
         json.dumps(
-            {"packageManager": "pnpm@11.21.0", "dependencies": {"renderer": "^1.0.0"}}
+            {
+                "scripts": {"build": "docusaurus build"},
+                "packageManager": "pnpm@11.21.0",
+                "dependencies": {"renderer": "^1.0.0"},
+            }
         )
     )
     (tmp_path / "pnpm-lock.yaml").write_text(
@@ -1576,7 +1589,13 @@ def test_valid_policy_mutation_restores_all_package_files(
             policy[field] = value
             workspace.write_text(yaml.safe_dump(policy))
             (cwd / "package.json").write_text(
-                json.dumps({"packageManager": "pnpm@11.21.0", "dependencies": {}})
+                json.dumps(
+                    {
+                        "scripts": {"build": "docusaurus build"},
+                        "packageManager": "pnpm@11.21.0",
+                        "dependencies": {},
+                    }
+                )
             )
             lockfile = cwd / "pnpm-lock.yaml"
             lock = yaml.safe_load(lockfile.read_text())

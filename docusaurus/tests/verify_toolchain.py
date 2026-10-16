@@ -17,7 +17,9 @@ def check(node, pnpm):
         site.mkdir()
         (root / ".github").mkdir()
         (root / ".github/docusaurus.json").write_text(
-            json.dumps({"directory": "website", "toolchain": {}})
+            json.dumps(
+                {"directory": "website", "toolchain": {}, "buildScript": "docs:build"}
+            )
         )
         (site / ".nvmrc").write_text(node)
         (site / "package.json").write_text(
@@ -26,7 +28,7 @@ def check(node, pnpm):
                     "private": True,
                     "packageManager": f"pnpm@{pnpm}",
                     "engines": {"node": ">=22.13"},
-                    "scripts": {"build": "docusaurus build"},
+                    "scripts": {"docs:build": "docusaurus build"},
                     "dependencies": {
                         "@docusaurus/core": "3.10.2",
                         "@docusaurus/preset-classic": "3.10.2",
@@ -81,7 +83,7 @@ def check(node, pnpm):
             diagnostics
         )
         run("install", "--frozen-lockfile")
-        run("run", "build")
+        run("run", selected["buildScript"])
         assert (site / "build/index.html").is_file()
         return {
             "node": subprocess.check_output(["node", "--version"], text=True).strip(),
