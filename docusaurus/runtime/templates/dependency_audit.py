@@ -1169,15 +1169,7 @@ def format_remaining_audit(data: dict | str, lock: dict) -> str:
 
 def format_audit_summary(before: dict | str, after: dict | str, source: str) -> str:
     if isinstance(after, str):
-        return f"🟠 **Security:** {after}"
-    counts = after["metadata"]["vulnerabilities"]
-    total = sum(counts.get(level, 0) for level in SEVERITY_ORDER)
-    label = "registry advisories" if source == "pnpm" else "affected package entries"
-    if total == 1:
-        label = "registry advisory" if source == "pnpm" else "affected package entry"
-    remaining = ", ".join(
-        f"{counts[level]} {level}" for level in SEVERITY_ORDER if counts.get(level)
-    )
+        return f"⚪ **Security:** {after}"
 
     def entries(data):
         if isinstance(data, str):
@@ -1192,112 +1184,81 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             )
         ]
 
-    old, current = entries(before), entries(after)
-    old_ids, current_ids = {row[0] for row in old}, {row[0] for row in current}
-    comparable = (
-        isinstance(before, dict)
-        and (
-            bool(old)
+    def complete(data, rows):
+        return isinstance(data, dict) and (
+            bool(rows)
             or not any(
-                before["metadata"]["vulnerabilities"].get(level, 0)
+                data["metadata"]["vulnerabilities"].get(level, 0)
                 for level in SEVERITY_ORDER
             )
         )
-        and (bool(current) or total == 0)
-    )
+
+    old, current = entries(before), entries(after)
+    old_ids, current_ids = {row[0] for row in old}, {row[0] for row in current}
+    comparable = complete(before, old) and complete(after, current)
     resolved_ids = old_ids - current_ids if comparable else set()
     new_ids = current_ids - old_ids if comparable else set()
-
-    summary = f"After merging: **{total} {label} remaining**" + (
-        f" ({remaining})." if remaining else "."
-    )
-    if not comparable:
-        summary += "\n\n🟠 Resolution unconfirmed; initial or detailed audit evidence unavailable."
-
-    def severity_counts(details):
-        return ", ".join(
-            f"{sum(detail['severity'] == level for detail in details)} {level}"
-            for level in SEVERITY_ORDER
-            if any(detail["severity"] == level for detail in details)
-        )
+    old_groups: dict = {}
+    groups: dict = {}
+    for rows, target in ((old, old_groups), (current, groups)):
+        for identity, name, detail in rows:
+            target.setdefault(name, {})[identity] = detail
 
     def reason(detail):
         status = detail.get("fixStatus", "")
         if "Blocked by retained override" in status:
-            return "A retained override blocks the published patch."
+            return "review", "A retained override blocks the published patch."
         if "no single patch satisfies all" in status:
             parents = sorted(set(re.findall(r"`([^`]+)` requires `[^`]+`", status)))
             if len(parents) == 1:
-                return f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint."
-            return "No published patch fits all checked parent constraints."
+                return (
+                    "blocked",
+                    f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint.",
+                )
+            return "blocked", "No published patch fits all checked parent constraints."
         if status.startswith("No published stable patch"):
-            return "No published patch matches the fix range."
+            return "blocked", "No published patch matches the fix range."
         if status.startswith("No patched version declared"):
-            return "The registry supplies no patched version."
+            return "blocked", "The registry supplies no patched version."
         if "could not be fully verified" in status:
-            return "Patch compatibility still needs verification."
+            return "unconfirmed", "Patch compatibility still needs verification."
         if status.startswith("Published patch:"):
-            return "A published patch is available; selection needs review."
+            return "review", "A published patch is available; selection needs review."
         candidate = detail.get("fixAvailable")
         if isinstance(candidate, dict) and candidate.get("isSemVerMajor"):
-            return "The offered fix requires a major upgrade."
+            return "review", "The offered fix requires a major upgrade."
         if source == "npm" and not candidate:
-            return "No fix offered by npm."
-        return "Fix availability or resolution needs manual review."
+            return "blocked", "No fix offered by npm."
+        return "unconfirmed", "Fix availability or resolution is unconfirmed."
 
-    def needs_review(action):
-        return any(
-            word in action.lower()
-            for word in ("review", "verification", "major upgrade")
-        )
-
-    resolved_groups: dict = {}
-    for identity, name, detail in old:
-        if identity in resolved_ids:
-            resolved_groups.setdefault(name, {})[identity] = detail
-    groups: dict = {}
-    for identity, name, detail in current:
-        groups.setdefault(name, {})[identity] = detail
-    ordered = sorted(
-        groups,
-        key=lambda name: (
-            min(
-                SEVERITY_ORDER.get(detail["severity"], 5)
-                for detail in groups[name].values()
-            ),
-            name,
-        ),
-    )
-    pinned = [
-        name
-        for name in ordered
-        if any(
-            "Blocked by retained override" in detail.get("fixStatus", "")
-            for detail in groups[name].values()
-        )
-    ]
-    outcome_packages = [
-        name
-        for name in ordered
-        if name not in pinned
-        and (name in resolved_groups or new_ids.intersection(groups[name]))
-    ]
-    others = [name for name in ordered if name not in pinned + outcome_packages]
-    if groups or resolved_groups:
-        summary += "\n\n| Status | Package | Action / blocker |\n| --- | --- | --- |\n"
-    for name, findings in sorted(resolved_groups.items()):
-        severities = severity_counts(list(findings.values()))
-        action = "No longer reported in the final audit."
-        if name in groups:
-            action += " Other findings for this package remain below."
-        summary += f"| 🟢\u00a0Resolved | `{name}` ({severities}) | {action} |\n"
-    visible = set(pinned + outcome_packages + others[:5])
-    review_count = blocked_count = 0
-    for name in pinned + outcome_packages + others:
-        details = list(groups[name].values())
-        severities = severity_counts(details)
+    rows = []
+    fixed_packages, review_packages, blocked_packages = set(), set(), set()
+    new_packages, unconfirmed_packages = set(), set()
+    for name in old_groups.keys() | groups.keys():
+        previous, pending = old_groups.get(name, {}), groups.get(name, {})
+        fixed = len(resolved_ids.intersection(previous))
+        # An advisory reported under another path is still open, not resolved.
+        moved = set(previous).intersection(current_ids) - pending.keys()
+        pending_count = len(pending.keys() | moved)
+        details = list(pending.values())
+        outcomes = [reason(detail) for detail in details]
         statuses = [detail.get("fixStatus", "") for detail in details]
-        if name in pinned:
+        pinned = any("Blocked by retained override" in status for status in statuses)
+        review = any(kind == "review" for kind, _ in outcomes)
+        blocked = any(kind == "blocked" for kind, _ in outcomes) or any(
+            "no single patch satisfies all" in status for status in statuses
+        )
+        unconfirmed = any(kind == "unconfirmed" for kind, _ in outcomes)
+        if fixed:
+            fixed_packages.add(name)
+        if review:
+            review_packages.add(name)
+        if blocked:
+            blocked_packages.add(name)
+        if unconfirmed:
+            unconfirmed_packages.add(name)
+        action = " ".join(dict.fromkeys(text for _, text in outcomes))
+        if pinned:
             pins = sorted(
                 {
                     match
@@ -1317,84 +1278,99 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
                     )
                 }
             )
-            candidate = ", ".join(patches) or "see advisory details"
-            pin = ", ".join(pins) or "see advisory details"
             pin, candidate = (
-                value.replace("|", "&#124;") for value in (pin, candidate)
+                (", ".join(values) or "see advisory details").replace("|", "&#124;")
+                for values in (pins, patches)
             )
             action = f"Pin `{pin}` blocks fix `{candidate}`; review removing or updating the pin."
             if any("no single patch satisfies all" in status for status in statuses):
                 action += " Parent constraints also block the fix; see details."
-            # Keep unrelated findings for the same package visible too.
             extra = [
-                reason(detail)
+                reason(detail)[1]
                 for detail in details
                 if "Blocked by retained override" not in detail.get("fixStatus", "")
             ]
             if extra:
                 action += " " + " ".join(dict.fromkeys(extra))
-            badge = "🟠\u00a0Review"
-        else:
-            action = " ".join(dict.fromkeys(reason(detail) for detail in details))
-            badge = "🟠\u00a0Review" if needs_review(action) else "🔴\u00a0Blocked"
-        unpinned_reasons = [
-            reason(detail)
-            for detail in details
-            if "Blocked by retained override" not in detail.get("fixStatus", "")
-        ]
-        if any(not needs_review(action) for action in unpinned_reasons) or any(
-            "no single patch satisfies all" in status for status in statuses
-        ):
-            blocked_count += 1
-        if name not in pinned and any(
-            needs_review(action) for action in unpinned_reasons
-        ):
-            review_count += 1
-        new_count = len(new_ids.intersection(groups[name]))
-        if new_count:
-            unit = "advisory" if source == "pnpm" else "affected package entry"
-            if new_count != 1:
-                unit = "advisories" if source == "pnpm" else "affected package entries"
-            action = f"{new_count} new {unit}. " + action
-            badge = "🔴\u00a0New"
-        if name in visible:
-            summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
-    if len(others) > 5:
-        extra = len(others) - 5
-        noun = "package is" if extra == 1 else "packages are"
-        summary += f"\n{extra} more affected {noun} listed in the audit details."
-
-    def finding_label(number):
-        if source == "pnpm":
-            return "advisory" if number == 1 else "advisories"
-        return "affected package entry" if number == 1 else "affected package entries"
-
-    if comparable:
-        headline = (
-            f"🟢 **Fixes {len(resolved_ids)} {finding_label(len(resolved_ids))}**"
-        )
-        if not resolved_ids:
-            headline = (
-                f"⚪ **No {finding_label(0)} fixed**"
-                if total
-                else f"🟢 **No {finding_label(0)} reported**"
+        if moved:
+            locations = sorted(
+                {other for identity, other, _ in current if identity in moved}
             )
+            action += (
+                " Still reported under "
+                + ", ".join(f"`{other}`" for other in locations)
+                + "."
+            )
+        new_count = len(new_ids.intersection(pending))
+        if new_count:
+            new_packages.add(name)
+            unit = (
+                ("advisory" if new_count == 1 else "advisories")
+                if source == "pnpm"
+                else (
+                    "affected package entry"
+                    if new_count == 1
+                    else "affected package entries"
+                )
+            )
+            action = f"{new_count} new {unit}. " + action
+        counts = []
+        if fixed:
+            counts.append(f"{fixed} fixed")
+        if pending_count:
+            counts.append(f"{pending_count} pending")
+        if not comparable:
+            counts.insert(0, "fixes unconfirmed")
+        if comparable and not pending_count:
+            badge, rank, action = "🟢", 0, "Resolved."
+        elif review:
+            badge, rank = "🟠", 1
+        elif blocked or new_count:
+            badge, rank = "🔴", 2
+        else:
+            badge, rank = "⚪", 3
+        severity = min(
+            (SEVERITY_ORDER.get(detail["severity"], 5) for detail in details), default=5
+        )
+        rows.append(
+            (
+                (rank, severity, name),
+                f"| {badge}\u00a0`{name}` | {' · '.join(counts)} | {action.strip()} |",
+            )
+        )
+
+    def packages(number):
+        return f"{number} package" + ("" if number == 1 else "s")
+
+    if not comparable:
+        headline = "⚪ **Fixes unconfirmed**"
+    elif fixed_packages:
+        headline = f"🟢 **Fixes in {packages(len(fixed_packages))}**"
+    elif current_ids:
+        headline = "⚪ **No security fixes**"
     else:
-        headline = "🟠 **Fixes unconfirmed**"
-    if new_ids:
-        headline += f" · 🔴 **{len(new_ids)} new {finding_label(len(new_ids))}**"
-    if pinned:
-        pins = "pin needs" if len(pinned) == 1 else "pins need"
-        headline += f" · 🟠 **{len(pinned)} {pins} your review**"
-    if review_count:
-        packages = "package needs" if review_count == 1 else "packages need"
-        headline += f" · 🟠 **{review_count} {packages} your review**"
-    if blocked_count:
-        packages = "package" if blocked_count == 1 else "packages"
-        headline += f" · 🔴 **Fixes blocked for {blocked_count} {packages}**"
-    if total and not groups:
-        headline += " · 🟠 **Blockers unconfirmed**"
-    return headline + "\n\n" + summary
+        headline = "🟢 **No security findings**"
+    if new_packages:
+        headline += f" · 🔴 **New findings in {packages(len(new_packages))}**"
+    if review_packages:
+        verb = "needs" if len(review_packages) == 1 else "need"
+        headline += f" · 🟠 **{packages(len(review_packages))} {verb} your review**"
+    if blocked_packages:
+        headline += f" · 🔴 **Fixes blocked for {packages(len(blocked_packages))}**"
+    if unconfirmed_packages:
+        verb = "needs" if len(unconfirmed_packages) == 1 else "need"
+        headline += (
+            f" · ⚪ **{packages(len(unconfirmed_packages))} {verb} verification**"
+        )
+    if not comparable:
+        headline += "\n\nResolution unconfirmed; initial or detailed audit evidence unavailable."
+    if rows:
+        unit = "Advisories" if source == "pnpm" else "Affected package entries"
+        headline += (
+            f"\n\n| Package | {unit} | Action / blocker |\n| --- | --- | --- |\n"
+        )
+        headline += "\n".join(row for _, row in sorted(rows))
+    return headline
 
 
 def eligible_version(directory, name, latest, snapshot, notes, deadline):

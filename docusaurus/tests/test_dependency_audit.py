@@ -96,7 +96,7 @@ def test_upgrade_keeps_manual_constraints_and_reports_unfixed_findings(
     assert "high: 1, total: 1" in report
     assert "npm fix candidate not offered by npm" in report
     assert "## Production build\n\nPassed." in report
-    assert "**1 affected package entry remaining** (1 high)" in report
+    assert "| Package | Affected package entries |" in report
     assert "--force" not in [arg for command in commands for arg in command]
 
 
@@ -486,7 +486,7 @@ def test_cli_entrypoint_prepares_selected_project(npm_project, monkeypatch):
         ["dependency-audit", "--directory", ".", "--report", str(report)],
     )
     runpy.run_path(audit_module["__file__"], run_name="__main__")
-    assert "After merging:" in report.read_text()
+    assert "| Package | Affected package entries |" in report.read_text()
     assert not (npm_project / "DEPENDENCY-AUDIT.md").exists()
     manifest = json.loads((npm_project / "package.json").read_text())
     assert manifest["dependencies"]["renderer"] == "2.0.0"
