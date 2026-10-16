@@ -848,14 +848,11 @@ def test_pnpm_path_comparison_retains_scoped_context_and_ignores_metadata(contex
 
 def test_summary_precedes_collapsed_full_audit(npm_project, monkeypatch):
     fake_npm(monkeypatch)
-
     report = prepare(npm_project)
     summary, details = report.split("<details>", 1)
-
     assert "**Maintenance:** 0 additional package updates (0 total)." in summary
-    assert "After merging: **0 affected package entries remaining**." in summary
-    assert "**Resolved:**" not in summary
-    assert "| 🟢\u00a0Resolved |" not in summary
+    assert "🟢 **No security findings**" in summary
+    assert "| Package |" not in summary
     assert "## Production build\n\nPassed." in summary
     assert len(summary) < 600
     assert "renderer: `1.0.0` → `2.0.0`" in details
@@ -883,11 +880,24 @@ def test_compact_security_summary_keeps_severity_and_count_meaning(
         }
     }
     result = summarize(before, after, package_manager)
-    assert (
-        f"After merging: **4 {label} remaining** (2 critical, 1 high, 1 moderate)."
-        in result
-    )
+    assert "Fixes unconfirmed" in result
     assert "Resolution unconfirmed" in result
+    assert "🟠" not in result and "| Package |" not in result
+    # Full findings retain the registry's units and severities.
+    detailed = audit_module["format_remaining_audit"](
+        {
+            **after,
+            "package_manager": package_manager,
+            "vulnerabilities": {"renderer": {"via": []}},
+        },
+        {},
+    )
+    assert (
+        "Registry advisory counts"
+        if package_manager == "pnpm"
+        else "Affected package entries"
+    ) in detailed
+    assert "critical: 2" in detailed and "moderate: 1" in detailed
     assert "Audit unavailable" in summarize(
         before, "Audit unavailable (exit 1).", package_manager
     )
@@ -926,12 +936,13 @@ def test_security_outcomes_distinguish_resolved_and_new_with_equal_counts(
     before = security_findings([("old-package", "old", "high", "")])
     after = security_findings([("new-package", "new", "high", "")])
     result = audit_module["format_audit_summary"](before, after, "pnpm")
-    assert "| 🟢\u00a0Resolved | `old-package` (1 high) |" in result
-    assert "| 🔴\u00a0New | `new-package` (1 high) | 1 new advisory." in result
+    assert "| 🟢\u00a0`old-package` | 1 fixed | Resolved. |" in result
+    assert "| 🔴\u00a0`new-package` | 1 pending | 1 new advisory." in result
     assert result.index("`old-package`") < result.index("`new-package`")
-    assert result.count("| Status |") == 1
-    assert "**Resolved:**" not in result and "**New:**" not in result
-    assert "**1 registry advisory remaining**" in result
+    assert result.count("| Package | Advisories | Action / blocker |") == 1
+    assert "**Fixes in 1 package**" in result
+    assert "**New findings in 1 package**" in result
+    assert "After merging:" not in result
 
 
 def test_security_outcomes_keep_shared_advisory_open_after_path_change(
@@ -940,12 +951,14 @@ def test_security_outcomes_keep_shared_advisory_open_after_path_change(
     before = security_findings([("old-path", "same", "critical", "")])
     after = security_findings([("new-path", "same", "critical", "")])
     result = audit_module["format_audit_summary"](before, after, "pnpm")
-    assert "🟢\u00a0Resolved" not in result
-    assert "🔴\u00a0New" not in result
+    assert "🟢" not in result and "New findings" not in result
+    assert "Still reported under `new-path`." in result
+    assert "| ⚪\u00a0`old-path` | 1 pending |" in result
+    assert "| ⚪\u00a0`new-path` | 1 pending |" in result
 
 
 def test_security_outcomes_report_partial_resolution_for_one_package(security_findings):
-    first = ("leaf", "first", "high", "")
+    first = ("leaf", "first", "high", "No patched version declared by the registry.")
     second = ("leaf", "second", "high", "")
     unchanged = [(f"aaa-{i}", str(i), "high", "") for i in range(7)]
     result = audit_module["format_audit_summary"](
@@ -953,11 +966,10 @@ def test_security_outcomes_report_partial_resolution_for_one_package(security_fi
         security_findings([first] + unchanged),
         "pnpm",
     )
-    assert "| 🟢\u00a0Resolved | `leaf` (1 high) |" in result
-    assert "Other findings for this package remain below." in result
-    assert result.count("| `leaf` (1 high) |") == 2
-    assert "**8 registry advisories remaining**" in result
-    assert "| `leaf` (1 high) |" in result
+    assert "| 🔴\u00a0`leaf` | 1 fixed · 1 pending |" in result
+    assert result.count("`leaf`") == 1
+    assert all(f"`aaa-{i}`" in result for i in range(7))
+    assert "🟠" not in result
 
 
 def test_security_outcomes_keep_missing_initial_evidence_unconfirmed(security_findings):
@@ -970,7 +982,7 @@ def test_security_outcomes_keep_missing_initial_evidence_unconfirmed(security_fi
 
 def test_security_outcomes_summarize_concrete_blockers(security_findings):
     constraints = "Published patches exist, but no single patch satisfies all checked parent constraints. Blocked by existing parent constraints: `@docusaurus/core@3.10.2` requires `tinypool ^1.0.2`."
-    before = security_findings(
+    data = security_findings(
         [
             ("tinypool", "first", "critical", constraints),
             ("tinypool", "second", "critical", constraints),
@@ -982,21 +994,21 @@ def test_security_outcomes_summarize_concrete_blockers(security_findings):
             ),
         ]
     )
-    result = audit_module["format_audit_summary"](before, before, "pnpm")
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| `tinypool` (2 critical) | Blocked by the `@docusaurus/core` version constraint. |"
+        "| 🔴\u00a0`tinypool` | 2 pending | Blocked by the `@docusaurus/core` version constraint. |"
         in result
     )
     assert "No published patch matches the fix range." in result
-    assert result.count("| `tinypool`") == 1
+    assert result.count("`tinypool`") == 1
 
 
 def test_security_outcomes_bound_the_visible_package_list(security_findings):
     data = security_findings([(f"package-{i}", str(i), "high", "") for i in range(7)])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert "**7 registry advisories remaining**" in result
-    assert "2 more affected packages are listed in the audit details." in result
-    assert result.count("| `package-") == 5
+    assert all(result.count(f"`package-{i}`") == 1 for i in range(7))
+    assert result.count("| 1 pending |") == 7
+    assert "more affected packages" not in result
 
 
 def test_publisher_footer_is_only_a_run_link():
@@ -1879,25 +1891,19 @@ def test_attention_lists_all_blocking_pins_before_other_findings(security_findin
     ]
     for index in range(7):
         name = f"pinned-{index}"
-        status = (
-            f"Published patch: `{name}@1.2.0`. Blocked by retained override "
-            f"`pnpm-workspace.yaml overrides.{name}` = `1.0.0`. "
-            "Override preserved for manual compatibility review."
-        )
+        status = f"Published patch: `{name}@1.2.0`. Blocked by retained override `pnpm-workspace.yaml overrides.{name}` = `1.0.0`. Override preserved for manual compatibility review."
         rows.append((name, str(index), "high", status))
-    # Several advisories for a package must produce one decision row.
     rows.append(("pinned-0", "another", "moderate", rows[1][3]))
     data = security_findings(rows)
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert "**9 registry advisories remaining**" in result
-    assert result.count("| Status | Package | Action / blocker |") == 1
-    assert "Your attention" not in result and "Other blockers" not in result
-    assert result.index("| `pinned-6`") < result.index("| `aaa-parent`")
-    assert result.count("| `pinned-") == 7
+    assert result.count("| Package | Advisories | Action / blocker |") == 1
+    assert result.index("`pinned-6`") < result.index("`aaa-parent`")
+    assert result.count("| 🟠\u00a0`pinned-") == 7
+    assert "| 🟠\u00a0`pinned-0` | 2 pending |" in result
     assert (
         "Pin `1.0.0` blocks fix `1.2.0`; review removing or updating the pin." in result
     )
-    assert result.count("🟠\u00a0Review") == 7
+    assert "**7 packages need your review**" in result
     assert "safety unverified" not in result
 
 
@@ -1910,19 +1916,16 @@ def test_attention_does_not_invent_candidate_when_parents_also_block(security_fi
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert "Pin `1.0.0` blocks fix `see advisory details`" in result
     assert "Parent constraints also block the fix" in result
-    assert "**1 pin needs your review**" in result
+    assert "**1 package needs your review**" in result
     assert "**Fixes blocked for 1 package**" in result
 
 
 def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_findings):
-    status = (
-        "Published patch: `@scope/leaf@2.0.1`. Blocked by retained override "
-        "`pnpm-workspace.yaml overrides.@scope/leaf` = `1.0.0 || 2.0.0`."
-    )
+    status = "Published patch: `@scope/leaf@2.0.1`. Blocked by retained override `pnpm-workspace.yaml overrides.@scope/leaf` = `1.0.0 || 2.0.0`."
     data = security_findings([("@scope/leaf", "one", "high", status)])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| 🟠\u00a0Review | `@scope/leaf` (1 high) | Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
+        "| 🟠\u00a0`@scope/leaf` | 1 pending | Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
         in result
     )
 
@@ -1930,9 +1933,9 @@ def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_fi
 def test_attention_is_absent_when_no_blocking_pin_was_verified(security_findings):
     data = security_findings([("leaf", "one", "high", "Could not verify publication.")])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert "Your attention" not in result
-    assert "🟠\u00a0Review" in result
-    assert "No pins were changed" not in result
+    assert "🟠" not in result and "your review" not in result
+    assert "| ⚪\u00a0`leaf` | 1 pending |" in result
+    assert "unconfirmed" in result
 
 
 def test_single_table_keeps_other_advisories_for_a_pinned_package_visible(
@@ -1951,33 +1954,30 @@ def test_single_table_keeps_other_advisories_for_a_pinned_package_visible(
         ]
     )
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert result.count("| 🟠\u00a0Review |") == 1
-    assert "`leaf` (1 critical, 1 high)" in result
+    assert result.count("| 🟠\u00a0`leaf` | 2 pending |") == 1
     assert "No published patch matches the fix range." in result
-    assert "**1 pin needs your review**" in result
+    assert "**1 package needs your review**" in result
     assert "**Fixes blocked for 1 package**" in result
 
 
 def test_fully_resolved_findings_still_produce_one_table(security_findings):
     before = security_findings([("leaf", "closed", "critical", "")])
     result = audit_module["format_audit_summary"](before, security_findings([]), "pnpm")
-    assert "**0 registry advisories remaining**." in result
-    assert (
-        "| 🟢\u00a0Resolved | `leaf` (1 critical) | No longer reported in the final audit. |"
-        in result
-    )
-    assert result.count("| Status |") == 1
-    assert "**Resolved:**" not in result
+    assert "| 🟢\u00a0`leaf` | 1 fixed | Resolved. |" in result
+    assert result.count("| Package |") == 1
+    assert result.splitlines()[0] == "🟢 **Fixes in 1 package**"
+    assert "remaining" not in result
 
 
 def test_new_advisories_for_existing_package_stay_visible(security_findings):
     old = [(f"package-{i}", str(i), "high", "") for i in range(7)]
-    before = security_findings(old)
-    after = security_findings(old + [("package-6", "new", "high", "")])
-    result = audit_module["format_audit_summary"](before, after, "pnpm")
-    assert "| 🔴\u00a0New | `package-6` (2 high) | 1 new advisory." in result
-    assert result.index("`package-6`") < result.index("`package-0`")
-    assert "1 more affected package is" in result
+    result = audit_module["format_audit_summary"](
+        security_findings(old),
+        security_findings(old + [("package-6", "new", "high", "")]),
+        "pnpm",
+    )
+    assert "| 🔴\u00a0`package-6` | 2 pending | 1 new advisory." in result
+    assert all(result.count(f"`package-{i}`") == 1 for i in range(7))
 
 
 def test_npm_outcomes_keep_package_entry_semantics():
@@ -1990,12 +1990,13 @@ def test_npm_outcomes_keep_package_entry_semantics():
         "vulnerabilities": {"new": {"severity": "critical", "fixAvailable": False}},
     }
     result = audit_module["format_audit_summary"](before, after, "npm")
-    assert "| 🟢\u00a0Resolved | `old` (1 high) |" in result
+    assert "| Package | Affected package entries |" in result
+    assert "| 🟢\u00a0`old` | 1 fixed |" in result
     assert (
-        "| 🔴\u00a0New | `new` (1 critical) | 1 new affected package entry. No fix offered by npm. |"
+        "| 🔴\u00a0`new` | 1 pending | 1 new affected package entry. No fix offered by npm. |"
         in result
     )
-    assert "1 new advisory" not in result
+    assert "advisory" not in result and "Advisories" not in result
 
 
 def test_security_headline_separates_fixes_pin_decisions_and_all_blockers(
@@ -2012,9 +2013,9 @@ def test_security_headline_separates_fixes_pin_decisions_and_all_blockers(
     )
     assert (
         result.splitlines()[0]
-        == "🟢 **Fixes 1 advisory** · 🟠 **1 pin needs your review** · 🔴 **Fixes blocked for 7 packages**"
+        == "🟢 **Fixes in 1 package** · 🟠 **1 package needs your review** · 🔴 **Fixes blocked for 7 packages**"
     )
-    assert result.count("| `blocked-") == 5
+    assert result.count("| 🔴\u00a0`blocked-") == 7
 
 
 def test_security_headline_does_not_call_unknown_fixes_blocked(security_findings):
@@ -2024,20 +2025,17 @@ def test_security_headline_does_not_call_unknown_fixes_blocked(security_findings
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
         result.splitlines()[0]
-        == "⚪ **No advisories fixed** · 🟠 **1 package needs your review**"
+        == "⚪ **No security fixes** · ⚪ **1 package needs verification**"
     )
-    assert "Fixes blocked" not in result
+    assert "Fixes blocked" not in result and "🟠" not in result
 
 
 def test_security_headline_does_not_infer_fixes_from_totals():
     before = {"metadata": {"vulnerabilities": {"critical": 2}}}
     after = {"metadata": {"vulnerabilities": {"critical": 1}}}
     result = audit_module["format_audit_summary"](before, after, "pnpm")
-    assert (
-        result.splitlines()[0]
-        == "🟠 **Fixes unconfirmed** · 🟠 **Blockers unconfirmed**"
-    )
-    assert "Fixes 1" not in result
+    assert result.splitlines()[0] == "⚪ **Fixes unconfirmed**"
+    assert "Fixes in 1" not in result and "🟠" not in result
 
 
 @pytest.mark.parametrize("initial_unavailable", [False, True])
@@ -2101,5 +2099,61 @@ def test_maintenance_subtotal_excludes_security_updates_without_guessing(
         assert "**Maintenance:**" not in visible
     else:
         assert "**Maintenance:** 1 additional package update (2 total)." in visible
-        assert "Fixes 1 affected package entry" in visible
-        assert visible.index("| 🟢\u00a0Resolved |") < visible.index("**Maintenance:**")
+        assert "Fixes in 1 package" in visible
+        assert visible.index("| 🟢\u00a0`security` |") < visible.index(
+            "**Maintenance:**"
+        )
+
+
+def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
+    security_findings,
+):
+    for status, badge in [
+        (
+            "Published patch: `leaf@1.2.0`. Blocked by retained override `pnpm-workspace.yaml overrides.leaf` = `1.0.0`.",
+            "🟠",
+        ),
+        ("No patched version declared by the registry.", "🔴"),
+        ("Publication could not be fully verified.", "⚪"),
+    ]:
+        current = ("leaf", "pending", "high", status)
+        result = audit_module["format_audit_summary"](
+            security_findings([current, ("leaf", "fixed", "high", "")]),
+            security_findings([current]),
+            "pnpm",
+        )
+        assert f"| {badge}\u00a0`leaf` | 1 fixed · 1 pending |" in result
+        assert result.count("| " + badge + "\u00a0`leaf`") == 1
+        assert ("your review" in result) == (badge == "🟠")
+
+
+def test_package_advisory_counts_deduplicate_repeated_identity(security_findings):
+    repeated = ("leaf", "same", "high", "No patched version declared by the registry.")
+    before = security_findings([repeated, repeated, ("leaf", "fixed", "high", "")])
+    after = security_findings([repeated, repeated])
+    result = audit_module["format_audit_summary"](before, after, "pnpm")
+    assert "| 🔴\u00a0`leaf` | 1 fixed · 1 pending |" in result
+
+
+def test_missing_initial_evidence_cannot_color_a_package_resolved(security_findings):
+    current = security_findings(
+        [("leaf", "open", "high", "No patched version declared by the registry.")]
+    )
+    result = audit_module["format_audit_summary"]("Audit unavailable", current, "pnpm")
+    assert "| 🔴\u00a0`leaf` | fixes unconfirmed · 1 pending |" in result
+    assert "🟢" not in result and "🟠" not in result
+
+
+def test_npm_major_upgrade_requires_user_attention():
+    data = {
+        "metadata": {"vulnerabilities": {"high": 1}},
+        "vulnerabilities": {
+            "leaf": {"severity": "high", "fixAvailable": {"isSemVerMajor": True}}
+        },
+    }
+    result = audit_module["format_audit_summary"](data, data, "npm")
+    assert (
+        "| 🟠\u00a0`leaf` | 1 pending | The offered fix requires a major upgrade."
+        in result
+    )
+    assert "your review" in result
