@@ -10,8 +10,14 @@ the workflow to a reviewed commit.
 | --- | --- | --- |
 | Docusaurus maintenance | Fix security advisories, propose dependency upgrades, build the website, and open one PR for review. | [Setup guide](docs/docusaurus.md) |
 
-The report highlights fixes, decisions that need your attention, and blocked
-packages. Detailed audit evidence stays folded. You decide what to merge.
+## One maintenance PR per website
+
+**Security fixes and routine upgrades, together in one PR.** Reruns update that
+same PR, so each audit does not add another PR to review.
+
+- **Less PR noise:** one combined review instead of individual Dependabot PRs. [Comparison](docs/docusaurus.md#why-use-this-workflow).
+- **Build evidence:** a frozen install and production website build before review.
+- **Clear decisions:** see what was fixed, which pins need review, and what is blocked.
 
 The Docusaurus workflow requires Node.js 24, pnpm 11.21.0, and a standalone
 website project. Existing project pins and deployment remain under your control.
