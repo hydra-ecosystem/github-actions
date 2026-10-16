@@ -853,7 +853,8 @@ def test_summary_precedes_collapsed_full_audit(npm_project, monkeypatch):
     summary, details = report.split("<details>", 1)
 
     assert "**Changes:** 1 direct / 0 locked dependencies." in summary
-    assert "**Resolved:** none. **Remaining:** 0 affected package entries." in summary
+    assert "🟢 **Remaining:** 0 affected package entries." in summary
+    assert "⚪ **Resolved:** none." in summary
     assert "## Production build\n\nPassed." in summary
     assert len(summary) < 600
     assert "renderer: `1.0.0` → `2.0.0`" in details
@@ -1853,3 +1854,62 @@ def test_pnpm_reference_policy_and_publisher_include_workspace():
     )
     publisher = workflow["jobs"]["pull-request"]
     assert all("corepack" not in step.get("run", "") for step in publisher["steps"])
+
+
+def test_attention_lists_all_blocking_pins_before_other_findings(security_findings):
+    rows = [
+        (
+            "aaa-parent",
+            "parent",
+            "critical",
+            "No patched version declared by the registry.",
+        )
+    ]
+    for index in range(7):
+        name = f"pinned-{index}"
+        status = (
+            f"Published patch: `{name}@1.2.0`. Blocked by retained override "
+            f"`pnpm-workspace.yaml overrides.{name}` = `1.0.0`. "
+            "Override preserved for manual compatibility review."
+        )
+        rows.append((name, str(index), "high", status))
+    # Several advisories for a package must produce one decision row.
+    rows.append(("pinned-0", "another", "moderate", rows[1][3]))
+    data = security_findings(rows)
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
+    assert "🔴 **Remaining:** 9 registry advisories" in result
+    assert result.index("Your attention") < result.index("Other blockers")
+    assert result.index("| `pinned-6`") < result.index("| `aaa-parent`")
+    assert result.count("| `pinned-") == 7
+    assert "`1.0.0` → `1.2.0` | Review removal; safety unverified." in result
+    assert "No pins were changed." in result
+    assert "removing them has not been validated" in result
+
+
+def test_attention_does_not_invent_candidate_when_parents_also_block(security_findings):
+    status = (
+        "Published patches exist, but no single patch satisfies all checked parent constraints. "
+        "Blocked by retained override `pnpm-workspace.yaml overrides.leaf` = `1.0.0`."
+    )
+    data = security_findings([("leaf", "one", "high", status)])
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
+    assert "`1.0.0` → `see advisory details`" in result
+    assert "safety unverified" in result
+
+
+def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_findings):
+    status = (
+        "Published patch: `@scope/leaf@2.0.1`. Blocked by retained override "
+        "`pnpm-workspace.yaml overrides.@scope/leaf` = `1.0.0 || 2.0.0`."
+    )
+    data = security_findings([("@scope/leaf", "one", "high", status)])
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
+    assert "| `@scope/leaf` | `1.0.0 &#124;&#124; 2.0.0` → `2.0.1` |" in result
+
+
+def test_attention_is_absent_when_no_blocking_pin_was_verified(security_findings):
+    data = security_findings([("leaf", "one", "high", "Could not verify publication.")])
+    result = audit_module["format_audit_summary"](data, data, "pnpm")
+    assert "Your attention" not in result
+    assert "🔴 Remaining findings" in result
+    assert "No pins were changed" not in result
