@@ -1208,25 +1208,18 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     resolved_ids = old_ids - current_ids if comparable else set()
     new_ids = current_ids - old_ids if comparable else set()
 
-    def names(rows, selected):
-        packages = sorted({name for identity, name, _ in rows if identity in selected})
-        return ", ".join(f"`{name}`" for name in packages[:5]) + (
-            f", and {len(packages) - 5} more packages" if len(packages) > 5 else ""
-        )
-
-    resolved = (
-        f"{len(resolved_ids)} ({names(old, resolved_ids)})"
-        if resolved_ids
-        else "none"
-        if comparable
-        else "unconfirmed; initial or detailed audit evidence unavailable"
-    )
     summary = f"{'🔴' if total else '🟢'} **Remaining:** {total} {label}" + (
         f" ({remaining})." if remaining else "."
     )
-    summary += f"\n\n{'🟢' if resolved_ids else '⚪' if comparable else '🟠'} **Resolved:** {resolved}."
-    if new_ids:
-        summary += f" 🔴 **New:** {len(new_ids)} ({names(current, new_ids)})."
+    if not comparable:
+        summary += "\n\n🟠 Resolution unconfirmed; initial or detailed audit evidence unavailable."
+
+    def severity_counts(details):
+        return ", ".join(
+            f"{sum(detail['severity'] == level for detail in details)} {level}"
+            for level in SEVERITY_ORDER
+            if any(detail["severity"] == level for detail in details)
+        )
 
     def reason(detail):
         status = detail.get("fixStatus", "")
@@ -1252,6 +1245,10 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             return "No fix offered by npm."
         return "Fix availability or resolution needs manual review."
 
+    resolved_groups: dict = {}
+    for identity, name, detail in old:
+        if identity in resolved_ids:
+            resolved_groups.setdefault(name, {})[identity] = detail
     groups: dict = {}
     for identity, name, detail in current:
         groups.setdefault(name, {})[identity] = detail
@@ -1273,16 +1270,24 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             for detail in groups[name].values()
         )
     ]
-    others = [name for name in ordered if name not in pinned]
-    if groups:
+    outcome_packages = [
+        name
+        for name in ordered
+        if name not in pinned
+        and (name in resolved_groups or new_ids.intersection(groups[name]))
+    ]
+    others = [name for name in ordered if name not in pinned + outcome_packages]
+    if groups or resolved_groups:
         summary += "\n\n| Status | Package | Action / blocker |\n| --- | --- | --- |\n"
-    for name in pinned + others[:5]:
+    for name, findings in sorted(resolved_groups.items()):
+        severities = severity_counts(list(findings.values()))
+        action = "No longer reported in the final audit."
+        if name in groups:
+            action += " Other findings for this package remain below."
+        summary += f"| 🟢\u00a0Resolved | `{name}` ({severities}) | {action} |\n"
+    for name in pinned + outcome_packages + others[:5]:
         details = list(groups[name].values())
-        severities = ", ".join(
-            f"{sum(detail['severity'] == level for detail in details)} {level}"
-            for level in SEVERITY_ORDER
-            if any(detail["severity"] == level for detail in details)
-        )
+        severities = severity_counts(details)
         statuses = [detail.get("fixStatus", "") for detail in details]
         if name in pinned:
             pins = sorted(
@@ -1331,9 +1336,18 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
                 )
                 else "🔴\u00a0Blocked"
             )
+        new_count = len(new_ids.intersection(groups[name]))
+        if new_count:
+            unit = "advisory" if source == "pnpm" else "affected package entry"
+            if new_count != 1:
+                unit = "advisories" if source == "pnpm" else "affected package entries"
+            action = f"{new_count} new {unit}. " + action
+            badge = "🔴\u00a0New"
         summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
     if len(others) > 5:
-        summary += f"\n{len(others) - 5} more affected packages are listed in the audit details."
+        extra = len(others) - 5
+        noun = "package is" if extra == 1 else "packages are"
+        summary += f"\n{extra} more affected {noun} listed in the audit details."
     return summary
 
 
