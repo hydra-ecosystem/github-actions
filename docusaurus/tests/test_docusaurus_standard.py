@@ -1910,6 +1910,8 @@ def test_attention_does_not_invent_candidate_when_parents_also_block(security_fi
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert "Pin `1.0.0` blocks fix `see advisory details`" in result
     assert "Parent constraints also block the fix" in result
+    assert "**1 pin needs your review**" in result
+    assert "**Fixes blocked for 1 package**" in result
 
 
 def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_findings):
@@ -1952,6 +1954,8 @@ def test_single_table_keeps_other_advisories_for_a_pinned_package_visible(
     assert result.count("| 🟠\u00a0Review |") == 1
     assert "`leaf` (1 critical, 1 high)" in result
     assert "No published patch matches the fix range." in result
+    assert "**1 pin needs your review**" in result
+    assert "**Fixes blocked for 1 package**" in result
 
 
 def test_fully_resolved_findings_still_produce_one_table(security_findings):

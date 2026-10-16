@@ -1245,6 +1245,12 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             return "No fix offered by npm."
         return "Fix availability or resolution needs manual review."
 
+    def needs_review(action):
+        return any(
+            word in action.lower()
+            for word in ("review", "verification", "major upgrade")
+        )
+
     resolved_groups: dict = {}
     for identity, name, detail in old:
         if identity in resolved_ids:
@@ -1330,17 +1336,19 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             badge = "🟠\u00a0Review"
         else:
             action = " ".join(dict.fromkeys(reason(detail) for detail in details))
-            badge = (
-                "🟠\u00a0Review"
-                if any(
-                    word in action.lower()
-                    for word in ("review", "verification", "major upgrade")
-                )
-                else "🔴\u00a0Blocked"
-            )
-        if badge == "🔴\u00a0Blocked":
+            badge = "🟠\u00a0Review" if needs_review(action) else "🔴\u00a0Blocked"
+        unpinned_reasons = [
+            reason(detail)
+            for detail in details
+            if "Blocked by retained override" not in detail.get("fixStatus", "")
+        ]
+        if any(not needs_review(action) for action in unpinned_reasons) or any(
+            "no single patch satisfies all" in status for status in statuses
+        ):
             blocked_count += 1
-        elif name not in pinned:
+        if name not in pinned and any(
+            needs_review(action) for action in unpinned_reasons
+        ):
             review_count += 1
         new_count = len(new_ids.intersection(groups[name]))
         if new_count:
