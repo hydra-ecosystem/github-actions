@@ -1273,16 +1273,18 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             for detail in groups[name].values()
         )
     ]
-    if pinned:
-        summary += (
-            "\n\n**🟠 Your attention — project pins**\n\n"
-            "Published fixes exist. Pins were preserved; removing them has not "
-            "been validated.\n\n"
-            "| Package | Pin → published fix | Recommendation |\n"
-            "| --- | --- | --- |\n"
+    others = [name for name in ordered if name not in pinned]
+    if groups:
+        summary += "\n\n| Status | Package | Action / blocker |\n| --- | --- | --- |\n"
+    for name in pinned + others[:5]:
+        details = list(groups[name].values())
+        severities = ", ".join(
+            f"{sum(detail['severity'] == level for detail in details)} {level}"
+            for level in SEVERITY_ORDER
+            if any(detail["severity"] == level for detail in details)
         )
-        for name in pinned:
-            statuses = [detail.get("fixStatus", "") for detail in groups[name].values()]
+        statuses = [detail.get("fixStatus", "") for detail in details]
+        if name in pinned:
             pins = sorted(
                 {
                     match
@@ -1304,31 +1306,34 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             )
             candidate = ", ".join(patches) or "see advisory details"
             pin = ", ".join(pins) or "see advisory details"
-            # Keep Markdown columns intact for disjunctive override ranges.
             pin, candidate = (
                 value.replace("|", "&#124;") for value in (pin, candidate)
             )
-            summary += f"| `{name}` | `{pin}` → `{candidate}` | Review removal; safety unverified. |\n"
-        summary += "\nNo pins were changed."
-    others = [name for name in ordered if name not in pinned]
-    if others:
-        summary += (
-            "\n\n**🔴 Other blockers**\n"
-            if pinned
-            else "\n\n**🔴 Remaining findings**\n"
-        )
-        summary += "\n| Still open | Why |\n| --- | --- |\n"
-        for name in others[:5]:
-            details = list(groups[name].values())
-            severities = ", ".join(
-                f"{sum(detail['severity'] == level for detail in details)} {level}"
-                for level in SEVERITY_ORDER
-                if any(detail["severity"] == level for detail in details)
+            action = f"Pin `{pin}` blocks fix `{candidate}`; review removing or updating the pin."
+            if any("no single patch satisfies all" in status for status in statuses):
+                action += " Parent constraints also block the fix; see details."
+            # Keep unrelated findings for the same package visible too.
+            extra = [
+                reason(detail)
+                for detail in details
+                if "Blocked by retained override" not in detail.get("fixStatus", "")
+            ]
+            if extra:
+                action += " " + " ".join(dict.fromkeys(extra))
+            badge = "🟠 Review pin"
+        else:
+            action = " ".join(dict.fromkeys(reason(detail) for detail in details))
+            badge = (
+                "🟠 Review fix"
+                if any(
+                    word in action.lower()
+                    for word in ("review", "verification", "major upgrade")
+                )
+                else "🔴 Blocked"
             )
-            reasons = " ".join(dict.fromkeys(reason(detail) for detail in details))
-            summary += f"| `{name}` ({severities}) | {reasons} |\n"
-        if len(others) > 5:
-            summary += f"\n{len(others) - 5} more affected packages are listed in the audit details."
+        summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
+    if len(others) > 5:
+        summary += f"\n{len(others) - 5} more affected packages are listed in the audit details."
     return summary
 
 
