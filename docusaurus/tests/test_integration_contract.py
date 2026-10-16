@@ -47,7 +47,28 @@ def test_auditor_never_declares_publisher_secrets():
 def test_public_contract_identifies_the_consumer_interface():
     contract = json.loads((ROOT / "docusaurus/contract.json").read_text())
     assert contract["schema_version"] == 1
-    assert contract["integration_version"] == 1
+    assert contract["integration_version"] == 2
     assert contract["component"] == "docusaurus"
     assert (ROOT / contract["caller_template"]).is_file()
     assert contract["consumer_config"] == ".github/docusaurus.json"
+
+
+def test_toolchain_defaults_and_pre_mutation_enforcement():
+    contract = json.loads((ROOT / "docusaurus/contract.json").read_text())
+    assert contract["toolchain_defaults"] == {"node": "project", "pnpm": "project"}
+    steps = yaml.safe_load((ROOT / "docusaurus/audit/action.yml").read_text())["runs"][
+        "steps"
+    ]
+    verify = next(
+        i for i, step in enumerate(steps) if "--verify-runtime" in step.get("run", "")
+    )
+    proposal = next(i for i, step in enumerate(steps) if step.get("id") == "proposal")
+    assert verify < proposal
+
+
+def test_ci_exercises_every_advertised_combination():
+    supported = json.loads((ROOT / "docusaurus/runtime/toolchain.json").read_text())[
+        "supported"
+    ]
+    workflow = yaml.safe_load((ROOT / ".github/workflows/validate.yml").read_text())
+    assert workflow["jobs"]["toolchain"]["strategy"]["matrix"] == supported

@@ -24,10 +24,11 @@ value if your site lives elsewhere.
 ### 1. Prepare the website
 
 You need a Docusaurus project with its own pnpm lockfile and a `build` script
-that runs all required checks and build steps. The current shared toolchain is
-Node.js 24 and pnpm 11.21.0.
+that runs all required checks and build steps. Choose a [supported toolchain](#toolchain-selection) already used by your project.
+Node 22 or 24 and pnpm 11.20.0 or 11.21.0 are the initial tested combinations.
+Node 22 must be at least 22.13.0.
 
-In `website/package.json`, set this field alongside your existing fields:
+Keep an exact supported pnpm version in `website/package.json`, for example:
 
 ```json
 {
@@ -75,6 +76,7 @@ Create `.github/docusaurus.json` in your repository:
 ```json
 {
   "directory": "website",
+  "toolchain": {},
   "schedule": ["0 2 30 1 *"]
 }
 ```
@@ -107,14 +109,14 @@ jobs:
   audit:
     permissions:
       contents: read
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@0241fc5c14b41232a7312dd27d28ab566cfdc4cf
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@REVIEWED_FULL_COMMIT_SHA
 
   pull-request:
     needs: audit
     permissions:
       contents: write
       pull-requests: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@0241fc5c14b41232a7312dd27d28ab566cfdc4cf
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@REVIEWED_FULL_COMMIT_SHA
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}
       app-client-id: ${{ vars.DOCUSAURUS_APP_CLIENT_ID }}
@@ -122,6 +124,8 @@ jobs:
       app-private-key: ${{ secrets.DOCUSAURUS_APP_PRIVATE_KEY }}
 ```
 
+Replace both `REVIEWED_FULL_COMMIT_SHA` placeholders with the same reviewed
+40-character commit SHA that contains integration contract version 2.
 Both calls use the same full commit SHA, so the implementation stays fixed until
 you choose to update it. The audit job has read access. Only the publisher has
 permission to push the dependency branch and open a PR.
@@ -160,6 +164,71 @@ upgrades**. Reruns reuse the same maintenance branch and open PR. A successful
 rerun leaves an existing draft for human review. Remaining advisories do not
 mean the build failed; the report explains what remains blocked. A passing build
 does not establish that every dependency vulnerability is resolved.
+
+## Toolchain selection
+
+New installations include `"toolchain": {}` in `.github/docusaurus.json`.
+Both omitted settings default to **follow project**:
+
+```json
+{
+  "directory": "website",
+  "toolchain": {"node": "project", "pnpm": "project"}
+}
+```
+
+| Setting | Project declaration | Supported values |
+| --- | --- | --- |
+| Node | Nearest `.nvmrc` or `.node-version`, starting in the website directory and stopping at the repository root | Major 22 or 24, or an exact stable version in those majors; minimum 22.13.0 |
+| pnpm | Website `package.json` → `packageManager` | Exact 11.20.0 or 11.21.0, including an optional Corepack integrity suffix |
+
+Both pnpm versions are tested with both Node majors. The audit requires pnpm
+lockfile version 9.0. It checks the actual installed versions and website
+`engines.node` before changing dependencies.
+
+A website declaration takes precedence over declarations in its parent directories.
+If `.nvmrc` and `.node-version` are both present in the selected directory, they
+must agree. A major and an exact version within that major agree; the exact pin
+wins. Different majors or different exact versions stop the run.
+
+Use numeric majors or exact stable versions in these files. Symbolic aliases
+such as `lts/*` and broad engine ranges do not select a runtime. Missing runtime
+declarations stop with instructions; the workflow does not guess or fall back
+to a different version. Engine checks accept stable numeric comparisons,
+major/minor families, `^`, `~`, wildcards and `||`; unsupported range syntax
+stops with a diagnostic.
+
+To require explicit values, set either setting independently:
+
+```json
+{
+  "directory": "website",
+  "toolchain": {"node": "24", "pnpm": "11.21.0"}
+}
+```
+
+An explicit value is a requirement. It must agree with the project's declarations
+and the installed tools. Node `24` requires that major; an exact Node value
+requires that exact release. pnpm requires an exact version. Conflicts fail
+before dependency resolution; the action does not rewrite declarations to match.
+
+Before enabling or changing these settings:
+
+1. Align the website's Node declaration and `engines.node`, if present.
+2. Align `packageManager` with the selected supported pnpm version.
+3. Make website build/deployment CI use the same declaration. For example, use
+   `node-version-file: website/.nvmrc` with `actions/setup-node`, then run the
+   project's pinned pnpm through Corepack. Keep one source for the Node pin.
+4. Run a frozen install and the normal production build with those tools.
+
+Changing a setting does not perform a migration. npm/Yarn, pnpm major changes,
+incompatible lockfiles and other tool versions require a separately verified
+migration before adoption.
+
+Existing configurations **without a `toolchain` object** keep the legacy Node 24
+and pnpm 11.21.0 selection. Updating the shared SHA alone does not opt them into
+project-derived versions. To opt in, first review and align the declarations and
+website CI, pin a contract-version-2 revision, then add `"toolchain": {}`.
 
 ## Optional: publish with a GitHub App
 

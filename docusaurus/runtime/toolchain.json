@@ -1,5 +1,15 @@
 {
   "node": "24",
   "pnpm": "11.21.0",
-  "minimumReleaseAge": 14400
+  "minimumReleaseAge": 14400,
+  "supported": {
+    "node": [
+      "22",
+      "24"
+    ],
+    "pnpm": [
+      "11.20.0",
+      "11.21.0"
+    ]
+  }
 }

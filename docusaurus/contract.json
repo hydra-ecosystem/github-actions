@@ -1,7 +1,12 @@
 {
   "schema_version": 1,
   "component": "docusaurus",
-  "integration_version": 1,
+  "integration_version": 2,
+  "toolchain_config": "toolchain",
+  "toolchain_defaults": {
+    "node": "project",
+    "pnpm": "project"
+  },
   "caller_template": "docusaurus/caller.yml",
   "consumer_config": ".github/docusaurus.json",
   "consumer_workflow": ".github/workflows/dependency-audit.yml"

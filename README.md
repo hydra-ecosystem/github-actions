@@ -19,8 +19,9 @@ same PR, so each audit does not add another PR to review.
 - **Build evidence:** a frozen install and production website build before review.
 - **Clear decisions:** see what was fixed, which pins need review, and what is blocked.
 
-The Docusaurus workflow requires Node.js 24, pnpm 11.21.0, and a standalone
-website project. Existing project pins and deployment remain under your control.
+The Docusaurus workflow follows your declared Node/pnpm versions within its
+[tested combinations](docs/docusaurus.md#toolchain-selection). It requires a
+standalone website project. Project pins and deployment remain under your control.
 The built-in GitHub token works; a GitHub App is optional.
 
 ## Reference

@@ -51,7 +51,7 @@ def test_project_directory_is_configuration_and_build_is_opaque(tmp_path):
     )
     assert (
         env.read_text()
-        == "NPM_PROJECT=docs/site with spaces\nDOCUSAURUS_NODE_VERSION=24\n"
+        == "NPM_PROJECT=docs/site with spaces\nDOCUSAURUS_NODE_VERSION=24\nDOCUSAURUS_PNPM_VERSION=11.21.0\n"
     )
 
 
@@ -205,3 +205,197 @@ def test_publisher_loads_config_after_guard_before_download():
         if "download-artifact@" in step.get("uses", "")
     )
     assert guard < config < download
+
+
+module = runpy.run_path(str(SHARED / "project.py"))
+
+
+@pytest.fixture
+def website(tmp_path):
+    site = tmp_path / "website"
+    site.mkdir()
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/docusaurus.json").write_text(
+        json.dumps({"directory": "website", "toolchain": {}})
+    )
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "packageManager": "pnpm@11.20.0",
+                "engines": {"node": ">=22.13"},
+                "dependencies": {"@docusaurus/core": "3.10.2"},
+                "scripts": {"build": "docusaurus build"},
+            }
+        )
+    )
+    (site / ".nvmrc").write_text("22\n")
+    (site / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    return tmp_path, site
+
+
+def configure(root, **settings):
+    path = root / ".github/docusaurus.json"
+    data = json.loads(path.read_text())
+    data["toolchain"] = settings
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("node", ["22", "24"])
+@pytest.mark.parametrize("pnpm", ["11.20.0", "11.21.0"])
+def test_follow_project_supported_matrix(website, node, pnpm):
+    root, site = website
+    (site / ".nvmrc").write_text(node)
+    path = site / "package.json"
+    data = json.loads(path.read_text())
+    data["packageManager"] = f"pnpm@{pnpm}"
+    path.write_text(json.dumps(data))
+    _, selected = module["project"](root)
+    assert selected == {"node": node, "pnpm": pnpm, "minimumReleaseAge": 14400}
+
+
+def test_closest_runtime_declaration_wins_and_root_is_fallback(website):
+    root, site = website
+    (root / ".node-version").write_text("24")
+    assert module["project"](root)[1]["node"] == "22"
+    (site / ".nvmrc").unlink()
+    assert module["project"](root)[1]["node"] == "24"
+
+
+@pytest.mark.parametrize("node, pnpm", [("24", "project"), ("project", "11.21.0")])
+def test_explicit_setting_conflicts_with_project_without_writes(website, node, pnpm):
+    root, site = website
+    configure(root, node=node, pnpm=pnpm)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError, match="[Cc]onflict"):
+        module["project"](root)
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+def test_explicit_node_satisfying_project_major_is_exact(website):
+    root, site = website
+    configure(root, node="22.14.0")
+    assert module["project"](root)[1]["node"] == "22.14.0"
+    (site / ".node-version").write_text("22.15.0")
+    with pytest.raises(ValueError, match="Conflicting Node"):
+        module["project"](root)
+
+
+@pytest.mark.parametrize(
+    "declaration", ["lts/*", "latest", ">=22", "22\nINJECTED=true", "22.0.0"]
+)
+def test_invalid_or_too_old_node_declaration_is_actionable(website, declaration):
+    root, site = website
+    (site / ".nvmrc").write_text(declaration)
+    with pytest.raises(ValueError, match="Node"):
+        module["project"](root)
+
+
+def test_missing_runtime_declaration_does_not_guess_from_engine_range(website):
+    root, site = website
+    (site / ".nvmrc").unlink()
+    with pytest.raises(ValueError, match="add .nvmrc or .node-version"):
+        module["project"](root)
+    configure(root, node="24")
+    assert module["project"](root)[1]["node"] == "24"
+
+
+@pytest.mark.parametrize(
+    "manager",
+    [
+        None,
+        "pnpm@latest",
+        "pnpm@^11.20.0",
+        "npm@11.0.0",
+        "yarn@4.0.0",
+        "pnpm@10.0.0",
+        "pnpm@12.0.0",
+    ],
+)
+def test_unsupported_package_manager_does_not_trigger_migration(website, manager):
+    root, site = website
+    path = site / "package.json"
+    data = json.loads(path.read_text())
+    data["packageManager"] = manager
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="packageManager|Unsupported toolchain"):
+        module["project"](root)
+
+
+def test_corepack_integrity_suffix_is_preserved(website):
+    root, site = website
+    path = site / "package.json"
+    data = json.loads(path.read_text())
+    data["packageManager"] = "pnpm@11.20.0+sha512." + "a" * 128
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    assert module["project"](root)[1]["pnpm"] == "11.20.0"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "version, expression, expected",
+    [
+        ((22, 14, 0), ">=22.13", True),
+        ((22, 12, 0), ">=22.13", False),
+        ((24, 1, 0), "^22.13.0 || ^24.0.0", True),
+        ((24, 1, 0), "22.x", False),
+        ((22, 14, 0), "22.x", True),
+        ((22, 14, 0), ">=22 <23", True),
+        ((24, 1, 0), ">22", True),
+        ((22, 14, 0), "<=22", True),
+        ((22, 14, 0), "~22.13.0", False),
+        ((24, 1, 0), "24.1.0", True),
+    ],
+)
+def test_node_engine_requirements(version, expression, expected):
+    assert module["node_satisfies"](version, expression) is expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [">=22 || garbage", "22 - 24", "|| 24", "24 ||", "latest", "24.1.0.x", "024.x"],
+)
+def test_unsupported_engine_syntax_is_not_silently_ignored(expression):
+    with pytest.raises(ValueError, match="range"):
+        module["node_satisfies"]((24, 1, 0), expression)
+
+
+@pytest.mark.parametrize(
+    "node, pnpm, lock, engine, error",
+    [
+        ("v24.14.0", "11.20.0", "9.0", ">=22.13", "Installed Node"),
+        ("v22.14.0", "11.21.0", "9.0", ">=22.13", "Installed pnpm"),
+        ("v22.14.0", "11.20.0", "6.0", ">=22.13", "lockfileVersion"),
+        ("v22.14.0", "11.20.0", "9.0", ">=24", "engines.node"),
+        ("v22.14.0", "11.20.0", "9.0", ">=22.13", None),
+    ],
+)
+def test_runtime_verified_before_dependency_changes(
+    website, monkeypatch, node, pnpm, lock, engine, error
+):
+    root, site = website
+    path = site / "package.json"
+    data = json.loads(path.read_text())
+    data["engines"]["node"] = engine
+    path.write_text(json.dumps(data))
+    (site / "pnpm-lock.yaml").write_text(f"lockfileVersion: '{lock}'\n")
+    commands = []
+
+    def invoke(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, node if command[0] == "node" else pnpm, ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", invoke)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    if error:
+        with pytest.raises(ValueError, match=error):
+            module["verify_runtime"](site, module["project"](root)[1])
+    else:
+        module["verify_runtime"](site, module["project"](root)[1])
+    assert all(
+        command in (["node", "--version"], ["corepack", "pnpm", "--version"])
+        for command in commands
+    )
+    assert all(path.read_bytes() == contents for path, contents in before.items())
