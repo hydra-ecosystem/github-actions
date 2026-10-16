@@ -96,7 +96,7 @@ def test_upgrade_keeps_manual_constraints_and_reports_unfixed_findings(
     assert "high: 1, total: 1" in report
     assert "npm fix candidate not offered by npm" in report
     assert "## Production build\n\nPassed." in report
-    assert "**Remaining:** 1 affected package entry (1 high)" in report
+    assert "**1 affected package entry remaining** (1 high)" in report
     assert "--force" not in [arg for command in commands for arg in command]
 
 
@@ -110,7 +110,7 @@ def test_failed_resolution_restores_original_files(npm_project, monkeypatch):
     for name, content in original.items():
         assert (npm_project / name).read_bytes() == content
     assert "from the initial security fix attempt" in report
-    assert "**Changes:** 0 direct / 0 locked dependencies." in report
+    assert "**Maintenance:** 0 additional package updates (0 total)." in report
     assert sum(command[:2] == ["audit", "fix"] for command in commands) == 1
 
 
@@ -486,7 +486,7 @@ def test_cli_entrypoint_prepares_selected_project(npm_project, monkeypatch):
         ["dependency-audit", "--directory", ".", "--report", str(report)],
     )
     runpy.run_path(audit_module["__file__"], run_name="__main__")
-    assert "**Remaining:**" in report.read_text()
+    assert "After merging:" in report.read_text()
     assert not (npm_project / "DEPENDENCY-AUDIT.md").exists()
     manifest = json.loads((npm_project / "package.json").read_text())
     assert manifest["dependencies"]["renderer"] == "2.0.0"
