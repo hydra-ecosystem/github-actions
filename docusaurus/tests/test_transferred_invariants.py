@@ -20,7 +20,12 @@ prepare = audit_module["prepare"]
 @pytest.fixture
 def npm_project(tmp_path):
     (tmp_path / "package.json").write_text(
-        json.dumps({"dependencies": {"renderer": "1.0.0"}})
+        json.dumps(
+            {
+                "scripts": {"build": "docusaurus build"},
+                "dependencies": {"renderer": "1.0.0"},
+            }
+        )
     )
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
     return tmp_path
@@ -30,7 +35,11 @@ def npm_project(tmp_path):
 def pnpm_project(tmp_path):
     (tmp_path / "package.json").write_text(
         json.dumps(
-            {"packageManager": "pnpm@11.21.0", "dependencies": {"renderer": "^1.0.0"}}
+            {
+                "scripts": {"build": "docusaurus build"},
+                "packageManager": "pnpm@11.21.0",
+                "dependencies": {"renderer": "^1.0.0"},
+            }
         )
     )
     (tmp_path / "pnpm-lock.yaml").write_text(
@@ -339,7 +348,13 @@ def test_valid_policy_mutation_restores_all_package_files(
             policy[field] = value
             workspace.write_text(yaml.safe_dump(policy))
             (cwd / "package.json").write_text(
-                json.dumps({"packageManager": "pnpm@11.21.0", "dependencies": {}})
+                json.dumps(
+                    {
+                        "scripts": {"build": "docusaurus build"},
+                        "packageManager": "pnpm@11.21.0",
+                        "dependencies": {},
+                    }
+                )
             )
             lockfile = cwd / "pnpm-lock.yaml"
             lock = yaml.safe_load(lockfile.read_text())

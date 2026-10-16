@@ -173,11 +173,12 @@ def project(root: Path) -> tuple[Path, dict]:
     config = json.loads((root / ".github/docusaurus.json").read_text())
     if (
         not isinstance(config, dict)
-        or not set(config) <= {"directory", "schedule", "toolchain"}
+        or not set(config)
+        <= {"directory", "schedule", "toolchain", "buildScript", "maintenance"}
         or "directory" not in config
     ):
         raise ValueError(
-            "docusaurus.json accepts only project directory and schedule, plus toolchain"
+            "docusaurus.json accepts only project directory and schedule, plus toolchain, buildScript and maintenance"
         )
     name = config["directory"]
     schedules = config.get("schedule", ["0 2 30 1 *"])
@@ -208,14 +209,46 @@ def project(root: Path) -> tuple[Path, dict]:
     }
     if "@docusaurus/core" not in dependencies:
         raise ValueError("configured project does not declare @docusaurus/core")
-    if not manifest.get("scripts", {}).get("build"):
-        raise ValueError("configured project must own its normal build script")
+    script = config.get("buildScript", "build")
+    scripts = manifest.get("scripts", {})
+    if (
+        not isinstance(script, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]*", script) is None
+        or not isinstance(scripts, dict)
+        or not isinstance(scripts.get(script), str)
+        or not scripts[script].strip()
+    ):
+        raise ValueError(
+            "docusaurus.json buildScript must name an existing nonempty package.json script; default is build"
+        )
+    maintenance = config.get("maintenance", {})
+    if not isinstance(maintenance, dict) or not set(maintenance) <= {
+        "mode",
+        "upgradeScope",
+    }:
+        raise ValueError(
+            "docusaurus.json maintenance accepts only mode and upgradeScope"
+        )
+    mode = maintenance.get("mode", "security-and-maintenance")
+    scope = maintenance.get("upgradeScope", "major")
+    if mode not in ("security-only", "security-and-maintenance"):
+        raise ValueError(
+            "docusaurus.json maintenance.mode must be security-only or security-and-maintenance"
+        )
+    if scope not in ("patch", "minor", "major"):
+        raise ValueError(
+            "docusaurus.json maintenance.upgradeScope must be patch, minor or major"
+        )
     baseline = json.loads(Path(__file__).with_name("toolchain.json").read_text())
     if "toolchain" in config and config["toolchain"] is None:
         raise ValueError("docusaurus.json toolchain must be an object")
-    return directory, resolve_toolchain(
+    selected = resolve_toolchain(
         root, directory, manifest, config.get("toolchain"), baseline
     )
+    selected.update(
+        buildScript=script, maintenance={"mode": mode, "upgradeScope": scope}
+    )
+    return directory, selected
 
 
 def verify_runtime(directory, selected):
@@ -276,6 +309,9 @@ def main() -> None:
         f"NPM_PROJECT={directory.relative_to(args.root.resolve()).as_posix()}\n"
         f"DOCUSAURUS_NODE_VERSION={selected['node']}\n"
         f"DOCUSAURUS_PNPM_VERSION={selected['pnpm']}\n"
+        f"DOCUSAURUS_BUILD_SCRIPT={selected['buildScript']}\n"
+        f"DOCUSAURUS_MAINTENANCE_MODE={selected['maintenance']['mode']}\n"
+        f"DOCUSAURUS_UPGRADE_SCOPE={selected['maintenance']['upgradeScope']}\n"
     )
     if args.github_env:
         with args.github_env.open("a") as output:

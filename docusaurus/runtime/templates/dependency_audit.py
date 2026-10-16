@@ -1373,7 +1373,91 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     return headline
 
 
-def eligible_version(directory, name, latest, snapshot, notes, deadline):
+def within_upgrade_scope(before, after, scope):
+    return after >= before and (
+        scope == "major"
+        or (scope == "minor" and after[0] == before[0])
+        or (scope == "patch" and after[:2] == before[:2])
+    )
+
+
+def direct_versions(snapshot):
+    if "pnpm-lock.yaml" in snapshot[1]:
+        return direct_pnpm_versions(snapshot[1])
+    packages = snapshot[3].get("packages", {})
+    result = {}
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        for name in snapshot[2].get(section, {}):
+            version = stable_version(
+                packages.get(f"node_modules/{name}", {}).get("version")
+            )
+            if version is not None:
+                result[(section, name)] = version
+    return result
+
+
+def direct_reference(snapshot, section, name):
+    if "pnpm-lock.yaml" in snapshot[1]:
+        lock = yaml.safe_load(snapshot[1]["pnpm-lock.yaml"])
+        return lock.get("importers", {}).get(".", {}).get(section, {}).get(name)
+    return snapshot[3].get("packages", {}).get(f"node_modules/{name}")
+
+
+def routine_scope_violation(before, after, scope):
+    """Check actual direct specifiers and resolved versions, not just lookups."""
+    if scope == "major":
+        return None
+    old_versions, new_versions = direct_versions(before), direct_versions(after)
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        old, new = before[2].get(section, {}), after[2].get(section, {})
+        if set(old) != set(new):
+            return f"{section} membership changed"
+        for name, specifier in old.items():
+            key = (section, name)
+            old_floor, new_floor = (
+                stable_manifest_minimum(specifier),
+                stable_manifest_minimum(new[name]),
+            )
+            baseline = old_versions.get(key)
+            if specifier != new[name] and (
+                baseline is None
+                or old_floor is None
+                or new_floor is None
+                or not within_upgrade_scope(max(baseline, old_floor), new_floor, scope)
+            ):
+                return (
+                    f"{section}.{name} manifest requirement exceeds the selected scope"
+                )
+            resolved = new_versions.get(key)
+            if (
+                baseline is None
+                and resolved is None
+                and (
+                    direct_reference(before, section, name)
+                    != direct_reference(after, section, name)
+                )
+            ):
+                return f"{section}.{name} changed an unverifiable direct reference"
+            if baseline != resolved and (
+                baseline is None
+                or resolved is None
+                or not within_upgrade_scope(baseline, resolved, scope)
+            ):
+                return f"{section}.{name} resolved version exceeds the selected scope"
+    return None
+
+
+def eligible_version(
+    directory,
+    name,
+    latest,
+    snapshot,
+    notes,
+    deadline,
+    *,
+    baseline=None,
+    upgrade_scope="major",
+):
     """Select a stable release within the deployment's publication-age policy."""
     result = run(directory, "view", name, "time", "--json", deadline=deadline)
     if restore_invalid_state(
@@ -1399,6 +1483,10 @@ def eligible_version(directory, name, latest, snapshot, notes, deadline):
             number = tuple(map(int, version.split(".")))
             if (
                 number <= limit
+                and (
+                    baseline is None
+                    or within_upgrade_scope(baseline, number, upgrade_scope)
+                )
                 and datetime.fromisoformat(published.replace("Z", "+00:00")) <= cutoff
             ):
                 candidates.append((number, version))
@@ -1430,7 +1518,14 @@ def locked_changes(before: dict, after: dict) -> list[str]:
     ]
 
 
-def prepare(directory: Path, *, validation: dict | None = None) -> str:
+def prepare(
+    directory: Path,
+    *,
+    validation: dict | None = None,
+    build_script="build",
+    maintenance_mode="security-and-maintenance",
+    upgrade_scope="major",
+) -> str:
     # Leave time in the 60-minute job to write and upload a partial report.
     deadline = time.monotonic() + 45 * 60
     manifest_path = directory / "package.json"
@@ -1441,6 +1536,21 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
         raise ValueError(
             "Valid manifest, one deployment lockfile and package-manager policy are required"
         )
+    scripts = initial_snapshot[2].get("scripts", {})
+    if (
+        not isinstance(build_script, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]*", build_script) is None
+        or not isinstance(scripts, dict)
+        or not isinstance(scripts.get(build_script), str)
+        or not scripts[build_script].strip()
+    ):
+        raise ValueError(
+            "Selected build script must name an existing nonempty package.json script"
+        )
+    if maintenance_mode not in ("security-only", "security-and-maintenance"):
+        raise ValueError("Invalid maintenance mode")
+    if upgrade_scope not in ("patch", "minor", "major"):
+        raise ValueError("Invalid maintenance upgrade scope")
     before_lock = initial_snapshot[3]
     before = audit(directory, deadline=deadline)
     if restore_invalid_state(
@@ -1461,7 +1571,13 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
     cache: dict = {}
 
     # Give compatible security fixes the first use of the shared time budget.
-    fixed = fix_security(directory, deadline, notes, cache, before=before)
+    fixed = (
+        subprocess.CompletedProcess([], 0, "", "")
+        if maintenance_mode == "security-only"
+        and isinstance(before, dict)
+        and not affected
+        else fix_security(directory, deadline, notes, cache, before=before)
+    )
     restore_invalid_state(
         directory, last_valid_snapshot, notes, "Initial security fix", security_fix=True
     )
@@ -1473,131 +1589,158 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
     # Preserve those fixes if the wider stable-version upgrade cannot resolve.
     security_snapshot = valid_snapshot(directory) or last_valid_snapshot
     last_valid_snapshot = security_snapshot
-    manifest = json.loads(security_snapshot[0])
+    if maintenance_mode == "security-and-maintenance":
+        manifest = json.loads(security_snapshot[0])
 
-    # Preserve overrides and peer constraints for a maintainer to review.
-    for section in ("dependencies", "devDependencies", "optionalDependencies"):
-        for name, current in sorted(
-            manifest.get(section, {}).items(),
-            key=lambda item: (item[0] not in affected, item[0]),
-        ):
-            if not re.fullmatch(r"[~^]?\d+\.\d+\.\d+", current):
-                notes.append(
-                    f"Retained {name} specifier `{current}` for manual review."
-                )
-                continue
-            result = run(
-                directory,
-                "view",
-                f"{name}@latest",
-                "version",
-                "--json",
-                deadline=deadline,
-            )
-            if restore_invalid_state(
-                directory,
-                security_snapshot,
-                notes,
-                f"Version lookup for {name}",
-                frozen=True,
+        # Preserve overrides and peer constraints for a maintainer to review.
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            for name, current in sorted(
+                manifest.get(section, {}).items(),
+                key=lambda item: (item[0] not in affected, item[0]),
             ):
-                continue
-            try:
-                latest = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                latest = None
-            if (
-                result.returncode
-                or not isinstance(latest, str)
-                or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
-            ):
-                notes.append(f"Could not look up {name}; retained `{current}`.")
-                continue
-            if package_manager == "pnpm" and latest != current.lstrip("~^"):
-                latest = eligible_version(
-                    directory, name, latest, security_snapshot, notes, deadline
-                )
-                if latest is None:
+                if not re.fullmatch(r"[~^]?\d+\.\d+\.\d+", current):
                     notes.append(
-                        f"No eligible stable release verified for {name}; retained `{current}`."
+                        f"Retained {name} specifier `{current}` for manual review."
                     )
                     continue
-            resolved = current.lstrip("~^")
-            if package_manager == "pnpm":
-                importer = yaml.safe_load(security_snapshot[1]["pnpm-lock.yaml"])[
-                    "importers"
-                ]["."]
-                resolved = (
-                    importer.get(section, {}).get(name, {}).get("version", resolved)
-                )
-                if not isinstance(resolved, str) or not re.fullmatch(
-                    r"\d+\.\d+\.\d+", resolved.split("(", 1)[0]
-                ):
-                    notes.append(f"Retained {name} resolved version for manual review.")
+                resolved = direct_versions(security_snapshot).get((section, name))
+                if upgrade_scope != "major" and resolved is None:
+                    notes.append(
+                        f"Retained {name}: resolved direct version is unavailable for maintenance.upgradeScope={upgrade_scope}."
+                    )
                     continue
-                resolved = resolved.split("(", 1)[0]
-            floor = max(
-                tuple(map(int, current.lstrip("~^").split("."))),
-                tuple(map(int, resolved.split("."))),
-            )
-            if tuple(map(int, latest.split("."))) > floor:
-                manifest[section][name] = latest
-                changes.append((name, f"- {name}: `{current}` → `{latest}`"))
+                floor = max(
+                    stable_manifest_minimum(current),
+                    resolved or stable_manifest_minimum(current),
+                )
+                lookup = (
+                    (f"{name}@latest", "version")
+                    if upgrade_scope == "major"
+                    else (name, "versions")
+                )
+                result = run(
+                    directory,
+                    "view",
+                    *lookup,
+                    "--json",
+                    deadline=deadline,
+                )
+                if restore_invalid_state(
+                    directory,
+                    security_snapshot,
+                    notes,
+                    f"Version lookup for {name}",
+                    frozen=True,
+                ):
+                    continue
+                try:
+                    latest = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    latest = None
+                if upgrade_scope != "major":
+                    candidates = latest if isinstance(latest, list) else [latest]
+                    eligible = [
+                        value
+                        for value in candidates
+                        if stable_version(value) is not None
+                        and within_upgrade_scope(
+                            floor, stable_version(value), upgrade_scope
+                        )
+                    ]
+                    latest = max(eligible, key=stable_version) if eligible else None
+                if (
+                    result.returncode
+                    or not isinstance(latest, str)
+                    or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
+                ):
+                    notes.append(f"Could not look up {name}; retained `{current}`.")
+                    continue
+                if package_manager == "pnpm" and latest != current.lstrip("~^"):
+                    latest = eligible_version(
+                        directory,
+                        name,
+                        latest,
+                        security_snapshot,
+                        notes,
+                        deadline,
+                        baseline=floor if upgrade_scope != "major" else None,
+                        upgrade_scope=upgrade_scope,
+                    )
+                    if latest is None:
+                        notes.append(
+                            f"No eligible stable release verified for {name}; retained `{current}`."
+                        )
+                        continue
+                if tuple(map(int, latest.split("."))) > floor:
+                    manifest[section][name] = latest
+                    changes.append((name, f"- {name}: `{current}` → `{latest}`"))
 
-    if changes:
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    lock_flags = (
-        ["--lockfile-only", "--no-frozen-lockfile", "--ignore-scripts"]
-        if package_manager == "pnpm"
-        else ["--package-lock-only", "--ignore-scripts", "--no-audit"]
-    )
-    lock = run(
-        directory,
-        "install",
-        *lock_flags,
-        deadline=deadline,
-    )
-    invalid_stable_state = restore_invalid_state(
-        directory, security_snapshot, notes, "Stable install"
-    )
-    if lock.returncode or invalid_stable_state:
-        restore_snapshot(directory, security_snapshot)
-        notes.append(
-            f"Stable upgrade resolution failed (exit {lock.returncode}); restored "
-            "the manifest and lockfile from the initial security fix attempt."
+        if changes:
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        lock_flags = (
+            ["--lockfile-only", "--no-frozen-lockfile", "--ignore-scripts"]
+            if package_manager == "pnpm"
+            else ["--package-lock-only", "--ignore-scripts", "--no-audit"]
         )
-        changes = []
-    else:
-        stable_snapshot = valid_snapshot(directory) or security_snapshot
-        last_valid_snapshot = stable_snapshot
-        stable_audit = audit(directory, deadline=deadline)
-        if restore_invalid_state(
-            directory, stable_snapshot, notes, "Stable proposal audit", frozen=True
-        ):
-            stable_audit = (
-                "Audit unavailable: stable proposal audit changed package files."
-            )
-        if isinstance(stable_audit, dict):
-            affected.update(stable_audit.get("vulnerabilities", {}))
-        else:
-            notes.append(
-                "Stable proposal audit unavailable; follow-up security attribution is unconfirmed."
-            )
-        # Keep fixes within the proposed manifest constraints; never use --force.
-        fixed = fix_security(directory, deadline, notes, cache, before=stable_audit)
-        restore_invalid_state(
+        lock = run(
             directory,
-            stable_snapshot,
-            notes,
-            "Follow-up security fix",
-            security_fix=True,
+            "install",
+            *lock_flags,
+            deadline=deadline,
         )
-        if fixed.returncode:
+        invalid_stable_state = restore_invalid_state(
+            directory, security_snapshot, notes, "Stable install"
+        )
+        stable_candidate = valid_snapshot(directory)
+        violation = (
+            routine_scope_violation(security_snapshot, stable_candidate, upgrade_scope)
+            if stable_candidate is not None
+            else None
+        )
+        if violation:
+            restore_snapshot(directory, security_snapshot)
+            invalid_stable_state = True
             notes.append(
-                f"Automatic audit fix returned exit {fixed.returncode}; remaining findings "
-                "or a tool error require manual review."
+                f"Rejected routine proposal: maintenance.upgradeScope={upgrade_scope}; {violation}. Restored accepted security fixes."
             )
-        last_valid_snapshot = valid_snapshot(directory) or stable_snapshot
+        if lock.returncode or invalid_stable_state:
+            restore_snapshot(directory, security_snapshot)
+            notes.append(
+                f"Stable upgrade resolution failed (exit {lock.returncode}); restored "
+                "the manifest and lockfile from the initial security fix attempt."
+            )
+            changes = []
+        else:
+            stable_snapshot = valid_snapshot(directory) or security_snapshot
+            last_valid_snapshot = stable_snapshot
+            stable_audit = audit(directory, deadline=deadline)
+            if restore_invalid_state(
+                directory, stable_snapshot, notes, "Stable proposal audit", frozen=True
+            ):
+                stable_audit = (
+                    "Audit unavailable: stable proposal audit changed package files."
+                )
+            if isinstance(stable_audit, dict):
+                affected.update(stable_audit.get("vulnerabilities", {}))
+            else:
+                notes.append(
+                    "Stable proposal audit unavailable; follow-up security attribution is unconfirmed."
+                )
+            # Keep fixes within the proposed manifest constraints; never use --force.
+            fixed = fix_security(directory, deadline, notes, cache, before=stable_audit)
+            restore_invalid_state(
+                directory,
+                stable_snapshot,
+                notes,
+                "Follow-up security fix",
+                security_fix=True,
+            )
+            if fixed.returncode:
+                notes.append(
+                    f"Automatic audit fix returned exit {fixed.returncode}; remaining findings "
+                    "or a tool error require manual review."
+                )
+            last_valid_snapshot = valid_snapshot(directory) or stable_snapshot
 
     validation_snapshot = last_valid_snapshot
     install_args = (
@@ -1616,18 +1759,18 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
             f"(exit {install.returncode}); validation failed."
         )
     else:
-        build = run(directory, "run", "build", deadline=deadline)
+        build = run(directory, "run", build_script, deadline=deadline)
         invalid_build_state = restore_invalid_state(
             directory,
             last_valid_snapshot,
             notes,
-            f"{package_manager} run build",
+            f"{package_manager} run {build_script}",
             frozen=True,
         )
         last_valid_snapshot = valid_snapshot(directory) or last_valid_snapshot
         if invalid_build_state:
             build_status = (
-                f"Failed: {package_manager} run build changed package files or left invalid "
+                f"Failed: {package_manager} run {build_script} changed package files or left invalid "
                 "package files; restored the "
                 "last valid snapshot; validation failed; manual repair required."
             )
@@ -1750,8 +1893,11 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
             f"**Dependency updates:** {len(locked_updates)} packages; "
             "security classification unconfirmed."
         )
+    if maintenance_mode == "security-only":
+        maintenance = "**Routine upgrades disabled.** " + maintenance
     report = (
         f"`{directory}` · `{package_manager}`\n\n"
+        f"Build script: `{build_script}` · Maintenance: `{maintenance_mode}` · Routine direct upgrade scope: `{upgrade_scope}`\n\n"
         f"{format_audit_summary(before, after, package_manager)}\n\n"
         f"{maintenance}\n\n"
         f"## Production build\n\n{build_status} {'✅' if build_status == 'Passed.' else '❌'}\n\n"
@@ -1802,6 +1948,15 @@ def prepare(directory: Path, *, validation: dict | None = None) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", default="website")
+    parser.add_argument("--build-script", default="build")
+    parser.add_argument(
+        "--maintenance-mode",
+        choices=("security-only", "security-and-maintenance"),
+        default="security-and-maintenance",
+    )
+    parser.add_argument(
+        "--upgrade-scope", choices=("patch", "minor", "major"), default="major"
+    )
     parser.add_argument(
         "--report", type=Path, required=True, help="Temporary output for the PR body"
     )
@@ -1823,7 +1978,16 @@ def main() -> None:
             "directory must contain valid package files for one npm or pnpm deployment"
         )
     validation: dict = {}
-    report = prepare(directory, validation=validation)
+    try:
+        report = prepare(
+            directory,
+            validation=validation,
+            build_script=args.build_script,
+            maintenance_mode=args.maintenance_mode,
+            upgrade_scope=args.upgrade_scope,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     args.report.write_text(report)
     if args.github_output is not None:
         with args.github_output.open("a") as output:

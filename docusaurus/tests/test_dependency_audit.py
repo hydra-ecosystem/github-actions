@@ -20,6 +20,7 @@ main = audit_module["main"]
 @pytest.fixture
 def npm_project(tmp_path):
     manifest = {
+        "scripts": {"build": "docusaurus build"},
         "dependencies": {"renderer": "1.0.0", "local-plugin": "file:../plugin"},
         "overrides": {"transitive": "2.0.0"},
         "peerDependencies": {"react": "^19.0.0"},

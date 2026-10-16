@@ -30,6 +30,8 @@ runs:
     run: 'python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory
       "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --github-output
       "$GITHUB_OUTPUT"
+      --build-script "$DOCUSAURUS_BUILD_SCRIPT" --maintenance-mode "$DOCUSAURUS_MAINTENANCE_MODE"
+      --upgrade-scope "$DOCUSAURUS_UPGRADE_SCOPE"
 
       cat "$RUNNER_TEMP/dependency-audit-pr.md" >> "$GITHUB_STEP_SUMMARY"
 
