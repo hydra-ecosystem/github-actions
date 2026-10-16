@@ -1320,16 +1320,16 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             ]
             if extra:
                 action += " " + " ".join(dict.fromkeys(extra))
-            badge = "🟠 Review pin"
+            badge = "🟠\u00a0Review"
         else:
             action = " ".join(dict.fromkeys(reason(detail) for detail in details))
             badge = (
-                "🟠 Review fix"
+                "🟠\u00a0Review"
                 if any(
                     word in action.lower()
                     for word in ("review", "verification", "major upgrade")
                 )
-                else "🔴 Blocked"
+                else "🔴\u00a0Blocked"
             )
         summary += f"| {badge} | `{name}` ({severities}) | {action} |\n"
     if len(others) > 5:

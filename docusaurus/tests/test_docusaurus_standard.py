@@ -1885,7 +1885,7 @@ def test_attention_lists_all_blocking_pins_before_other_findings(security_findin
     assert (
         "Pin `1.0.0` blocks fix `1.2.0`; review removing or updating the pin." in result
     )
-    assert result.count("🟠 Review pin") == 7
+    assert result.count("🟠\u00a0Review") == 7
     assert "safety unverified" not in result
 
 
@@ -1908,7 +1908,7 @@ def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_fi
     data = security_findings([("@scope/leaf", "one", "high", status)])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| 🟠 Review pin | `@scope/leaf` (1 high) | Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
+        "| 🟠\u00a0Review | `@scope/leaf` (1 high) | Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
         in result
     )
 
@@ -1917,7 +1917,7 @@ def test_attention_is_absent_when_no_blocking_pin_was_verified(security_findings
     data = security_findings([("leaf", "one", "high", "Could not verify publication.")])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert "Your attention" not in result
-    assert "🟠 Review fix" in result
+    assert "🟠\u00a0Review" in result
     assert "No pins were changed" not in result
 
 
@@ -1937,6 +1937,6 @@ def test_single_table_keeps_other_advisories_for_a_pinned_package_visible(
         ]
     )
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert result.count("| 🟠 Review pin |") == 1
+    assert result.count("| 🟠\u00a0Review |") == 1
     assert "`leaf` (1 critical, 1 high)" in result
     assert "No published patch matches the fix range." in result
