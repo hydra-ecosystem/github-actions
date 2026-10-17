@@ -643,6 +643,18 @@ def fix_security(
             deadline=deadline,
         )
         current = valid_snapshot(directory)
+        diagnostics = notes if notes is not None else []
+        metadata_cache = cache if cache is not None else {}
+        if isinstance(before, dict) and snapshot is not None:
+            describe_pnpm_fixes(
+                directory,
+                before,
+                snapshot[1],
+                diagnostics,
+                deadline,
+                metadata_cache,
+                collect_proof=True,
+            )
         if result.returncode != 1 or snapshot is None or current is None:
             return result
         reference = yaml.safe_load(snapshot[1]["pnpm-workspace.yaml"])
@@ -661,7 +673,6 @@ def fix_security(
             return result
         # Advisory ranges can start at an unpublished version. Resolve their
         # actual published, compatible patches before bypassing the age window.
-        diagnostics = notes if notes is not None else []
         # Attribute patches to the original advisories. An independent advisory
         # can still affect a target that successfully fixed another one.
         original: dict = (
@@ -687,7 +698,6 @@ def fix_security(
                         "nodes": [specifier],
                     }
                 )
-        metadata_cache = cache if cache is not None else {}
         for findings, files in ((original, snapshot[1]), (applied, current[1])):
             describe_pnpm_fixes(
                 directory, findings, files, diagnostics, deadline, metadata_cache
@@ -748,7 +758,8 @@ def fix_security(
                 "restored the preceding security-fix proposal."
             )
         return result if failed else resolved
-    return run(
+    snapshot = valid_snapshot(directory)
+    result = run(
         directory,
         "audit",
         "fix",
@@ -757,6 +768,18 @@ def fix_security(
         "--audit",
         deadline=deadline,
     )
+    current = valid_snapshot(directory)
+    if isinstance(before, dict) and snapshot is not None and current is not None:
+        describe_npm_fixes(
+            directory,
+            before,
+            snapshot,
+            current,
+            notes if notes is not None else [],
+            deadline,
+            cache if cache is not None else {},
+        )
+    return result
 
 
 def versions(lock: dict, vulnerability: dict) -> str:
@@ -814,6 +837,112 @@ def package_paths(lock: dict, name: str, package_manager: str) -> dict[str, str]
     return paths
 
 
+def describe_npm_fixes(
+    directory: Path,
+    data: dict | str,
+    before_snapshot: tuple[bytes, dict[str, bytes], dict, dict],
+    after_snapshot: tuple[bytes, dict[str, bytes], dict, dict],
+    notes: list[str],
+    deadline: float,
+    cache: dict,
+) -> None:
+    """Collect npm registry membership proof without changing audit reports."""
+    if not isinstance(data, dict) or data.get("package_manager", "npm") != "npm":
+        return
+    before_lock, after_lock = before_snapshot[3], after_snapshot[3]
+
+    def published(specifier: str, *, no_match_constraint=None) -> set[str] | None:
+        key = ("npm", specifier, "version", no_match_constraint)
+        if key not in cache:
+            snapshot = valid_snapshot(directory)
+            result = run(
+                directory, "view", specifier, "version", "--json", deadline=deadline
+            )
+            if snapshot is None or restore_invalid_state(
+                directory,
+                snapshot,
+                notes,
+                f"Security proof lookup for {specifier}",
+                frozen=True,
+            ):
+                cache[key] = None
+            else:
+                try:
+                    value = json.loads(result.stdout)
+                except (TypeError, ValueError):
+                    value = None
+                error = value.get("error") if isinstance(value, dict) else None
+                values = [value] if isinstance(value, str) else value
+                cache[key] = (
+                    set()
+                    if no_match_constraint is not None
+                    and result.returncode == 1
+                    and isinstance(error, dict)
+                    and error.get("code") == "E404"
+                    and error.get("summary")
+                    == f"No match found for version {no_match_constraint}"
+                    else set(values)
+                    if result.returncode == 0
+                    and isinstance(values, list)
+                    and values
+                    and all(stable_version(version) is not None for version in values)
+                    else None
+                )
+        value = cache[key]
+        return value if isinstance(value, set) else None
+
+    for name, vulnerability in data.get("vulnerabilities", {}).items():
+        if not isinstance(vulnerability, dict) or not vulnerability.get("fixAvailable"):
+            continue
+        detail = vulnerability
+        detail.pop("_verifiedVulnerableVersions", None)
+        detail.pop("_verifiedPatchedVersions", None)
+        vulnerable_range = detail.get("range")
+        nodes = detail.get("nodes")
+        old_paths = package_paths(before_lock, name, "npm")
+        new_paths = package_paths(after_lock, name, "npm")
+        if (
+            not isinstance(vulnerable_range, str)
+            or not vulnerable_range
+            or not isinstance(nodes, list)
+            or not nodes
+        ):
+            continue
+        affected_nodes = [node for node in nodes if node in old_paths]
+        if len(affected_nodes) != len(nodes):
+            continue
+        affected_versions = {old_paths[node] for node in affected_nodes}
+        vulnerable_versions = published(f"{name}@{vulnerable_range}")
+        if vulnerable_versions is None or not affected_versions <= vulnerable_versions:
+            continue
+        detail["_verifiedVulnerableVersions"] = sorted(vulnerable_versions)
+        selected_versions = {version.split("(", 1)[0] for version in new_paths.values()}
+        if not selected_versions:
+            continue
+        patched_versions = set()
+        for version in selected_versions:
+            published_version = published(f"{name}@{version}")
+            if published_version != {version}:
+                patched_versions = set()
+                break
+            # Let npm evaluate the exact version against each original range
+            # arm. Publication and a missing entry in a range listing do not
+            # establish safety. Only npm's exact no-match response does.
+            intersections = [
+                published(
+                    f"{name}@{version} {arm.strip()}",
+                    no_match_constraint=f"{version} {arm.strip()}",
+                )
+                for arm in vulnerable_range.split("||")
+            ]
+            if any(matches != set() for matches in intersections):
+                patched_versions = set()
+                break
+            patched_versions.add(version)
+        if patched_versions == selected_versions:
+            detail["_verifiedPatchedVersions"] = sorted(patched_versions)
+
+
 def changed_pnpm_targets(before: dict[str, bytes], after: dict[str, bytes]) -> set[str]:
     """Include patches reused by changed paths as well as newly locked versions."""
     old_lock = yaml.safe_load(before["pnpm-lock.yaml"])
@@ -860,6 +989,8 @@ def describe_pnpm_fixes(
     notes: list[str],
     deadline: float,
     cache: dict,
+    *,
+    collect_proof: bool = False,
 ) -> None:
     """Verify published patches and explain constraints using registry metadata."""
     if not isinstance(data, dict) or data.get("package_manager") != "pnpm":
@@ -911,7 +1042,24 @@ def describe_pnpm_fixes(
         vulnerability["fixAvailable"] = False
         for detail in vulnerability["via"]:
             detail.pop("fixVersion", None)
+            if collect_proof:
+                detail.pop("_verifiedVulnerableVersions", None)
+                detail.pop("_verifiedPatchedVersions", None)
             patched = detail.get("patchedRange")
+            vulnerable_range = detail.get("range")
+            if collect_proof and isinstance(vulnerable_range, str) and vulnerable_range:
+                vulnerable_versions = published(f"{name}@{vulnerable_range}")
+                affected_versions = {
+                    node.rsplit("@", 1)[-1].split("(", 1)[0]
+                    for node in detail.get("nodes", [])
+                    if isinstance(node, str) and "@" in node
+                }
+                if (
+                    vulnerable_versions
+                    and affected_versions
+                    and affected_versions <= vulnerable_versions
+                ):
+                    detail["_verifiedVulnerableVersions"] = sorted(vulnerable_versions)
             if patched in (None, "<0.0.0", ""):
                 detail["fixStatus"] = "No patched version declared by the registry."
                 continue
@@ -926,6 +1074,8 @@ def describe_pnpm_fixes(
                     f"No published stable patch matches registry range `{patched}`."
                 )
                 continue
+            if collect_proof:
+                detail["_verifiedPatchedVersions"] = sorted(patches)
             vulnerability["fixAvailable"] = True
             blocked = []
             unknown = False
@@ -1167,7 +1317,625 @@ def format_remaining_audit(data: dict | str, lock: dict) -> str:
     )
 
 
-def format_audit_summary(before: dict | str, after: dict | str, source: str) -> str:
+def finding_ids(data, source):
+    """Return comparable finding identities, or None for incomplete evidence."""
+    if not isinstance(data, dict):
+        return None
+    vulnerabilities = data.get("vulnerabilities", {})
+    identities = (
+        {
+            detail["url"]
+            for vulnerability in vulnerabilities.values()
+            for detail in vulnerability.get("via", [])
+            if isinstance(detail, dict) and detail.get("url")
+        }
+        if source == "pnpm"
+        else set(vulnerabilities)
+    )
+    counts = data.get("metadata", {}).get("vulnerabilities", {})
+    if not identities and (
+        vulnerabilities or any(counts.get(level, 0) for level in SEVERITY_ORDER)
+    ):
+        return None
+    return identities
+
+
+def confirmed_fixes(before, after, source, before_snapshot, after_snapshot):
+    old, current = finding_ids(before, source), finding_ids(after, source)
+    if old is None or current is None:
+        return set()
+    locks = [
+        yaml.safe_load(snapshot[1]["pnpm-lock.yaml"])
+        if source == "pnpm"
+        else snapshot[3]
+        for snapshot in (before_snapshot, after_snapshot)
+    ]
+    # Registry withdrawals and changing audit responses are not dependency fixes.
+    confirmed = set()
+    for name, vulnerability in before.get("vulnerabilities", {}).items():
+        old_paths = package_paths(locks[0], name, source)
+        new_paths = package_paths(locks[1], name, source)
+        if old_paths == new_paths:
+            continue
+        new_versions = set(new_paths.values())
+        details = vulnerability.get("via", []) if source == "pnpm" else [vulnerability]
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            identity = detail.get("url") if source == "pnpm" else name
+            if identity not in old - current:
+                continue
+            proof = detail.get("_verifiedVulnerableVersions")
+            if not isinstance(proof, (list, tuple, set)) or not all(
+                isinstance(version, str) for version in proof
+            ):
+                continue
+            vulnerable_versions = set(proof)
+            nodes = detail.get("nodes")
+            if source == "npm":
+                affected_nodes = (
+                    [node for node in nodes if node in old_paths]
+                    if isinstance(nodes, list)
+                    else []
+                )
+                affected_versions = {
+                    old_paths[node].split("(", 1)[0] for node in affected_nodes
+                }
+                if len(affected_nodes) != len(nodes or []):
+                    continue
+            else:
+                affected_versions = (
+                    {
+                        node.rsplit("@", 1)[-1].split("(", 1)[0]
+                        for node in nodes
+                        if isinstance(node, str) and "@" in node
+                    }
+                    if isinstance(nodes, list)
+                    else set()
+                )
+                old_versions = {
+                    version.split("(", 1)[0] for version in old_paths.values()
+                }
+                if not affected_versions <= old_versions:
+                    continue
+            if not affected_versions or not affected_versions <= vulnerable_versions:
+                continue
+            if not new_versions:
+                confirmed.add(identity)
+                continue
+            patched = detail.get("_verifiedPatchedVersions")
+            if not isinstance(patched, (list, tuple, set)) or not all(
+                isinstance(version, str) for version in patched
+            ):
+                continue
+            patched_versions = set(patched)
+            normalized_new = {version.split("(", 1)[0] for version in new_versions}
+            if normalized_new <= patched_versions and not (
+                normalized_new & vulnerable_versions
+            ):
+                confirmed.add(identity)
+    return confirmed
+
+
+def _confirmed_package_names(data, source, confirmed_ids):
+    """Map confirmed finding identities back to their audited package names."""
+    if not isinstance(data, dict) or not isinstance(confirmed_ids, set):
+        return set()
+    names = set()
+    for name, vulnerability in data.get("vulnerabilities", {}).items():
+        details = vulnerability.get("via", []) if source == "pnpm" else [vulnerability]
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            identity = detail.get("url") if source == "pnpm" else name
+            if identity in confirmed_ids:
+                names.add(name)
+    return names
+
+
+def _npm_dependency_node(packages, parent, dependency):
+    location = parent
+    while True:
+        candidate = (
+            f"{location}/node_modules/{dependency}"
+            if location
+            else f"node_modules/{dependency}"
+        )
+        if candidate in packages:
+            return candidate
+        if not location:
+            return None
+        location = (
+            location.rsplit("/node_modules/", 1)[0]
+            if "/node_modules/" in location
+            else ""
+        )
+
+
+def _npm_dependency_reaches(
+    lock, root_name, target_name, target_nodes, *, root_nodes=None
+):
+    """Follow npm edges from a direct package or exact installed nodes."""
+    packages = lock.get("packages", {})
+    if not isinstance(packages, dict):
+        return False
+    roots = [
+        node
+        for node, package in packages.items()
+        if node == f"node_modules/{root_name}" and isinstance(package, dict)
+    ]
+    if root_nodes is not None:
+        roots = [node for node in root_nodes if isinstance(packages.get(node), dict)]
+    if not roots:
+        return False
+
+    queue, visited = list(roots), set()
+    while queue:
+        node = queue.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        package = packages.get(node)
+        if not isinstance(package, dict):
+            continue
+        if node in target_nodes and node.rsplit("node_modules/", 1)[-1] == target_name:
+            return True
+        for section in ("dependencies", "optionalDependencies"):
+            dependencies = package.get(section, {})
+            if not isinstance(dependencies, dict):
+                continue
+            for dependency in dependencies:
+                child = _npm_dependency_node(packages, node, dependency)
+                if child is None:
+                    continue
+                if dependency == target_name and child in target_nodes:
+                    return True
+                queue.append(child)
+    return False
+
+
+def _pnpm_package_key(entries, name, reference):
+    if not isinstance(reference, str):
+        return None
+    candidate = reference if reference.startswith(f"{name}@") else f"{name}@{reference}"
+    if candidate in entries:
+        return candidate
+    plain = candidate.split("(", 1)[0]
+    matches = [key for key in entries if key.split("(", 1)[0] == plain]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _pnpm_dependency_reaches(
+    lock, root_name, target_name, target_nodes, verified_versions=(), *, root_nodes=None
+):
+    """Follow pnpm edges from a direct package or exact installed nodes."""
+    if root_nodes is None:
+        importer = lock.get("importers", {}).get(".", {})
+        if not isinstance(importer, dict):
+            return False
+        direct_version = None
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            entry = importer.get(section, {}).get(root_name)
+            if isinstance(entry, dict):
+                direct_version = entry.get("version")
+            elif isinstance(entry, str):
+                direct_version = entry
+            if isinstance(direct_version, str):
+                break
+        if not isinstance(direct_version, str):
+            return False
+    snapshot_entries = lock.get("snapshots", {})
+    if not isinstance(snapshot_entries, dict):
+        snapshot_entries = {}
+    entries = {
+        key: entry
+        for key, entry in snapshot_entries.items()
+        if isinstance(key, str) and isinstance(entry, dict)
+    }
+    if not entries:
+        package_entries = lock.get("packages", {})
+        if isinstance(package_entries, dict):
+            entries = {
+                key: entry
+                for key, entry in package_entries.items()
+                if isinstance(key, str) and isinstance(entry, dict)
+            }
+
+    verified_versions = {
+        version.split("(", 1)[0]
+        for version in verified_versions
+        if isinstance(version, str)
+    }
+
+    if root_nodes is not None:
+        roots = [node for node in root_nodes if node in entries]
+    else:
+        root_reference = (
+            direct_version
+            if direct_version.startswith(f"{root_name}@")
+            else f"{root_name}@{direct_version}"
+        )
+        roots = [key for key in entries if key == root_reference]
+        if not roots:
+            plain_root = root_reference.split("(", 1)[0]
+            matches = [key for key in entries if key.split("(", 1)[0] == plain_root]
+            roots = matches if len(matches) == 1 else []
+    if not roots:
+        return False
+    queue, visited = list(roots), set()
+    while queue:
+        node = queue.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        entry = entries.get(node)
+        if not isinstance(entry, dict):
+            continue
+        plain_node = node.split("(", 1)[0]
+        plain_targets = {target for target in target_nodes if "(" not in target}
+        if plain_node.rsplit("@", 1)[0] == target_name and (
+            node in target_nodes
+            or (
+                plain_node in plain_targets
+                and plain_node.rsplit("@", 1)[-1] in verified_versions
+            )
+        ):
+            return True
+        for section in ("dependencies", "optionalDependencies"):
+            dependencies = entry.get(section, {})
+            if not isinstance(dependencies, dict):
+                continue
+            for dependency, reference in dependencies.items():
+                child = _pnpm_package_key(entries, dependency, reference)
+                if child is None:
+                    continue
+                plain_child = child.split("(", 1)[0]
+                plain_targets = {target for target in target_nodes if "(" not in target}
+                exact_match = child in target_nodes
+                plain_version_match = (
+                    plain_child in plain_targets
+                    and plain_child.rsplit("@", 1)[-1] in verified_versions
+                )
+                if dependency == target_name and (exact_match or plain_version_match):
+                    return True
+                queue.append(child)
+    return False
+
+
+def _package_nodes_for_versions(lock, name, source, versions):
+    """Return exact installed package nodes for verified patched versions."""
+    versions = {version.split("(", 1)[0] for version in versions}
+    if not versions:
+        return set()
+    if source == "npm":
+        return {
+            node
+            for node, version in package_paths(lock, name, source).items()
+            if version.split("(", 1)[0] in versions
+        }
+    return {
+        path.split("/", 1)[1]
+        for path, version in package_paths(lock, name, source).items()
+        if path.split("/", 1)[0] in ("packages", "snapshots")
+        and version.split("(", 1)[0] in versions
+    }
+
+
+def _confirmed_parent_change(
+    data, confirmed_ids, before_snapshot, after_snapshot, source, direct_name
+):
+    """Prove a changed direct parent was needed for a confirmed child fix."""
+    if not isinstance(data, dict) or not isinstance(confirmed_ids, set):
+        return False
+    if source == "pnpm":
+        before_lock = yaml.safe_load(before_snapshot[1]["pnpm-lock.yaml"])
+        after_lock = yaml.safe_load(after_snapshot[1]["pnpm-lock.yaml"])
+    else:
+        before_lock, after_lock = before_snapshot[3], after_snapshot[3]
+    for child_name, vulnerability in data.get("vulnerabilities", {}).items():
+        details = vulnerability.get("via", []) if source == "pnpm" else [vulnerability]
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            identity = detail.get("url") if source == "pnpm" else child_name
+            if identity not in confirmed_ids or child_name == direct_name:
+                continue
+            if package_paths(before_lock, child_name, source) == package_paths(
+                after_lock, child_name, source
+            ):
+                continue
+            target_nodes = {
+                node for node in detail.get("nodes", []) if isinstance(node, str)
+            }
+            if not target_nodes:
+                continue
+            patched_nodes = _package_nodes_for_versions(
+                after_lock,
+                child_name,
+                source,
+                detail.get("_verifiedPatchedVersions", []),
+            )
+            if not patched_nodes:
+                continue
+            if source == "npm":
+                if _npm_dependency_reaches(
+                    before_lock, direct_name, child_name, target_nodes
+                ) and _npm_dependency_reaches(
+                    after_lock, direct_name, child_name, patched_nodes
+                ):
+                    return True
+                continue
+            if _pnpm_dependency_reaches(
+                before_lock,
+                direct_name,
+                child_name,
+                target_nodes,
+                detail.get("_verifiedVulnerableVersions", []),
+            ) and _pnpm_dependency_reaches(
+                after_lock,
+                direct_name,
+                child_name,
+                patched_nodes,
+                detail.get("_verifiedPatchedVersions", []),
+            ):
+                return True
+    return False
+
+
+def security_only_direct_violation(
+    before,
+    after,
+    affected,
+    *,
+    confirmed_ids=None,
+    audit_before=None,
+    source=None,
+):
+    """Reject direct changes that a security run cannot attribute to a fix."""
+    confirmed_ids = set(confirmed_ids or ())
+    source = source or (
+        audit_before.get("package_manager", "npm")
+        if isinstance(audit_before, dict)
+        else "npm"
+    )
+    confirmed_names = _confirmed_package_names(audit_before, source, confirmed_ids)
+
+    def attributable(name):
+        return name in confirmed_names or _confirmed_parent_change(
+            audit_before,
+            confirmed_ids,
+            before,
+            after,
+            source,
+            name,
+        )
+
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        old = before[2].get(section, {})
+        new = after[2].get(section, {})
+        for name in set(old) | set(new):
+            if name not in old or name not in new or old[name] != new[name]:
+                if attributable(name):
+                    continue
+                if name in affected:
+                    return (
+                        f"{section}.{name} direct dependency changed during "
+                        "security-only maintenance without a confirmed security fix"
+                    )
+                return f"{section}.{name} manifest changed during security-only maintenance"
+            old_version = direct_versions(before).get((section, name))
+            new_version = direct_versions(after).get((section, name))
+            if old_version != new_version:
+                if attributable(name):
+                    continue
+                if name in affected:
+                    return (
+                        f"{section}.{name} direct dependency resolved version changed "
+                        "during security-only maintenance without a confirmed security fix"
+                    )
+                return (
+                    f"{section}.{name} resolved version changed during security-only "
+                    "maintenance"
+                )
+            if old_version is None and direct_reference(
+                before, section, name
+            ) != direct_reference(after, section, name):
+                if attributable(name):
+                    continue
+                if name in affected:
+                    return (
+                        f"{section}.{name} direct reference changed during security-only "
+                        "maintenance without a confirmed security fix"
+                    )
+                return (
+                    f"{section}.{name} direct reference changed during security-only "
+                    "maintenance"
+                )
+
+    before_lock = (
+        yaml.safe_load(before[1]["pnpm-lock.yaml"]) if source == "pnpm" else before[3]
+    )
+    after_lock = (
+        yaml.safe_load(after[1]["pnpm-lock.yaml"]) if source == "pnpm" else after[3]
+    )
+    dependency_reaches = (
+        _pnpm_dependency_reaches if source == "pnpm" else _npm_dependency_reaches
+    )
+
+    def installed_entries(lock):
+        """Return concrete installed nodes from the native lockfile."""
+        snapshots = lock.get("snapshots", {})
+        if source == "pnpm" and isinstance(snapshots, dict) and snapshots:
+            entries = snapshots
+        else:
+            entries = lock.get("packages", {})
+        if not isinstance(entries, dict):
+            return {}
+        return {
+            node: entry
+            for node, entry in entries.items()
+            if isinstance(node, str)
+            and ("@" in node if source == "pnpm" else "node_modules/" in node)
+        }
+
+    direct_names = {
+        name
+        for section in ("dependencies", "devDependencies", "optionalDependencies")
+        for manifest in (before[2], after[2])
+        for name in manifest.get(section, {})
+    }
+    old_direct_versions, new_direct_versions = (
+        direct_versions(before),
+        direct_versions(after),
+    )
+    allowed_roots = {
+        name
+        for name in direct_names
+        if attributable(name)
+        and any(
+            old_direct_versions.get((section, name))
+            != new_direct_versions.get((section, name))
+            for section in ("dependencies", "devDependencies", "optionalDependencies")
+        )
+    }
+
+    def on_remediation_path(lock, nodes, *, patched):
+        if not isinstance(audit_before, dict):
+            return False
+        for child_name, vulnerability in audit_before.get(
+            "vulnerabilities", {}
+        ).items():
+            details = (
+                vulnerability.get("via", []) if source == "pnpm" else [vulnerability]
+            )
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                identity = detail.get("url") if source == "pnpm" else child_name
+                if identity not in confirmed_ids:
+                    continue
+                versions = detail.get(
+                    "_verifiedPatchedVersions"
+                    if patched
+                    else "_verifiedVulnerableVersions",
+                    [],
+                )
+                targets = (
+                    _package_nodes_for_versions(lock, child_name, source, versions)
+                    if patched
+                    else {
+                        node
+                        for node in detail.get("nodes", [])
+                        if isinstance(node, str)
+                    }
+                )
+                if not targets:
+                    continue
+                if source == "pnpm":
+                    reaches = _pnpm_dependency_reaches(
+                        lock, None, child_name, targets, versions, root_nodes=nodes
+                    )
+                else:
+                    reaches = _npm_dependency_reaches(
+                        lock, None, child_name, targets, root_nodes=nodes
+                    )
+                if reaches:
+                    return True
+        return False
+
+    before_entries = installed_entries(before_lock)
+    after_entries = installed_entries(after_lock)
+
+    def unrelated_reference(node):
+        old_entry, new_entry = before_entries.get(node), after_entries.get(node)
+        if not isinstance(old_entry, dict) or not isinstance(new_entry, dict):
+            return None
+        if source == "npm" and old_entry.get("version") != new_entry.get("version"):
+            return None
+        for section in ("dependencies", "optionalDependencies"):
+            old_edges, new_edges = (
+                old_entry.get(section, {}),
+                new_entry.get(section, {}),
+            )
+            if not isinstance(old_edges, dict) or not isinstance(new_edges, dict):
+                return f"{node} has unverifiable dependency references during security-only maintenance"
+            for dependency in old_edges.keys() | new_edges.keys():
+                if old_edges.get(dependency) == new_edges.get(dependency):
+                    continue
+                if source == "pnpm":
+                    old_child = _pnpm_package_key(
+                        before_entries, dependency, old_edges.get(dependency)
+                    )
+                    new_child = _pnpm_package_key(
+                        after_entries, dependency, new_edges.get(dependency)
+                    )
+                else:
+                    old_child = (
+                        _npm_dependency_node(
+                            before_lock.get("packages", {}), node, dependency
+                        )
+                        if dependency in old_edges
+                        else None
+                    )
+                    new_child = (
+                        _npm_dependency_node(
+                            after_lock.get("packages", {}), node, dependency
+                        )
+                        if dependency in new_edges
+                        else None
+                    )
+                if on_remediation_path(
+                    before_lock, {old_child} if old_child else set(), patched=False
+                ) or on_remediation_path(
+                    after_lock, {new_child} if new_child else set(), patched=True
+                ):
+                    continue
+                return (
+                    f"{dependency} dependency reference changed during security-only "
+                    "maintenance without a confirmed security fix"
+                )
+        return None
+
+    for node in before_entries.keys() | after_entries.keys():
+        if before_entries.get(node) == after_entries.get(node):
+            continue
+        name = (
+            node.split("(", 1)[0].rsplit("@", 1)[0]
+            if source == "pnpm"
+            else node.rsplit("node_modules/", 1)[-1]
+        )
+        old_nodes = {node} if node in before_entries else set()
+        new_nodes = {node} if node in after_entries else set()
+
+        def reaches_from(roots):
+            return any(
+                (old_nodes and dependency_reaches(before_lock, root, name, old_nodes))
+                or (new_nodes and dependency_reaches(after_lock, root, name, new_nodes))
+                for root in roots
+            )
+
+        if reaches_from(allowed_roots):
+            continue
+        if on_remediation_path(
+            before_lock, old_nodes, patched=False
+        ) or on_remediation_path(after_lock, new_nodes, patched=True):
+            violation = unrelated_reference(node)
+            if violation:
+                return violation
+            continue
+        if not reaches_from(direct_names):
+            continue
+        return (
+            f"{name} transitive dependency changed during security-only "
+            "maintenance without a confirmed security fix"
+        )
+
+    return None
+
+
+def format_audit_summary(
+    before: dict | str, after: dict | str, source: str, *, fixed_ids=None
+) -> str:
     if isinstance(after, str):
         return f"⚪ **Security:** {after}"
 
@@ -1197,6 +1965,11 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     old_ids, current_ids = {row[0] for row in old}, {row[0] for row in current}
     comparable = complete(before, old) and complete(after, current)
     resolved_ids = old_ids - current_ids if comparable else set()
+    if fixed_ids is not None:
+        resolved_ids &= fixed_ids
+    unconfirmed_ids = (
+        (old_ids - current_ids) - resolved_ids if fixed_ids is not None else set()
+    )
     new_ids = current_ids - old_ids if comparable else set()
     old_groups: dict = {}
     groups: dict = {}
@@ -1237,6 +2010,10 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
     for name in old_groups.keys() | groups.keys():
         previous, pending = old_groups.get(name, {}), groups.get(name, {})
         fixed = len(resolved_ids.intersection(previous))
+        unconfirmed_disappeared = set(previous).intersection(unconfirmed_ids)
+        unconfirmed_details = [
+            previous[identity] for identity in unconfirmed_disappeared
+        ]
         # An advisory reported under another path is still open, not resolved.
         moved = set(previous).intersection(current_ids) - pending.keys()
         pending_count = len(pending.keys() | moved)
@@ -1257,7 +2034,26 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             blocked_packages.add(name)
         if unconfirmed:
             unconfirmed_packages.add(name)
+        if unconfirmed_disappeared:
+            unconfirmed_packages.add(name)
         action = " ".join(dict.fromkeys(text for _, text in outcomes))
+        if unconfirmed_disappeared:
+            ranges = sorted(
+                {
+                    detail.get("range")
+                    for detail in unconfirmed_details
+                    if isinstance(detail.get("range"), str) and detail.get("range")
+                }
+            )
+            action = (
+                (action + " ") if action else ""
+            ) + "No longer reported; fix could not be confirmed."
+            if ranges:
+                action += (
+                    " Original affected range: "
+                    + ", ".join(f"`{value}`" for value in ranges)
+                    + "."
+                )
         if pinned:
             pins = sorted(
                 {
@@ -1319,9 +2115,11 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
             counts.append(f"{fixed} fixed")
         if pending_count:
             counts.append(f"{pending_count} pending")
+        if unconfirmed_disappeared:
+            counts.append(f"{len(unconfirmed_disappeared)} unconfirmed")
         if not comparable:
             counts.insert(0, "fixes unconfirmed")
-        if comparable and not pending_count:
+        if comparable and not pending_count and not unconfirmed_disappeared:
             badge, rank, action = "🟢", 0, "Resolved."
         elif review:
             badge, rank = "🟠", 1
@@ -1330,7 +2128,11 @@ def format_audit_summary(before: dict | str, after: dict | str, source: str) -> 
         else:
             badge, rank = "⚪", 3
         severity = min(
-            (SEVERITY_ORDER.get(detail["severity"], 5) for detail in details), default=5
+            (
+                SEVERITY_ORDER.get(detail["severity"], 5)
+                for detail in details + unconfirmed_details
+            ),
+            default=5,
         )
         rows.append(
             (
@@ -1588,6 +2390,39 @@ def prepare(
         )
     # Preserve those fixes if the wider stable-version upgrade cannot resolve.
     security_snapshot = valid_snapshot(directory) or last_valid_snapshot
+    if maintenance_mode == "security-only" and security_snapshot != initial_snapshot:
+        evidence = audit(directory, deadline=deadline)
+        if restore_invalid_state(
+            directory,
+            security_snapshot,
+            notes,
+            "Security fix confirmation",
+            frozen=True,
+        ):
+            evidence = "Audit unavailable: confirmation changed package files."
+        confirmation = confirmed_fixes(
+            before, evidence, package_manager, initial_snapshot, security_snapshot
+        )
+        direct_violation = security_only_direct_violation(
+            initial_snapshot,
+            security_snapshot,
+            affected,
+            confirmed_ids=confirmation,
+            audit_before=before,
+            source=package_manager,
+        )
+        if not confirmation or direct_violation:
+            restore_snapshot(directory, initial_snapshot)
+            security_snapshot = initial_snapshot
+            notes.append(
+                "Discarded dependency changes: "
+                + (
+                    direct_violation + "."
+                    if direct_violation
+                    else "no confirmed security fixes."
+                )
+                + " Routine upgrades require an upgrades run."
+            )
     last_valid_snapshot = security_snapshot
     if maintenance_mode == "security-and-maintenance":
         manifest = json.loads(security_snapshot[0])
@@ -1784,6 +2619,40 @@ def prepare(
     ):
         after = f"Audit unavailable: {package_manager} changed package files; restored the last valid snapshot."
     after_snapshot = valid_snapshot(directory) or last_valid_snapshot
+    if package_manager == "npm":
+        describe_npm_fixes(
+            directory, before, initial_snapshot, after_snapshot, notes, deadline, cache
+        )
+    if (
+        maintenance_mode == "security-only"
+        and after_snapshot != initial_snapshot
+        and (
+            not confirmed_fixes(
+                before, after, package_manager, initial_snapshot, after_snapshot
+            )
+            or security_only_direct_violation(
+                initial_snapshot,
+                after_snapshot,
+                affected,
+                confirmed_ids=confirmed_fixes(
+                    before, after, package_manager, initial_snapshot, after_snapshot
+                ),
+                audit_before=before,
+                source=package_manager,
+            )
+        )
+    ):
+        restore_snapshot(directory, initial_snapshot)
+        after_snapshot = initial_snapshot
+        after = audit(directory, deadline=deadline)
+        if restore_invalid_state(
+            directory, initial_snapshot, notes, "Restored project audit", frozen=True
+        ):
+            after = "Audit unavailable: restored project audit changed package files."
+        build_status = "Proposal discarded: final audit did not confirm a security fix; candidate build evidence does not apply to the restored files."
+        notes.append(
+            "Discarded dependency changes because final security evidence was unavailable or no longer confirmed a fix."
+        )
     after_lock = after_snapshot[3]
     if validation is not None:
         validation["passed"] = build_status == "Passed."
@@ -1895,10 +2764,28 @@ def prepare(
         )
     if maintenance_mode == "security-only":
         maintenance = "**Routine upgrades disabled.** " + maintenance
+    fixed_ids = confirmed_fixes(
+        before, after, package_manager, initial_snapshot, after_snapshot
+    )
+    fixed_count = len(fixed_ids)
+    remaining_ids = finding_ids(after, package_manager)
+    security_counts = (
+        f"{fixed_count} security {'fix' if fixed_count == 1 else 'fixes'} · {len(remaining_ids)} {'advisories' if package_manager == 'pnpm' else 'affected package entries'} remain"
+        if finding_ids(before, package_manager) is not None
+        and remaining_ids is not None
+        else "Security fixes unconfirmed"
+    )
+    if isinstance(after, dict) and (
+        critical := after.get("metadata", {})
+        .get("vulnerabilities", {})
+        .get("critical", 0)
+    ):
+        security_counts += f" ({critical} critical)"
     report = (
+        f"**{len(locked_updates)} dependency {'update' if len(locked_updates) == 1 else 'updates'} · {security_counts} · Build {'passed' if build_status == 'Passed.' else 'failed or unavailable'}**\n\n"
         f"`{directory}` · `{package_manager}`\n\n"
         f"Build script: `{build_script}` · Maintenance: `{maintenance_mode}` · Routine direct upgrade scope: `{upgrade_scope}`\n\n"
-        f"{format_audit_summary(before, after, package_manager)}\n\n"
+        f"{format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids)}\n\n"
         f"{maintenance}\n\n"
         f"## Production build\n\n{build_status} {'✅' if build_status == 'Passed.' else '❌'}\n\n"
     )

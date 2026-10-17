@@ -2085,6 +2085,25 @@ def test_maintenance_subtotal_excludes_security_updates_without_guessing(
         result = invoke(command, **kwargs)
         if command[4] == "install":
             save("1.1.0")
+        if command[4:6] == ["view", "security@<1.1.0"]:
+            result.stdout = json.dumps(["1.0.0"])
+        elif command[4:6] in (
+            ["view", "security@1.0.0"],
+            ["view", "security@1.0.0 <1.1.0"],
+        ):
+            result.stdout = json.dumps("1.0.0")
+        elif command[4:6] == ["view", "security@1.1.0"]:
+            result.stdout = json.dumps("1.1.0")
+        elif command[4:6] == ["view", "security@1.1.0 <1.1.0"]:
+            result.returncode = 1
+            result.stdout = json.dumps(
+                {
+                    "error": {
+                        "code": "E404",
+                        "summary": "No match found for version 1.1.0 <1.1.0",
+                    }
+                }
+            )
         if command[4:6] == ["audit", "--json"]:
             audits += 1
             if audits == 1:
