@@ -21,6 +21,20 @@ overrides, and exact security exceptions remain project configuration.
 package script. Put prerequisites and checks in that script. Invalid configuration
 or a missing script stops the run before dependency changes.
 
+Integration version 4 supports [live shared defaults](../docs/shared-defaults.md)
+from a JSON file in any public GitHub repository, including another website's
+configuration. Only toolchain, minimum cooldown and maintenance fields are
+inherited. Explicit local fields override inherited fields. Each run resolves
+references once and retains their full commit identities; source changes apply
+to subsequent runs. Directory, build script, schedule, deployment and credentials
+remain local.
+
+`minimumReleaseAgeDays` defaults to ten. Preflight requires the standalone
+workspace's `minimumReleaseAge` to be an integer at least that many days in
+minutes. Stricter workspace settings and existing security exceptions remain
+valid. Conflicting toolchain declarations or insufficient cooldown fail loudly;
+the workflow does not rewrite them or automatically migrate a project.
+
 ## Maintenance behavior
 
 The default mode is `security-and-maintenance`. It attempts compatible security
@@ -63,6 +77,15 @@ chooses update suppression or alert dismissal, scope it to the selected website'
 lockfile and preserve other ecosystems. Verify those repository controls separately.
 
 ## Publication and credentials
+
+The version-4 caller grants `issues: write` to the shared audit workflow for a
+separate, serialized configuration-reporting job. The dependency-execution job
+is explicitly read-only. The reporting job consumes only the current run's JSON
+status artifact and never checks out website code or receives the App key.
+It opens one marked bot-owned configuration issue, updates that issue on repeated
+failures, closes it after successful preflight, and reopens the same closed issue
+on recurrence. Ordinary dependency/build failures do not create configuration
+issues. Automatic migration remains a possible follow-up, not current behavior.
 
 The audit has read access. The separate publisher can push the maintenance branch
 and open its PR. It refuses publication if the default branch's repository inputs

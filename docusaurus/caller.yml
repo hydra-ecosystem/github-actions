@@ -15,6 +15,7 @@ jobs:
   audit:
     permissions:
       contents: read
+      issues: write
     uses: __CENTRAL_REPOSITORY__/.github/workflows/docusaurus-audit.yml@__CENTRAL_REVISION__
 
   pull-request:

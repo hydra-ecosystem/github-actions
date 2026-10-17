@@ -1,12 +1,15 @@
 """Resolve and verify the calling website's declared toolchain."""
 
 import argparse
+import hashlib
 import json
 import re
+import runpy
 import subprocess
 from pathlib import Path
 
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
+CONFIGURATION = runpy.run_path(str(Path(__file__).with_name("configuration.py")))
 
 
 def node_version(value, location):
@@ -168,19 +171,9 @@ def resolve_toolchain(root, directory, manifest, settings, baseline):
     return selected
 
 
-def project(root: Path) -> tuple[Path, dict]:
+def project_directory(root, config):
     root = root.resolve()
-    config = json.loads((root / ".github/docusaurus.json").read_text())
-    if (
-        not isinstance(config, dict)
-        or not set(config)
-        <= {"directory", "schedule", "toolchain", "buildScript", "maintenance"}
-        or "directory" not in config
-    ):
-        raise ValueError(
-            "docusaurus.json accepts only project directory and schedule, plus toolchain, buildScript and maintenance"
-        )
-    name = config["directory"]
+    name = config.get("directory")
     schedules = config.get("schedule", ["0 2 30 1 *"])
     if (
         not isinstance(schedules, list)
@@ -202,13 +195,30 @@ def project(root: Path) -> tuple[Path, dict]:
     directory = (root / relative).resolve()
     if not directory.is_relative_to(root):
         raise ValueError("project directory resolves outside the repository")
-    manifest = json.loads((directory / "package.json").read_text())
+    manifest_path = directory / "package.json"
+    if not manifest_path.resolve().is_relative_to(root):
+        raise ValueError("package.json resolves outside the repository")
+    manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("package.json must be an object")
+    for field in ("dependencies", "devDependencies", "scripts", "engines"):
+        if field in manifest and not isinstance(manifest[field], dict):
+            raise ValueError(f"package.json {field} must be an object")
     dependencies = {
         **manifest.get("dependencies", {}),
         **manifest.get("devDependencies", {}),
     }
     if "@docusaurus/core" not in dependencies:
         raise ValueError("configured project does not declare @docusaurus/core")
+    return directory, manifest
+
+
+def project(root: Path, config=None, sources=None) -> tuple[Path, dict]:
+    root = root.resolve()
+    if config is None:
+        config = CONFIGURATION["load_configuration"](root, sources)
+    CONFIGURATION["validate_settings"](config, "resolved configuration")
+    directory, manifest = project_directory(root, config)
     script = config.get("buildScript", "build")
     scripts = manifest.get("scripts", {})
     if (
@@ -245,10 +255,32 @@ def project(root: Path) -> tuple[Path, dict]:
     selected = resolve_toolchain(
         root, directory, manifest, config.get("toolchain"), baseline
     )
+    if "minimumReleaseAgeDays" in config:
+        selected["minimumReleaseAge"] = config["minimumReleaseAgeDays"] * 1440
     selected.update(
         buildScript=script, maintenance={"mode": mode, "upgradeScope": scope}
     )
     return directory, selected
+
+
+def verify_release_age(directory, selected):
+    import yaml
+
+    path = directory / "pnpm-workspace.yaml"
+    if not path.resolve().is_relative_to(directory):
+        raise ValueError("pnpm-workspace.yaml resolves outside the website")
+    try:
+        policy = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as error:
+        raise ValueError(f"{path}: invalid workspace YAML") from error
+    actual = policy.get("minimumReleaseAge") if isinstance(policy, dict) else None
+    required = selected["minimumReleaseAge"]
+    if type(actual) is not int or actual < required:
+        raise ValueError(
+            f"{path}: minimumReleaseAge={actual!r}; required at least {required} "
+            f"minutes ({required // 1440} days). Align the workspace or explicitly "
+            "override minimumReleaseAgeDays in .github/docusaurus.json"
+        )
 
 
 def verify_runtime(directory, selected):
@@ -286,10 +318,126 @@ def verify_runtime(directory, selected):
         raise ValueError(
             f"Installed pnpm {pnpm} differs from package.json/toolchain pnpm {selected['pnpm']}"
         )
-    lock = yaml.safe_load((directory / "pnpm-lock.yaml").read_text())
+    lock_path = directory / "pnpm-lock.yaml"
+    try:
+        lock = yaml.safe_load(lock_path.read_text())
+    except yaml.YAMLError as error:
+        raise ValueError(f"{lock_path}: invalid lockfile YAML: {error}") from error
     if not isinstance(lock, dict) or str(lock.get("lockfileVersion")) != "9.0":
         raise ValueError(
             "pnpm-lock.yaml must use lockfileVersion 9.0; migrate and verify it before running maintenance"
+        )
+    verify_release_age(directory, selected)
+
+
+def write_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def configuration_inputs(root, directory):
+    paths = [
+        root / ".github/docusaurus.json",
+        directory / "package.json",
+        directory / "pnpm-workspace.yaml",
+    ]
+    for parent in (directory, *directory.parents):
+        if not parent.is_relative_to(root):
+            break
+        declared = [parent / name for name in (".nvmrc", ".node-version")]
+        declared = [path for path in declared if path.exists()]
+        if declared:
+            paths.extend(declared)
+            break
+    result = {}
+    for path in paths:
+        if not path.resolve().is_relative_to(root):
+            raise ValueError(
+                f"{path}: configuration input resolves outside the repository"
+            )
+        result[str(path.relative_to(root))] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    return result
+
+
+def resolve_for_run(root, snapshot_path, sources):
+    if snapshot_path is not None and snapshot_path.exists():
+        # The snapshot includes provenance from several bounded source files.
+        with snapshot_path.open("rb") as stream:
+            snapshot = CONFIGURATION["json_object"](
+                stream.read(1_048_577), "resolved snapshot", max_bytes=1_048_576
+            )
+        if snapshot.get("root") != str(root) or snapshot.get("schema_version") != 1:
+            raise ValueError(
+                "resolved configuration snapshot belongs to a different project"
+            )
+        if (
+            set(snapshot)
+            != {"schema_version", "root", "configuration", "sources", "inputs"}
+            or not isinstance(snapshot["sources"], list)
+            or len(snapshot["sources"]) > 8
+            or not isinstance(snapshot["inputs"], dict)
+        ):
+            raise ValueError("invalid resolved configuration snapshot")
+        for source in snapshot["sources"]:
+            if not isinstance(source, dict) or set(source) != {
+                "repository",
+                "path",
+                "ref",
+                "commit",
+            }:
+                raise ValueError("invalid source in resolved configuration snapshot")
+            CONFIGURATION["validate_source"](
+                {key: source[key] for key in ("repository", "path", "ref")}
+            )
+            if not isinstance(source["commit"], str) or not re.fullmatch(
+                r"[0-9a-f]{40}", source["commit"]
+            ):
+                raise ValueError(
+                    "invalid source commit in resolved configuration snapshot"
+                )
+        sources.extend(snapshot["sources"])
+        config = snapshot["configuration"]
+        CONFIGURATION["validate_settings"](config, "resolved configuration snapshot")
+        directory, selected = project(root, config=config)
+        if snapshot["inputs"] != configuration_inputs(root, directory):
+            raise ValueError(
+                "project declarations changed after defaults resolution; rerun the audit"
+            )
+        return directory, selected
+    config = CONFIGURATION["load_configuration"](root, sources)
+    directory, selected = project(root, config=config)
+    if snapshot_path is not None:
+        write_json(
+            snapshot_path,
+            {
+                "schema_version": 1,
+                "root": str(root),
+                "configuration": config,
+                "sources": sources,
+                "inputs": configuration_inputs(root, directory),
+            },
+        )
+    return directory, selected
+
+
+def write_configuration_report(path, status, message, sources, selected=None):
+    if path is not None:
+        write_json(
+            path,
+            {
+                "schema_version": 1,
+                "status": status,
+                "message": message[:8000],
+                "sources": sources,
+                "required": {
+                    key: selected[key] for key in ("node", "pnpm", "minimumReleaseAge")
+                }
+                if selected is not None
+                else {},
+            },
         )
 
 
@@ -298,13 +446,55 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--github-env", type=Path)
     parser.add_argument("--verify-runtime", action="store_true")
+    parser.add_argument("--directory-only", action="store_true")
+    parser.add_argument("--resolved-config", type=Path)
+    parser.add_argument("--configuration-report", type=Path)
     args = parser.parse_args()
+    sources = []
+    selected = None
     try:
-        directory, selected = project(args.root)
+        root = args.root.resolve()
+        if args.directory_only:
+            directory, _ = project_directory(
+                root, CONFIGURATION["local_configuration"](root)
+            )
+            values = f"NPM_PROJECT={directory.relative_to(root).as_posix()}\n"
+            if args.github_env:
+                with args.github_env.open("a") as output:
+                    output.write(values)
+            else:
+                print(values, end="")
+            return
+        directory, selected = resolve_for_run(root, args.resolved_config, sources)
         if args.verify_runtime:
             verify_runtime(directory, selected)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        parser.error(str(error))
+        elif args.configuration_report:
+            verify_release_age(directory, selected)
+    except (OSError, ValueError, RecursionError, subprocess.SubprocessError) as error:
+        message = str(error)
+        if sources:
+            message += "\nDefaults sources: " + ", ".join(
+                f"{source['repository']}/{source['path']}@{source['ref']} "
+                f"(resolved {source['commit']})"
+                for source in sources
+            )
+        write_configuration_report(
+            args.configuration_report, "error", message, sources, selected
+        )
+        annotation = (
+            message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        )
+        print(f"::error title=Docusaurus configuration::{annotation}")
+        parser.exit(2, message + "\n")
+    write_configuration_report(
+        args.configuration_report,
+        "ok" if args.verify_runtime else "pending",
+        "Configuration and installed toolchain satisfy the resolved settings."
+        if args.verify_runtime
+        else "Configuration resolved; runtime verification is pending.",
+        sources,
+        selected,
+    )
     values = (
         f"NPM_PROJECT={directory.relative_to(args.root.resolve()).as_posix()}\n"
         f"DOCUSAURUS_NODE_VERSION={selected['node']}\n"

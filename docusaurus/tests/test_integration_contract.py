@@ -10,7 +10,12 @@ def test_caller_separates_audit_and_publisher_authority():
     caller = yaml.safe_load((ROOT / "docusaurus/caller.yml").read_text())
     audit = caller["jobs"]["audit"]
     publisher = caller["jobs"]["pull-request"]
-    assert audit["permissions"] == {"contents": "read"}
+    assert audit["permissions"] == {"contents": "read", "issues": "write"}
+    shared = yaml.safe_load(
+        (ROOT / ".github/workflows/docusaurus-audit.yml").read_text()
+    )
+    assert shared["jobs"]["audit"]["permissions"] == {"contents": "read"}
+    assert shared["jobs"]["configuration-issue"]["permissions"] == {"issues": "write"}
     assert "secrets" not in audit
     assert publisher["permissions"] == {"contents": "write", "pull-requests": "write"}
     assert set(publisher["secrets"]) == {"app-private-key"}
@@ -34,6 +39,7 @@ def test_reusable_workflows_bind_sibling_actions_to_their_own_commit():
         "$/docusaurus/audit",
         "$/docusaurus/project",
         "$/docusaurus/publish",
+        "$/docusaurus/configuration-issue",
     }
 
 
@@ -47,7 +53,7 @@ def test_auditor_never_declares_publisher_secrets():
 def test_public_contract_identifies_the_consumer_interface():
     contract = json.loads((ROOT / "docusaurus/contract.json").read_text())
     assert contract["schema_version"] == 1
-    assert contract["integration_version"] == 3
+    assert contract["integration_version"] == 4
     assert contract["component"] == "docusaurus"
     assert (ROOT / contract["caller_template"]).is_file()
     assert contract["consumer_config"] == ".github/docusaurus.json"
@@ -56,6 +62,10 @@ def test_public_contract_identifies_the_consumer_interface():
         "mode": "security-and-maintenance",
         "upgradeScope": "major",
     }
+    assert contract["shared_defaults"]["local_overrides_win"] is True
+    assert (ROOT / contract["shared_defaults"]["recommended_file"]).is_file()
+    assert contract["minimum_release_age_days_default"] == 10
+    assert contract["configuration_issue"]["reuse_closed_issue"] is True
 
 
 def test_toolchain_defaults_and_pre_mutation_enforcement():

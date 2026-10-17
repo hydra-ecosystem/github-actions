@@ -1,0 +1,7 @@
+name: Report Docusaurus configuration
+description: Open, update, close or reopen one configuration issue in the calling repository.
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/configuration_issue.py" --report "$RUNNER_TEMP/docusaurus-configuration/docusaurus-configuration.json"

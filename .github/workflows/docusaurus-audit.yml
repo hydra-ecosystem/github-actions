@@ -10,6 +10,8 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 60
     outputs:
       validation_passed: ${{ steps.proposal.outputs.validation_passed }}
@@ -29,3 +31,26 @@ jobs:
     - name: Audit, propose upgrades, and build
       id: proposal
       uses: $/docusaurus/audit
+  configuration-issue:
+    needs: audit
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    concurrency:
+      group: docusaurus-configuration-issue-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+    - name: Read configuration status from this run
+      id: report
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: docusaurus-configuration
+        path: ${{ runner.temp }}/docusaurus-configuration
+    - name: Maintain the configuration issue
+      if: ${{ steps.report.outcome == 'success' }}
+      uses: $/docusaurus/configuration-issue
+      env:
+        GH_TOKEN: ${{ github.token }}
