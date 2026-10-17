@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
 CONFIGURATION = runpy.run_path(str(Path(__file__).with_name("configuration.py")))
+SCHEDULING = CONFIGURATION["SCHEDULING"]
 
 
 def node_version(value, location):
@@ -175,12 +177,7 @@ def project_directory(root, config):
     root = root.resolve()
     name = config.get("directory")
     schedules = config.get("schedule", ["0 2 30 1 *"])
-    if (
-        not isinstance(schedules, list)
-        or not schedules
-        or any(not isinstance(value, str) or not value.strip() for value in schedules)
-    ):
-        raise ValueError("schedule must be a nonempty list of cron expressions")
+    SCHEDULING["validate_schedule"](schedules)
     if (
         not isinstance(name, str)
         or not name
@@ -239,7 +236,12 @@ def project(root: Path, config=None, sources=None) -> tuple[Path, dict]:
         raise ValueError(
             "docusaurus.json maintenance accepts only mode and upgradeScope"
         )
-    mode = maintenance.get("mode", "security-and-maintenance")
+    mode = maintenance.get(
+        "mode",
+        "security-only"
+        if isinstance(config.get("schedule"), dict)
+        else "security-and-maintenance",
+    )
     scope = maintenance.get("upgradeScope", "major")
     if mode not in ("security-only", "security-and-maintenance"):
         raise ValueError(
@@ -248,6 +250,14 @@ def project(root: Path, config=None, sources=None) -> tuple[Path, dict]:
     if scope not in ("patch", "minor", "major"):
         raise ValueError(
             "docusaurus.json maintenance.upgradeScope must be patch, minor or major"
+        )
+    if (
+        isinstance(config.get("schedule"), dict)
+        and config["schedule"].get("upgrades")
+        and mode == "security-only"
+    ):
+        raise ValueError(
+            "schedule.upgrades requires maintenance.mode=security-and-maintenance; use an empty upgrades list for manual-only upgrades"
         )
     baseline = json.loads(Path(__file__).with_name("toolchain.json").read_text())
     if "toolchain" in config and config["toolchain"] is None:
@@ -449,6 +459,7 @@ def main() -> None:
     parser.add_argument("--directory-only", action="store_true")
     parser.add_argument("--resolved-config", type=Path)
     parser.add_argument("--configuration-report", type=Path)
+    parser.add_argument("--audit-kind", choices=("auto", "security", "upgrades"))
     args = parser.parse_args()
     sources = []
     selected = None
@@ -466,6 +477,20 @@ def main() -> None:
                 print(values, end="")
             return
         directory, selected = resolve_for_run(root, args.resolved_config, sources)
+        if args.audit_kind is not None:
+            if args.resolved_config is None:
+                raise ValueError(
+                    "audit selection requires a resolved configuration snapshot"
+                )
+            config = json.loads(args.resolved_config.read_text())["configuration"]
+            selected["maintenance"]["mode"] = SCHEDULING["select_mode"](
+                root,
+                config,
+                selected["maintenance"]["mode"],
+                args.audit_kind,
+                os.environ.get("GITHUB_EVENT_NAME", ""),
+                SCHEDULING["event_payload"](os.environ.get("GITHUB_EVENT_PATH")),
+            )
         if args.verify_runtime:
             verify_runtime(directory, selected)
         elif args.configuration_report:
