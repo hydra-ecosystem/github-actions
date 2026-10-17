@@ -5,13 +5,14 @@ and override settings in individual repositories when needed. A source is a
 regular JSON file in any **public GitHub.com repository**. It needs no service,
 App, or registration with this repository.
 
-This feature requires **integration version 4**. Inspect
-[`docusaurus/contract.json`](../docusaurus/contract.json) at your chosen reviewed
-workflow revision and confirm `integration_version` is at least `4`. Use the
+Shared toolchain and maintenance defaults require **integration version 4**;
+inherited schedules require **version 5**. The examples below include schedules.
+Inspect [`docusaurus/contract.json`](../docusaurus/contract.json) at your chosen reviewed
+workflow revision and confirm `integration_version` is at least `5`. Use the
 [caller template](../docusaurus/caller.yml) from that same revision and pin both
-reusable workflow calls to its full commit SHA. The pinned integration-v3 starter
-in the [general setup guide](docusaurus.md#set-it-up) does not resolve shared
-defaults or maintain configuration issues.
+reusable workflow calls to its full commit SHA. The
+[general setup guide](docusaurus.md#set-it-up) supplies the version-5 caller;
+use the source configuration below to opt in to shared defaults.
 
 ## 1. Choose an authoritative defaults file
 
@@ -28,6 +29,10 @@ configuration repository:
   "maintenance": {
     "mode": "security-and-maintenance",
     "upgradeScope": "major"
+  },
+  "schedule": {
+    "security": ["0 2 * * 1"],
+    "upgrades": ["0 2 1 */3 *"]
   }
 }
 ```
@@ -50,8 +55,7 @@ In each website repository, add the source to `.github/docusaurus.json`:
     "path": "defaults/docusaurus.json",
     "ref": "main"
   },
-  "buildScript": "build",
-  "schedule": ["0 2 30 1 *"]
+  "buildScript": "build"
 }
 ```
 
@@ -60,9 +64,15 @@ required. `ref` can be a branch, tag, or full commit SHA. Sources are read witho
 credentials, so private source repositories are not supported; the website
 repository itself may be private.
 
-Each installation keeps its own directory, build script, schedule, dependency
+The recommended file selects weekly security checks and quarterly upgrades, with
+`security-and-maintenance` mode. Integration version 5 inherits its schedules and
+supports [manual audit choices](audit-schedules.md). Updating a live source changes
+the policy for consumers that inherit those fields; pin the defaults ref if each
+policy update needs a separate review. Version 4 ignores source schedules.
+
+Each installation keeps its own directory, build script, dependency
 declarations, security exceptions, deployment, and credentials. These values are
-not inherited. Keep the local schedule mirrored in the caller workflow. Remove
+not inherited. Keep the resolved schedule mirrored in the caller workflow. Remove
 explicit local toolchain or maintenance values when you want to inherit them.
 A local `maintenance.upgradeScope` keeps overriding the source after updates.
 
@@ -77,7 +87,8 @@ permissions:
 ```
 
 Use the complete [caller template](../docusaurus/caller.yml) from your selected
-version-4 revision. Keep both workflow references pinned to that same full SHA.
+version-5 revision for these examples. Keep both workflow references pinned to
+that same full SHA.
 The workflow's internal audit job has only `contents: read`; a separate reporting
 job has only `issues: write`. The reporting job reads a bounded JSON status
 artifact and does not check out or execute website code. It receives no App key.
@@ -88,7 +99,8 @@ to publishing dependency proposals.
 
 ## Local overrides
 
-Local settings win independently for each toolchain and maintenance field:
+Local settings win independently for each toolchain, maintenance and schedule
+field:
 
 ```json
 {
@@ -116,6 +128,17 @@ An empty `toolchain` object does not erase inherited constraints. Set either
 `toolchain.node` or `toolchain.pnpm` to `"project"` to explicitly follow that
 project's declaration instead of the inherited version requirement.
 
+Schedule lists are replaced per kind. For example, `"schedule": {"upgrades": []}`
+disables automatic routine upgrades while retaining the inherited security
+cadence. `"schedule": {"security": [], "upgrades": []}` disables both automatic
+cadences. An empty schedule object inherits both lists. A legacy local cron list
+replaces the whole inherited schedule and retains legacy selection rules.
+
+After a source or local schedule change, update the caller workflow's cron
+entries to match the resolved lists. GitHub reads triggers from that local file.
+Until it matches, preflight fails and the existing configuration issue reports
+the required schedule; no workflow file is changed automatically.
+
 `minimumReleaseAgeDays` is a nonnegative integer and defaults to `10` when no
 source or local setting supplies it. The website's `pnpm-workspace.yaml` must
 have an integer `minimumReleaseAge` of at least `days * 1440` minutes. A stricter
@@ -126,7 +149,8 @@ the workflow does not lower the global cooldown or rewrite declarations.
 
 Point `repository` at that website's repository and `path` at its
 `.github/docusaurus.json`. Its shared settings become live defaults for dependent
-websites. Source directory, build script, and schedule fields are ignored.
+websites. Source directory and build script fields are ignored. Version 5 also
+inherits its schedule, with local overrides taking precedence.
 
 The source can itself inherit defaults. Its inherited values are applied first,
 then its explicit shared values, then the dependent website's explicit values.
