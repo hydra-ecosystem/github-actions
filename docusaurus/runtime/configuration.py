@@ -2,14 +2,18 @@
 
 import json
 import re
+import runpy
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+SCHEDULING = runpy.run_path(str(Path(__file__).with_name("scheduling.py")))
 
 MAX_BYTES = 65536
 MAX_SOURCES = 8
-SHARED_KEYS = {"toolchain", "maintenance", "minimumReleaseAgeDays"}
-LOCAL_KEYS = {"directory", "buildScript", "schedule"}
+SHARED_KEYS = {"toolchain", "maintenance", "minimumReleaseAgeDays", "schedule"}
+LOCAL_KEYS = {"directory", "buildScript"}
 
 
 def json_object(data, location, max_bytes=MAX_BYTES):
@@ -70,6 +74,8 @@ def validate_settings(config, location):
     unknown = set(config) - SHARED_KEYS - LOCAL_KEYS - {"defaults"}
     if unknown:
         raise ValueError(f"{location}: unknown configuration fields: {sorted(unknown)}")
+    if "schedule" in config:
+        SCHEDULING["validate_schedule"](config["schedule"])
     if "defaults" in config:
         validate_source(config["defaults"])
     if "toolchain" in config:
@@ -137,13 +143,17 @@ def public_read(url, accept="application/json"):
     return data
 
 
-def merge_shared(inherited, explicit):
+def merge_shared(inherited, explicit, *, inherit_schedule=True):
     result = dict(inherited)
     for key in SHARED_KEYS & explicit.keys():
+        if key == "schedule" and not inherit_schedule:
+            continue
         value = explicit[key]
         result[key] = (
             {**result.get(key, {}), **value}
-            if key in {"toolchain", "maintenance"}
+            if key in {"toolchain", "maintenance", "schedule"}
+            and isinstance(value, dict)
+            and isinstance(result.get(key, {}), dict)
             else value
         )
     return result
@@ -160,7 +170,7 @@ def local_configuration(root):
     return config
 
 
-def load_configuration(root, sources=None):
+def load_configuration(root, sources=None, *, inherit_schedule=True):
     local = local_configuration(root)
     sources = sources if sources is not None else []
     commits = {}
@@ -207,9 +217,11 @@ def load_configuration(root, sources=None):
             if "defaults" in config
             else {}
         )
-        return merge_shared(inherited, config)
+        return merge_shared(inherited, config, inherit_schedule=inherit_schedule)
 
     inherited = inherit(local["defaults"], ()) if "defaults" in local else {}
-    result = merge_shared(inherited, local)
+    result = merge_shared(inherited, local, inherit_schedule=inherit_schedule)
     result.update({key: value for key, value in local.items() if key in LOCAL_KEYS})
+    if not inherit_schedule and "schedule" in local:
+        result["schedule"] = local["schedule"]
     return result

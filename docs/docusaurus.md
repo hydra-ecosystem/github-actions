@@ -9,10 +9,13 @@ Your repository keeps its dependency pins, build checks, schedule, and deploymen
 workflow. The shared workflows support organization-owned and personal
 repositories on GitHub.com.
 
-Managing several websites? Integration version 4 supports [live shared defaults,
-local overrides, and one reusable configuration issue](shared-defaults.md).
-The pinned starter below uses integration version 3; follow that guide's upgrade
-and permission steps before enabling shared defaults.
+The setup below uses integration version 5: weekly security checks, manual
+upgrade runs, and one maintained dependency PR. To schedule routine upgrades,
+see the [scheduling guide](audit-schedules.md).
+
+Managing several websites? [Shared defaults](shared-defaults.md) let them inherit
+one policy with per-site overrides. The recommended file selects weekly security
+and quarterly upgrades. Configuration failures update one reusable issue.
 
 ## Why use this workflow?
 
@@ -113,10 +116,13 @@ Create `.github/docusaurus.json` at the repository root:
   "toolchain": {},
   "buildScript": "build",
   "maintenance": {
-    "mode": "security-and-maintenance",
+    "mode": "security-only",
     "upgradeScope": "major"
   },
-  "schedule": ["0 2 30 1 *"]
+  "schedule": {
+    "security": ["0 2 * * 1"],
+    "upgrades": []
+  }
 }
 ```
 
@@ -124,22 +130,41 @@ Create `.github/docusaurus.json` at the repository root:
 and maintenance values shown are the defaults; change them using the
 [options reference](#build-and-maintenance-options).
 
-The example runs once a year, on January 30 at 02:00 UTC. Manual runs are also
-available. To use another cadence, change the cron expression **both here and in
-the caller workflow below**. GitHub reads scheduled triggers from the workflow
-file; changing this JSON alone does not reschedule the audit.
+The example checks security every Monday at 02:00 UTC and leaves routine
+upgrades manual. To use another cadence, update both the resolved JSON schedule
+and the caller workflow's cron entries. GitHub reads scheduled triggers from
+the workflow file; changing JSON alone does not reschedule the audit.
+
+To inherit the [recommended shared defaults](shared-defaults.md), use that guide's
+source configuration and omit local maintenance and schedule fields that you
+want to inherit. Mirror both weekly and quarterly entries in the caller.
 
 ### 3. Add the caller workflow
 
-Create `.github/workflows/dependency-audit.yml` at the repository root:
+Choose one reviewed full commit SHA from `hydra-ecosystem/github-actions`.
+Inspect its `docusaurus/contract.json` and confirm `integration_version` is at
+least `5`. Use `docusaurus/caller.yml` from that same revision.
+
+Create `.github/workflows/dependency-audit.yml` at the repository root using the
+example below. Replace **both** `REVIEWED_FULL_COMMIT_SHA` placeholders with that
+chosen SHA before committing. The placeholder avoids a stale hard-coded release
+hash in this guide; installed workflows still pin one immutable revision.
 
 ```yaml
 name: Docusaurus dependency audit
 
 'on':
   schedule:
-  - cron: 0 2 30 1 *
+  - cron: '0 2 * * 1'
   workflow_dispatch:
+    inputs:
+      audit-kind:
+        description: Security fixes only, or security plus routine upgrades for this run.
+        type: choice
+        default: security
+        options:
+        - security
+        - upgrades
 
 permissions:
   contents: read
@@ -152,14 +177,17 @@ jobs:
   audit:
     permissions:
       contents: read
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@9135994afb455c04c4010b3ee98742dce6e6c9af
+      issues: write
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-audit.yml@REVIEWED_FULL_COMMIT_SHA
+    with:
+      audit-kind: ${{ inputs.audit-kind || 'auto' }}
 
   pull-request:
     needs: audit
     permissions:
       contents: write
       pull-requests: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@9135994afb455c04c4010b3ee98742dce6e6c9af
+    uses: hydra-ecosystem/github-actions/.github/workflows/docusaurus-publish.yml@REVIEWED_FULL_COMMIT_SHA
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}
       app-client-id: ${{ vars.DOCUSAURUS_APP_CLIENT_ID }}
@@ -167,11 +195,10 @@ jobs:
       app-private-key: ${{ secrets.DOCUSAURUS_APP_PRIVATE_KEY }}
 ```
 
-Both calls pin [the same merged revision](https://github.com/hydra-ecosystem/github-actions/commit/9135994afb455c04c4010b3ee98742dce6e6c9af),
-which contains integration contract version 3 and its toolchain and maintenance
-options. The implementation stays fixed until you update both references.
-
-The audit job has read access. Only the publisher can push the maintenance branch
+Both calls must pin the same reviewed revision. The implementation stays fixed
+until you update both references. The audit's dependency-execution job has read
+access; a separate reporter uses `issues: write` for configuration failures.
+Only the publisher can push the maintenance branch
 and open its PR. For the initial setup, leave the App variable and secret unset;
 the publisher uses the repository's built-in `GITHUB_TOKEN`.
 
@@ -193,6 +220,10 @@ they use. An organization policy can override repository settings. See
 Merge the website preparation and setup files into your default branch. Open
 **Actions → Docusaurus dependency audit → Run workflow** and select that branch.
 Manual dispatch from another branch is rejected.
+Choose **security** for security fixes only, or **upgrades** for security plus
+routine upgrades for this run. A manual upgrade run keeps your automatic policy
+unchanged and still obeys scope, cooldown and build checks. Enable repository
+issues so the configuration reporter can open or update its single issue.
 
 | Result | What to do |
 | --- | --- |
@@ -259,8 +290,8 @@ Existing configurations **without a `toolchain` object** retain the legacy
 Node 24 and pnpm 11.21.0 selection. To opt in to project selection, align the
 project declarations and website CI, verify a frozen install and build, pin
 version 2 or later of the integration contract, then add `"toolchain": {}`.
-The merged revision in step 3 supports both toolchain selection and the version 3
-build and maintenance options.
+The version-5 revision selected in step 3 also supports these toolchain, build
+and maintenance options.
 
 With integration version 4, toolchain constraints can also come from a
 [shared defaults source](shared-defaults.md). Explicit local fields override
@@ -269,13 +300,18 @@ conflicts fail rather than rewriting those declarations.
 
 ## Build and maintenance options
 
+Version 5 adds [separate security and upgrade schedules](audit-schedules.md),
+manual audit selection, and a security-fix requirement for security-only PRs.
+The standalone setup above uses security-only. The recommended shared defaults
+select weekly security and quarterly upgrades. Explicit local settings win.
+
 These options live in `.github/docusaurus.json` and require integration contract
-version 3 or later. Each omitted value uses the default shown in step 2.
+version 3 or later; separate schedules and manual selection require version 5.
 
 | Setting | Values and behavior |
 | --- | --- |
 | `buildScript` | Default `"build"`. Names an existing, nonempty script in the selected website's `package.json`. For example, `"docs:build"` runs `pnpm run docs:build` in that website. |
-| `maintenance.mode` | Default `"security-and-maintenance"`: attempt security fixes, then routine upgrades. `"security-only"` skips routine version lookups and upgrade resolution. |
+| `maintenance.mode` | With a schedule object, default `"security-only"`: skip routine version lookups and resolution. `"security-and-maintenance"` allows routine work on the upgrades cadence. Legacy list/omitted schedules default to combined maintenance. Manual `audit-kind=upgrades` requests combined work for one run. |
 | `maintenance.upgradeScope` | Default `"major"`. Maximum routine **direct dependency** change: `"patch"` stays within the current major and minor; `"minor"` includes patches within the current major; `"major"` permits all stable levels. |
 
 The script name starts with an ASCII letter or digit and contains only letters,
