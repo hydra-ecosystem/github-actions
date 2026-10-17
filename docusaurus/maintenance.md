@@ -23,10 +23,11 @@ or a missing script stops the run before dependency changes.
 
 Integration version 4 supports [live shared defaults](../docs/shared-defaults.md)
 from a JSON file in any public GitHub repository, including another website's
-configuration. Only toolchain, minimum cooldown and maintenance fields are
+configuration. Toolchain, minimum cooldown and maintenance fields are
 inherited. Explicit local fields override inherited fields. Each run resolves
 references once and retains their full commit identities; source changes apply
-to subsequent runs. Directory, build script, schedule, deployment and credentials
+to subsequent runs. Version 5 also inherits schedule lists, with per-kind local
+overrides. Directory, build script, deployment and credentials
 remain local.
 
 `minimumReleaseAgeDays` defaults to ten. Preflight requires the standalone
@@ -37,8 +38,8 @@ the workflow does not rewrite them or automatically migrate a project.
 
 ## Maintenance behavior
 
-The default mode is `security-and-maintenance`. It attempts compatible security
-fixes at all severities before routine stable upgrades, then performs a frozen
+Legacy list/omitted schedules default to `security-and-maintenance`. This attempts
+compatible security fixes at all severities before routine stable upgrades, then performs a frozen
 installation and the selected production build. `security-only` skips routine
 upgrade selection and resolution.
 
@@ -49,7 +50,15 @@ A violation restores that snapshot. Transitive changes can accompany an allowed
 direct upgrade. Security-fix compatibility stays independent of the routine limit.
 See [build and maintenance options](../docs/docusaurus.md#build-and-maintenance-options).
 
-The schedule defaults to January 30 at 02:00 UTC. Keep it in the project
+Version 5 adds [separate security and upgrade schedules](../docs/audit-schedules.md).
+The recommended shared defaults check security weekly and propose routine
+upgrades quarterly. Without shared maintenance settings, a schedule object
+defaults to `security-only`; automatic upgrades require an explicit opt-in.
+Security-only runs discard dependency changes that
+fix no confirmed findings. A manual `audit-kind=upgrades` run can request routine
+upgrades without enabling them automatically. Legacy cron lists keep their mode.
+
+The legacy schedule defaults to January 30 at 02:00 UTC. Keep it in the project
 configuration and mirror it in the caller workflow's cron trigger. The
 **Docusaurus dependency audit** workflow also supports manual dispatch from the
 consumer's default branch.
@@ -60,6 +69,11 @@ The workflow opens or updates one PR titled **Docusaurus maintenance: security
 audit and dependency upgrades**. Only the website manifest, lockfile, and required
 pnpm security exceptions enter that PR. Reports remain in the PR body, run summary,
 and artifacts; they are not committed.
+
+All audit kinds share that PR and its stable branch. The publisher updates an
+outdated proposal and does not push another commit for an identical proposal.
+Publisher jobs are serialized for the repository. The headline gives dependency
+update counts, confirmed security fixes, remaining findings and build status.
 
 Reports retain unresolved findings, pin decisions, validation failures, changed
 locked version sets, and candidate dependency-file SHA-256 hashes. Grouped logs

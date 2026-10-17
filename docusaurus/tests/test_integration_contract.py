@@ -1,5 +1,7 @@
 import json
+import re
 from pathlib import Path
+from textwrap import indent
 
 import yaml
 
@@ -53,19 +55,52 @@ def test_auditor_never_declares_publisher_secrets():
 def test_public_contract_identifies_the_consumer_interface():
     contract = json.loads((ROOT / "docusaurus/contract.json").read_text())
     assert contract["schema_version"] == 1
-    assert contract["integration_version"] == 4
+    assert contract["integration_version"] == 5
     assert contract["component"] == "docusaurus"
     assert (ROOT / contract["caller_template"]).is_file()
     assert contract["consumer_config"] == ".github/docusaurus.json"
     assert contract["build_script_default"] == "build"
     assert contract["maintenance_defaults"] == {
-        "mode": "security-and-maintenance",
+        "mode": "security-only",
         "upgradeScope": "major",
     }
     assert contract["shared_defaults"]["local_overrides_win"] is True
     assert (ROOT / contract["shared_defaults"]["recommended_file"]).is_file()
     assert contract["minimum_release_age_days_default"] == 10
     assert contract["configuration_issue"]["reuse_closed_issue"] is True
+    assert contract["audit_schedules"]["new_installation"] == {
+        "security": ["0 2 * * 1"],
+        "upgrades": [],
+    }
+
+
+def test_setup_guide_uses_the_current_caller_and_standalone_schedule():
+    document = (ROOT / "docs/docusaurus.md").read_text()
+    config = next(
+        json.loads(block)
+        for block in re.findall(r"```json\n(.*?)\n```", document, re.S)
+        if '"directory"' in block
+    )
+    assert config["schedule"] == {"security": ["0 2 * * 1"], "upgrades": []}
+    assert config["maintenance"]["mode"] == "security-only"
+    caller = next(
+        yaml.safe_load(block)
+        for block in re.findall(r"```yaml\n(.*?)\n```", document, re.S)
+        if "jobs:" in block
+    )
+    expected = (
+        (ROOT / "docusaurus/caller.yml")
+        .read_text()
+        .replace("__CENTRAL_REPOSITORY__", "hydra-ecosystem/github-actions")
+        .replace("__CENTRAL_REVISION__", "REVIEWED_FULL_COMMIT_SHA")
+    )
+    schedule = yaml.safe_dump({"schedule": [{"cron": "0 2 * * 1"}]}, sort_keys=False)
+    expected = expected.replace(
+        "  schedule: []  # Rendered from the consumer project configuration.\n",
+        indent(schedule, "  "),
+    )
+    assert caller == yaml.safe_load(expected)
+    assert "9135994afb455c04c4010b3ee98742dce6e6c9af" not in document
 
 
 def test_toolchain_defaults_and_pre_mutation_enforcement():

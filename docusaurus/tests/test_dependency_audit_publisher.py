@@ -46,6 +46,109 @@ def test_app_credentials_are_scoped_to_trusted_repository_publishing():
     assert "if" not in checkout and "if" not in PUBLISH
 
 
+@pytest.mark.parametrize("failed_replay", [False, True])
+@pytest.mark.parametrize("changed_base", [False, True])
+@pytest.mark.parametrize("changed_report", [False, True])
+def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
+    tmp_path, failed_replay, changed_base, changed_report
+):
+
+    def git(*args, cwd=None):
+        return subprocess.check_output(
+            ["git", *args], cwd=cwd or work, text=True
+        ).strip()
+
+    remote, work = tmp_path / "remote.git", tmp_path / "work"
+    git("init", "--bare", str(remote), cwd=tmp_path)
+    git("clone", str(remote), str(work), cwd=tmp_path)
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.org")
+    git("checkout", "-b", "main")
+    (work / "website").mkdir()
+    for name in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
+        (work / "website" / name).write_text("baseline\n")
+    git("add", ".")
+    git("commit", "-m", "baseline")
+    git("push", "origin", "main")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    gh = binary / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\nfrom pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "state = Path(os.environ['PR_STATE'])\n"
+        "with open(os.environ['COMMAND_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
+        "if args[:2] == ['pr', 'list']: print('42' if state.exists() else '')\n"
+        "elif args[:2] == ['pr', 'view']: print(state.with_suffix('.md').read_text() if 'body' in args else os.environ['EXISTING_BASE'] if 'baseRefName' in args else 'false')\n"
+        "elif args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
+        "    state.write_text('42')\n"
+        "    state.with_suffix('.md').write_text(Path(args[args.index('--body-file') + 1]).read_text())\n"
+    )
+    gh.chmod(0o755)
+    log = tmp_path / "commands"
+    env = {
+        **os.environ,
+        "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+        "PR_STATE": str(tmp_path / "pr-state"),
+        "COMMAND_LOG": str(log),
+        "NPM_PROJECT": "website",
+        "BASE_BRANCH": "main",
+        "PR_BRANCH": "maintenance/dependency-audit",
+        "PR_TITLE": "Dependency maintenance",
+        "VALIDATION_PASSED": "true",
+        "RUNNER_TEMP": str(tmp_path),
+        "PR_FOOTER": "workflow",
+    }
+
+    iteration = 0
+
+    def publish(version, passed=True, report="Latest report"):
+        nonlocal iteration
+        iteration += 1
+        git("reset", "--hard", "origin/main")
+        git("checkout", "-B", "audit-input", "origin/main")
+        (work / "website/pnpm-lock.yaml").write_text(version + "\n")
+        (tmp_path / "dependency-audit-pr.md").write_text(
+            report + f"\nRun: 2026-10-17T12:00:{iteration:02d}Z\n"
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-c", PUBLISH["run"]],
+            cwd=work,
+            env={
+                **env,
+                "VALIDATION_PASSED": str(passed).lower(),
+                "EXISTING_BASE": "old-main" if changed_base else "main",
+                "PR_FOOTER": f"[Workflow run](https://example.com/runs/{iteration})",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == (0 if passed else 1), result.stderr
+        return git("rev-parse", "refs/remotes/origin/maintenance/dependency-audit")
+
+    first = publish("candidate-1")
+    assert (
+        publish(
+            "candidate-1",
+            passed=not failed_replay,
+            report="New advisory found" if changed_report else "Latest report",
+        )
+        == first
+    )  # No new commit for the same proposal.
+    assert publish("candidate-2") != first
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len([c for c in commands if c[:2] == ["pr", "create"]]) == 1
+    edits = [c for c in commands if c[:2] == ["pr", "edit"]]
+    assert len(edits) == 1 + (failed_replay or changed_base or changed_report)
+    assert all(edit[2] == "42" for edit in edits)
+    assert all(edit[edit.index("--base") + 1] == "main" for edit in edits)
+    assert all(
+        "--base" not in command for command in commands if command[:2] == ["pr", "list"]
+    )
+    assert len([c for c in commands if c[:2] == ["pr", "ready"]]) == int(failed_replay)
+
+
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("changes", [False, True])
 @pytest.mark.parametrize("passed", [False, True])
