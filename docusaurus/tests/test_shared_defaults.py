@@ -79,7 +79,7 @@ def test_live_defaults_merge_per_field_without_inheriting_site_specific_fields(
     remote = {
         "directory": "some/other/site",
         "buildScript": "remote-build",
-        "schedule": ["remote cron"],
+        "schedule": ["0 2 * * 1"],
         "toolchain": {"node": "24", "pnpm": "11.21.0"},
         "minimumReleaseAgeDays": 10,
         "maintenance": {"mode": "security-only", "upgradeScope": "patch"},
@@ -97,6 +97,131 @@ def test_live_defaults_merge_per_field_without_inheriting_site_specific_fields(
     remote["minimumReleaseAgeDays"] = 14
     assert module["project"](root)[1]["minimumReleaseAge"] == 20160
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+def test_shared_default_schedule_is_inherited_and_frozen_for_the_run(
+    site, monkeypatch, tmp_path
+):
+    root, _ = site
+    defaults = {
+        "maintenance": {"mode": "security-and-maintenance"},
+        "schedule": {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]},
+    }
+    public_sources(monkeypatch, {("owner/settings", "defaults.json"): defaults})
+    snapshot = tmp_path / "resolved.json"
+    module["resolve_for_run"](root, snapshot, [])
+    assert (
+        json.loads(snapshot.read_text())["configuration"]["schedule"]
+        == defaults["schedule"]
+    )
+    defaults["schedule"]["security"] = ["0 2 * * 2"]
+    module["resolve_for_run"](root, snapshot, [])
+    assert json.loads(snapshot.read_text())["configuration"]["schedule"][
+        "security"
+    ] == ["0 2 * * 1"]
+    assert configuration["load_configuration"](root)["schedule"]["security"] == [
+        "0 2 * * 2"
+    ]
+
+
+@pytest.mark.parametrize(
+    "override,expected",
+    [
+        ({"upgrades": []}, {"security": ["0 2 * * 1"], "upgrades": []}),
+        (
+            {"security": ["0 2 * * 2"]},
+            {"security": ["0 2 * * 2"], "upgrades": ["0 2 1 */3 *"]},
+        ),
+        ({}, {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]}),
+        (["0 2 * * 3"], ["0 2 * * 3"]),
+    ],
+)
+def test_local_schedule_fields_override_inherited_cadences(
+    site, monkeypatch, override, expected
+):
+    root, _ = site
+    public_sources(
+        monkeypatch,
+        {
+            ("owner/settings", "defaults.json"): {
+                "schedule": {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]}
+            }
+        },
+    )
+    configure(root, schedule=override)
+    assert configuration["load_configuration"](root)["schedule"] == expected
+
+
+def test_nested_schedule_defaults_merge_per_kind_without_combining_cron_lists(
+    site, monkeypatch
+):
+    root, _ = site
+    public_sources(
+        monkeypatch,
+        {
+            ("owner/settings", "defaults.json"): {
+                "defaults": {**SOURCE, "path": "base.json"},
+                "schedule": {"security": ["0 2 * * 2"]},
+            },
+            ("owner/settings", "base.json"): {
+                "schedule": {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]}
+            },
+        },
+    )
+    assert configuration["load_configuration"](root)["schedule"] == {
+        "security": ["0 2 * * 2"],
+        "upgrades": ["0 2 1 */3 *"],
+    }
+
+
+def test_inherited_schedule_drift_reports_the_required_caller_entries(
+    site, monkeypatch
+):
+    root, _ = site
+    public_sources(
+        monkeypatch,
+        {
+            ("owner/settings", "defaults.json"): {
+                "maintenance": {"mode": "security-and-maintenance"},
+                "schedule": {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]},
+            }
+        },
+    )
+    (root / ".github/workflows").mkdir()
+    (root / ".github/workflows/dependency-audit.yml").write_text(
+        "'on':\n  schedule:\n  - cron: '0 2 * * 1'\n"
+    )
+    config = configuration["load_configuration"](root)
+    with pytest.raises(ValueError, match=r"resolved schedule.*0 2 1 \*/3 \*"):
+        module["SCHEDULING"]["select_mode"](
+            root,
+            config,
+            "security-and-maintenance",
+            "auto",
+            "schedule",
+            {"schedule": "0 2 * * 1"},
+        )
+
+
+def test_legacy_resolver_for_private_v4_installations_ignores_shared_schedule(
+    site, monkeypatch
+):
+    root, _ = site
+    public_sources(
+        monkeypatch,
+        {
+            ("owner/settings", "defaults.json"): {
+                "schedule": {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]}
+            }
+        },
+    )
+    assert "schedule" not in configuration["load_configuration"](
+        root, inherit_schedule=False
+    )
+    configure(root, schedule=["0 2 * * 4"])
+    assert configuration["load_configuration"](root, inherit_schedule=False)[
+        "schedule"
+    ] == ["0 2 * * 4"]
 
 
 def test_local_explicit_values_override_shared_values(site, monkeypatch):
@@ -448,6 +573,38 @@ def test_documented_examples_resolve_against_the_actual_recommended_defaults(
         assert selected["node"] == example.get("toolchain", {}).get("node", "24")
         assert selected["pnpm"] == "11.21.0"
         assert selected["minimumReleaseAge"] == days * 1440
+
+
+def test_readme_default_and_override_examples_match_effective_shared_schedule(
+    site, monkeypatch
+):
+    root, _ = site
+    public_root = RUNTIME.parents[1]
+    defaults = json.loads((public_root / "defaults/docusaurus.json").read_text())
+    examples = [
+        json.loads(block)
+        for block in re.findall(
+            r"```json\n(.*?)\n```", (public_root / "README.md").read_text(), re.S
+        )
+    ]
+    assert (
+        examples[0]["schedule"]
+        == defaults["schedule"]
+        == {"security": ["0 2 * * 1"], "upgrades": ["0 2 1 */3 *"]}
+    )
+    assert (
+        examples[0]["maintenance"]["mode"]
+        == defaults["maintenance"]["mode"]
+        == "security-and-maintenance"
+    )
+    public_sources(monkeypatch, {("owner/settings", "defaults.json"): defaults})
+    configure(root, **examples[1])
+    resolved = configuration["load_configuration"](root)
+    assert resolved["schedule"] == {"security": ["0 2 * * 1"], "upgrades": []}
+    assert (
+        module["project"](root, config=resolved)[1]["maintenance"]["mode"]
+        == "security-only"
+    )
 
 
 def test_actual_preflight_report_only_becomes_healthy_after_runtime_validation(

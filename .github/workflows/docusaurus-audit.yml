@@ -1,6 +1,11 @@
 name: Docusaurus dependency audit
 'on':
   workflow_call:
+    inputs:
+      audit-kind:
+        description: auto selects the configured cadence; security or upgrades overrides one manual run.
+        type: string
+        default: auto
     outputs:
       validation_passed:
         description: Whether candidate validation passed.
@@ -31,6 +36,8 @@ jobs:
     - name: Audit, propose upgrades, and build
       id: proposal
       uses: $/docusaurus/audit
+      with:
+        audit-kind: ${{ inputs.audit-kind }}
   configuration-issue:
     needs: audit
     if: ${{ always() && !cancelled() }}
