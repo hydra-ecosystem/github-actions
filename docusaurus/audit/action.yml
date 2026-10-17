@@ -1,5 +1,9 @@
 name: Docusaurus audit
 description: Prepare and validate a dependency proposal for the calling repository.
+inputs:
+  audit-kind:
+    description: auto, security, or upgrades (manual dispatch only).
+    default: auto
 outputs:
   validation_passed:
     description: Whether frozen installation and production build passed.
@@ -14,10 +18,13 @@ runs:
     run: python -m pip install PyYAML==6.0.3
     shell: bash
   - name: Read project configuration
+    env:
+      AUDIT_KIND: ${{ inputs.audit-kind }}
     run: >-
       python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"
       --resolved-config "$RUNNER_TEMP/docusaurus-resolved-config.json"
       --configuration-report "$RUNNER_TEMP/docusaurus-configuration.json"
+      --audit-kind "$AUDIT_KIND"
     shell: bash
   - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
     with:
@@ -26,10 +33,13 @@ runs:
     run: corepack enable
     shell: bash
   - name: Verify the declared toolchain before dependency changes
+    env:
+      AUDIT_KIND: ${{ inputs.audit-kind }}
     run: >-
       python "$GITHUB_ACTION_PATH/../runtime/project.py" --verify-runtime
       --resolved-config "$RUNNER_TEMP/docusaurus-resolved-config.json"
       --configuration-report "$RUNNER_TEMP/docusaurus-configuration.json"
+      --audit-kind "$AUDIT_KIND"
     shell: bash
   - name: Retain configuration status even when preflight fails
     if: ${{ always() && !cancelled() }}
