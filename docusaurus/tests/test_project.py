@@ -151,7 +151,7 @@ def test_project_rejects_configuration_overriding_standard(tmp_path):
     (tmp_path / ".github/docusaurus.json").write_text(
         json.dumps({"directory": "website", "pnpm": "latest"})
     )
-    with pytest.raises(ValueError, match="only project directory and schedule"):
+    with pytest.raises(ValueError, match="unknown configuration fields.*pnpm"):
         read_project(tmp_path)
 
 
@@ -236,6 +236,7 @@ def website(tmp_path):
     )
     (site / ".nvmrc").write_text("22\n")
     (site / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (site / "pnpm-workspace.yaml").write_text("minimumReleaseAge: 14400\n")
     return tmp_path, site
 
 

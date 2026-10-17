@@ -27,6 +27,17 @@ The built-in GitHub token works; a GitHub App is optional.
 The [setup guide](docs/docusaurus.md#set-it-up) includes a pinned caller workflow,
 local build checks, and steps for the first audit.
 
+## Shared defaults for multiple installations
+
+Integration version 4 lets many websites follow one authoritative JSON defaults
+file in any public GitHub repository. Each site keeps local overrides and its
+own build/deployment setup. Conflicting declarations fail preflight and update
+one reusable configuration issue; nothing is migrated automatically.
+
+See [shared defaults setup and fleet updates](docs/shared-defaults.md). The
+[recommended defaults](defaults/docusaurus.json) select Node 24, pnpm 11.21.0,
+and a minimum ten-day cooldown.
+
 ## Reference
 
 - [Setup, first run, and updates](docs/docusaurus.md)

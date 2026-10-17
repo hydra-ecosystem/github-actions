@@ -10,8 +10,14 @@ runs:
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
     with:
       python-version: '3.13'
+  - name: Install configuration and audit report parser
+    run: python -m pip install PyYAML==6.0.3
+    shell: bash
   - name: Read project configuration
-    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"
+    run: >-
+      python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"
+      --resolved-config "$RUNNER_TEMP/docusaurus-resolved-config.json"
+      --configuration-report "$RUNNER_TEMP/docusaurus-configuration.json"
     shell: bash
   - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
     with:
@@ -19,12 +25,19 @@ runs:
   - name: Enable the project's pinned pnpm
     run: corepack enable
     shell: bash
-  - name: Install audit report parser
-    run: python -m pip install PyYAML==6.0.3
-    shell: bash
   - name: Verify the declared toolchain before dependency changes
-    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --verify-runtime
+    run: >-
+      python "$GITHUB_ACTION_PATH/../runtime/project.py" --verify-runtime
+      --resolved-config "$RUNNER_TEMP/docusaurus-resolved-config.json"
+      --configuration-report "$RUNNER_TEMP/docusaurus-configuration.json"
     shell: bash
+  - name: Retain configuration status even when preflight fails
+    if: ${{ always() && !cancelled() }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: docusaurus-configuration
+      if-no-files-found: ignore
+      path: ${{ runner.temp }}/docusaurus-configuration.json
   - name: Audit, propose upgrades, and build
     id: proposal
     run: 'python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory

@@ -1,7 +1,22 @@
 {
   "schema_version": 1,
   "component": "docusaurus",
-  "integration_version": 3,
+  "integration_version": 4,
+  "shared_defaults": {
+    "config_key": "defaults",
+    "source_fields": ["repository", "path", "ref"],
+    "inheritable_fields": ["toolchain", "maintenance", "minimumReleaseAgeDays"],
+    "recommended_file": "defaults/docusaurus.json",
+    "maximum_sources": 8,
+    "local_overrides_win": true
+  },
+  "minimum_release_age_days_default": 10,
+  "configuration_issue": {
+    "title": "Docusaurus configuration",
+    "marker": "<!-- docusaurus-configuration:v1 -->",
+    "permission": "issues: write",
+    "reuse_closed_issue": true
+  },
   "build_script_default": "build",
   "maintenance_defaults": {
     "mode": "security-and-maintenance",

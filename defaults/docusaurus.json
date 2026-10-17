@@ -1,0 +1,11 @@
+{
+  "toolchain": {
+    "node": "24",
+    "pnpm": "11.21.0"
+  },
+  "minimumReleaseAgeDays": 10,
+  "maintenance": {
+    "mode": "security-and-maintenance",
+    "upgradeScope": "major"
+  }
+}

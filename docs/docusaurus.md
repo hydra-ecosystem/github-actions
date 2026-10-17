@@ -9,6 +9,11 @@ Your repository keeps its dependency pins, build checks, schedule, and deploymen
 workflow. The shared workflows support organization-owned and personal
 repositories on GitHub.com.
 
+Managing several websites? Integration version 4 supports [live shared defaults,
+local overrides, and one reusable configuration issue](shared-defaults.md).
+The pinned starter below uses integration version 3; follow that guide's upgrade
+and permission steps before enabling shared defaults.
+
 ## Why use this workflow?
 
 Review security fixes, routine upgrades, build evidence, and blocked fixes in one
@@ -257,6 +262,11 @@ version 2 or later of the integration contract, then add `"toolchain": {}`.
 The merged revision in step 3 supports both toolchain selection and the version 3
 build and maintenance options.
 
+With integration version 4, toolchain constraints can also come from a
+[shared defaults source](shared-defaults.md). Explicit local fields override
+inherited fields. Resolved values are checked against project declarations;
+conflicts fail rather than rewriting those declarations.
+
 ## Build and maintenance options
 
 These options live in `.github/docusaurus.json` and require integration contract
@@ -331,6 +341,9 @@ verify any tool or lockfile migration separately first.
 | PR creation is denied | Check the repository setting in step 4 and any overriding organization policy. |
 | Generated PR checks are waiting for approval | Select **Approve workflows to run**, or configure the optional GitHub App. |
 | Default branch changed during the audit | Rerun from the current default branch; the publisher refuses a stale proposal. |
+| Shared defaults cannot be read or do not match the project | Use integration version 4, inspect the configuration issue, and align the declaration or add an explicit local override. See [shared defaults](shared-defaults.md). |
+| Cooldown is rejected by integration version 4 | Set workspace `minimumReleaseAge` to at least the resolved `minimumReleaseAgeDays * 1440`, or explicitly choose a different local minimum. |
+| Configuration issue cannot be maintained | Enable repository issues and grant `issues: write` on the caller's audit job using the version-4 caller template. Do not create another marked configuration issue. |
 
 ## Reference
 
@@ -338,6 +351,7 @@ verify any tool or lockfile migration separately first.
 - [Caller template](../docusaurus/caller.yml): the reusable workflow interface.
 - [Integration contract](../docusaurus/contract.json): configuration version and defaults.
 - [Toolchain](../docusaurus/runtime/toolchain.json): supported Node and pnpm combinations.
+- [Shared defaults for multiple installations](shared-defaults.md): live sources, local overrides, validation and issue lifecycle.
 - [Workspace settings](../docusaurus/runtime/templates/pnpm-workspace.yaml): baseline to merge with project policy.
 
 The implementation uses GitHub.com's `$/` references to bind supporting actions

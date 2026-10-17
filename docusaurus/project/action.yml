@@ -4,4 +4,4 @@ runs:
   using: composite
   steps:
   - shell: bash
-    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV"
+    run: python "$GITHUB_ACTION_PATH/../runtime/project.py" --directory-only --github-env "$GITHUB_ENV"
