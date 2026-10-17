@@ -3,6 +3,14 @@ name: Docusaurus dependency audit
 'on':
   schedule: []  # Rendered from the consumer project configuration.
   workflow_dispatch:
+    inputs:
+      audit-kind:
+        description: Security fixes only, or security plus routine upgrades for this run.
+        type: choice
+        default: security
+        options:
+        - security
+        - upgrades
 
 permissions:
   contents: read
@@ -17,6 +25,8 @@ jobs:
       contents: read
       issues: write
     uses: __CENTRAL_REPOSITORY__/.github/workflows/docusaurus-audit.yml@__CENTRAL_REVISION__
+    with:
+      audit-kind: ${{ inputs.audit-kind || 'auto' }}
 
   pull-request:
     needs: audit

@@ -16,6 +16,9 @@ permissions:
   contents: read
 jobs:
   pull-request:
+    concurrency:
+      group: docusaurus-dependency-proposal-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
