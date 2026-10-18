@@ -1,0 +1,11 @@
+{
+  "defaults": {
+    "repository": "hydra-ecosystem/github-actions",
+    "path": "defaults/node-maintenance.json",
+    "ref": "main"
+  },
+  "repositories": [
+    "hydra-ecosystem/hydra",
+    "hydra-ecosystem/omegaconf"
+  ]
+}

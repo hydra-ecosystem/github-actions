@@ -4,6 +4,9 @@ Use these workflows for a standalone Node application, library, or website.
 They attempt compatible security fixes, optionally propose routine upgrades,
 and validate the result before opening or updating one maintenance PR.
 
+This guide installs maintenance in one repository. To monitor setup across several
+installations, use the separate [fleet setup checker](node-fleet-setup.md).
+
 Already using the earlier Docusaurus workflows? Follow the
 [migration checklist](node-migration.md) instead.
 

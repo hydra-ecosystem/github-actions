@@ -4,6 +4,10 @@ Use one JSON file as the authoritative policy for several repositories. Each
 installation inherits toolchain constraints, release cooldown, maintenance
 options, and schedules, while keeping its own project settings and credentials.
 
+To monitor the installations following that policy, keep an optional repository
+inventory beside the defaults and run the separate [fleet setup checker](node-fleet-setup.md).
+It reports broken setup centrally without running dependency maintenance.
+
 A source can be a regular file in **any public GitHub.com repository**. It needs
 no service, App, or registration here. The consuming repository may be private.
 Use integration version **6** and the [setup guide](node-maintenance.md#set-it-up)

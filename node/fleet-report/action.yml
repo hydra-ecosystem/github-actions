@@ -1,0 +1,10 @@
+name: Report Node fleet setup
+description: Maintain one setup issue per inventory in the calling repository.
+runs:
+  using: composite
+  steps:
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+    with:
+      python-version: '3.13'
+  - shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/fleet_issue.py" --report "$RUNNER_TEMP/node-fleet-report/node-fleet-report.json"

@@ -1,0 +1,83 @@
+name: Node fleet setup
+'on':
+  workflow_call:
+    inputs:
+      inventory-repository:
+        type: string
+        default: ''
+        description: Repository containing the inventory; empty selects the caller.
+      inventory-path:
+        type: string
+        default: defaults/node-repositories.json
+        description: JSON inventory next to the shared defaults.
+      inventory-ref:
+        type: string
+        default: ''
+        description: Branch, tag or SHA; empty selects the default branch.
+    secrets:
+      read-token:
+        required: false
+        description: Optional token with Contents and Actions read access to private listed repositories.
+  workflow_dispatch:
+    inputs:
+      inventory-repository:
+        type: string
+        default: ''
+        description: Repository containing the inventory; empty selects this repository.
+      inventory-path:
+        type: string
+        default: defaults/node-repositories.json
+        description: JSON inventory path.
+      inventory-ref:
+        type: string
+        default: ''
+        description: Branch, tag or SHA; empty selects the default branch.
+permissions:
+  contents: read
+concurrency:
+  group: node-fleet-setup-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - name: Check listed installations
+      uses: $/node/fleet-check
+      env:
+        GH_TOKEN: ${{ secrets.read-token || github.token }}
+      with:
+        inventory-repository: ${{ inputs.inventory-repository }}
+        inventory-path: ${{ inputs.inventory-path }}
+        inventory-ref: ${{ inputs.inventory-ref }}
+    - name: Retain the setup report
+      if: ${{ always() && !cancelled() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: node-fleet-report
+        path: ${{ runner.temp }}/node-fleet-report.json
+        if-no-files-found: warn
+  report:
+    needs: check
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      issues: write
+    steps:
+    - name: Read the report
+      id: report
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: node-fleet-report
+        path: ${{ runner.temp }}/node-fleet-report
+    - name: Maintain the central setup issue
+      if: ${{ steps.report.outcome == 'success' }}
+      uses: $/node/fleet-report
+      env:
+        GH_TOKEN: ${{ github.token }}
