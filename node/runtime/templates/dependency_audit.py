@@ -15,6 +15,12 @@ import yaml
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
+NPM_AUDIT_INCLUDES = (
+    "--include=prod",
+    "--include=dev",
+    "--include=optional",
+    "--include=peer",
+)
 
 
 def npm_shrinkwrap_path(directory: Path) -> Path:
@@ -577,7 +583,8 @@ def audit(directory: Path, *, deadline: float | None = None) -> dict | str:
             )
         flags = ["--audit-level", "info"]
     else:
-        flags = ["--audit", "--package-lock-only"]
+        # CLI includes override project, user and environment omission settings.
+        flags = ["--audit", "--package-lock-only", *NPM_AUDIT_INCLUDES]
     result = run(
         directory,
         "audit",
@@ -837,6 +844,8 @@ def fix_security(
         "--package-lock-only",
         "--ignore-scripts",
         "--audit",
+        "--no-force",
+        *NPM_AUDIT_INCLUDES,
         *(["--before", release_before] if release_before else []),
         deadline=deadline,
     )
