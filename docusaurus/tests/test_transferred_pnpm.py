@@ -202,7 +202,8 @@ def test_validation_restores_valid_mutations(
 
     monkeypatch.setattr(subprocess, "run", invoke)
 
-    report = prepare(project)
+    validation = {}
+    report = prepare(project, validation=validation)
 
     assert proposal
     assert all(
@@ -213,7 +214,11 @@ def test_validation_restores_valid_mutations(
         assert f"Audit unavailable: {package_manager} changed package files" in report
     else:
         assert "validation failed" in report
-        assert "Passed." not in report
+        assert validation["passed"] is False
+        assert "- Production build: passed." not in report
+        assert (
+            f"Frozen install: {'failed.' if phase == 'frozen' else 'passed.'}" in report
+        )
 
 
 @pytest.fixture
@@ -326,7 +331,7 @@ def test_pnpm_security_first_and_policy_restoration(pnpm_project, monkeypatch, f
     if failure == "policy":
         assert "restored" in report and "exit 124" in report
     if failure == "frozen":
-        assert "Not run: pnpm frozen install failed" in report
+        assert "not run: pnpm frozen install failed" in report
         assert ["run", "build"] not in commands
     else:
         assert ["run", "build"] in commands

@@ -65,15 +65,26 @@ consumer's default branch.
 
 ## Reports and PRs
 
-The workflow opens or updates one PR titled **Docusaurus maintenance: security
-audit and dependency upgrades**. Only the website manifest, lockfile, and required
-pnpm security exceptions enter that PR. Reports remain in the PR body, run summary,
-and artifacts; they are not committed.
+The workflow opens or updates one PR whose title describes its dependency updates
+and confirmed security fixes. For example, **Docusaurus: 9 routine dependency
+updates, no security fixes** identifies a proposal with no confirmed security fix.
+If audit evidence is unavailable, the title says **security fixes unconfirmed**.
+Only the website manifest, lockfile, and required pnpm security exceptions enter
+that PR. Reports remain in the PR body, run summary, and artifacts; they are not
+committed.
 
 All audit kinds share that PR and its stable branch. The publisher updates an
 outdated proposal and does not push another commit for an identical proposal.
-Publisher jobs are serialized for the repository. The headline gives dependency
-update counts, confirmed security fixes, remaining findings and build status.
+An outdated title is corrected without another dependency commit or report rewrite.
+Publisher jobs are serialized for the repository. The headline gives the proposed
+dependency update count and build status. Routine-only proposals omit unrelated
+security counts from the headline; security proposals include confirmed fix counts.
+The body leads with the proposed dependency versions and validation results.
+Existing findings that all have known blockers and unchanged audit evidence appear
+as neutral background below validation. Their severities and constraints are
+expandable. Findings that need review or verification retain those distinctions.
+Run settings and full audit evidence are also expandable. Existing blocked fixes
+have no red status dots; newly reported findings remain visible with red markers.
 
 Reports retain unresolved findings, pin decisions, validation failures, changed
 locked version sets, and candidate dependency-file SHA-256 hashes. Grouped logs

@@ -304,10 +304,7 @@ def test_reusable_workflow_uses_the_configured_project():
     workflow = load_workflow()
     assert "workflow_call" in workflow.get("on", workflow.get(True))
     publisher = workflow["jobs"]["pull-request"]["steps"][-1]
-    assert (
-        publisher["env"]["PR_TITLE"]
-        == "Docusaurus maintenance: security audit and dependency upgrades"
-    )
+    assert "PR_TITLE" not in publisher["env"]
     assert "inputs.directory" not in json.dumps(workflow)
     assert "Landscape" not in json.dumps(workflow)
     reader = next(
@@ -859,12 +856,20 @@ def test_summary_precedes_collapsed_full_audit(npm_project, monkeypatch):
     fake_npm(monkeypatch)
     report = prepare(npm_project)
     summary, details = report.split("<details>", 1)
-    assert "**Maintenance:** 0 additional package updates (0 total)." in summary
-    assert "🟢 **No security findings**" in summary
+    assert "**Maintenance:**" not in summary
+    assert "**Maintenance:** 0 additional package updates (0 total)." in details
+    assert "0 security fixes · 0 affected package entries remain" in summary
+    assert "🟢 **No security findings**" in details
     assert "| Package |" not in summary
-    assert "## Production build\n\nPassed." in summary
-    assert len(summary) < 600
-    assert "renderer: `1.0.0` → `2.0.0`" in details
+    assert "- Production build: passed." in summary
+    assert "renderer: `1.0.0` → `2.0.0`" in summary
+    assert (
+        summary.index("## Proposed dependency changes")
+        < summary.index("## Validation")
+        < summary.index("## Security status")
+    )
+    assert "Build script:" not in summary
+    assert "Run configuration and audit evidence" in details
     assert "No upgrades to affected dependencies" not in report
     assert "No additional tool errors recorded" not in report
     assert "This is a best-effort" not in report
@@ -975,7 +980,7 @@ def test_security_outcomes_report_partial_resolution_for_one_package(security_fi
         security_findings([first] + unchanged),
         "pnpm",
     )
-    assert "| 🔴\u00a0`leaf` | 1 fixed · 1 pending |" in result
+    assert "| `leaf` | 1 fixed · 1 pending |" in result
     assert result.count("`leaf`") == 1
     assert all(f"`aaa-{i}`" in result for i in range(7))
     assert "🟠" not in result
@@ -1005,11 +1010,23 @@ def test_security_outcomes_summarize_concrete_blockers(security_findings):
     )
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| 🔴\u00a0`tinypool` | 2 pending | Blocked by the `@docusaurus/core` version constraint. |"
+        "| `tinypool` | 2 pending | Blocked by the `@docusaurus/core` version constraint. |"
         in result
     )
     assert "No published patch matches the fix range." in result
     assert result.count("`tinypool`") == 1
+    assert "🔴" not in result
+    background = audit_module["format_blocked_findings"](data, "pnpm")
+    assert "| Package | Blocked advisories | Reason |" in background
+    assert (
+        "| `tinypool` | 2 critical | Blocked by the `@docusaurus/core` version constraint. |"
+        in background
+    )
+    assert (
+        "| `braces` | 1 high | No published patch matches the fix range. |"
+        in background
+    )
+    assert "No security fixes" not in background and "🔴" not in background
 
 
 def test_security_outcomes_bound_the_visible_package_list(security_findings):
@@ -1038,7 +1055,8 @@ def test_summary_keeps_failed_validation_visible(
 
     assert "Audit unavailable" in summary
     assert "No known vulnerabilities" not in summary
-    assert "Passed." not in summary
+    assert "- Production build: passed." not in summary
+    assert f"Frozen install: {'failed.' if install else 'passed.'}" in summary
     assert "failed" in summary.lower()
 
 
@@ -1265,7 +1283,7 @@ def test_pnpm_security_first_and_policy_restoration(pnpm_project, monkeypatch, f
     if failure == "policy":
         assert "restored" in report and "exit 124" in report
     if failure == "frozen":
-        assert "Not run: pnpm frozen install failed" in report
+        assert "not run: pnpm frozen install failed" in report
         assert ["run", "build"] not in commands
 
 
@@ -1849,10 +1867,10 @@ def test_nonmutating_commands_preserve_exact_package_files(
         assert (project / name).exists() == (name in files)
     for name, content in files.items():
         assert f"- `{name}`: `{hashlib.sha256(content).hexdigest()}`" in report
-    assert validation["passed"] == ("## Production build\n\nPassed." in report)
+    assert validation["passed"] == ("- Production build: passed." in report)
     assert "restored" in report
     if operation in {"frozen", "build"}:
-        assert "## Production build\n\nPassed." not in report
+        assert "- Production build: passed." not in report
     if operation == "final-audit":
         assert "## Remaining advisories\n\nAudit unavailable" in report
 
@@ -2032,9 +2050,9 @@ def test_security_headline_separates_fixes_pin_decisions_and_all_blockers(
     )
     assert (
         result.splitlines()[0]
-        == "🟢 **Fixes in 1 package** · 🟠 **1 package needs your review** · 🔴 **Fixes blocked for 7 packages**"
+        == "🟢 **Fixes in 1 package** · 🟠 **1 package needs your review** · **Fixes blocked for 7 packages**"
     )
-    assert result.count("| 🔴\u00a0`blocked-") == 7
+    assert result.count("| `blocked-") == 7
 
 
 def test_security_headline_does_not_call_unknown_fixes_blocked(security_findings):
@@ -2127,20 +2145,21 @@ def test_maintenance_subtotal_excludes_security_updates_without_guessing(
 
     monkeypatch.setattr(subprocess, "run", update)
     report = prepare(npm_project)
-    visible = report.split("<details>", 1)[0]
+    visible, details = report.split("<details>", 1)
     assert "**Changes:**" not in visible
+    assert "**Maintenance:**" not in visible
+    assert "security classification unconfirmed" not in visible
     if initial_unavailable:
         assert (
             "**Dependency updates:** 2 packages; security classification unconfirmed."
-            in visible
+            in details
         )
-        assert "**Maintenance:**" not in visible
+        assert "**Maintenance:**" not in details
     else:
-        assert "**Maintenance:** 1 additional package update (2 total)." in visible
-        assert "Fixes in 1 package" in visible
-        assert visible.index("| 🟢\u00a0`security` |") < visible.index(
-            "**Maintenance:**"
-        )
+        assert "**Maintenance:** 1 additional package update (2 total)." in details
+        assert "1 security fix" in visible
+        assert "| 🟢\u00a0`security` |" not in visible
+        assert "| 🟢\u00a0`security` |" in report.split("<details>", 1)[1]
 
 
 def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
@@ -2151,7 +2170,7 @@ def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
             "Published patch: `leaf@1.2.0`. Blocked by retained override `pnpm-workspace.yaml overrides.leaf` = `1.0.0`.",
             "🟠",
         ),
-        ("No patched version declared by the registry.", "🔴"),
+        ("No patched version declared by the registry.", ""),
         ("Publication could not be fully verified.", "⚪"),
     ]:
         current = ("leaf", "pending", "high", status)
@@ -2160,8 +2179,9 @@ def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
             security_findings([current]),
             "pnpm",
         )
-        assert f"| {badge}\u00a0`leaf` | 1 fixed · 1 pending |" in result
-        assert result.count("| " + badge + "\u00a0`leaf`") == 1
+        label = f"{badge}\u00a0" if badge else ""
+        assert f"| {label}`leaf` | 1 fixed · 1 pending |" in result
+        assert result.count(f"| {label}`leaf`") == 1
         assert ("your review" in result) == (badge == "🟠")
 
 
@@ -2170,7 +2190,7 @@ def test_package_advisory_counts_deduplicate_repeated_identity(security_findings
     before = security_findings([repeated, repeated, ("leaf", "fixed", "high", "")])
     after = security_findings([repeated, repeated])
     result = audit_module["format_audit_summary"](before, after, "pnpm")
-    assert "| 🔴\u00a0`leaf` | 1 fixed · 1 pending |" in result
+    assert "| `leaf` | 1 fixed · 1 pending |" in result
 
 
 def test_missing_initial_evidence_cannot_color_a_package_resolved(security_findings):
@@ -2178,7 +2198,7 @@ def test_missing_initial_evidence_cannot_color_a_package_resolved(security_findi
         [("leaf", "open", "high", "No patched version declared by the registry.")]
     )
     result = audit_module["format_audit_summary"]("Audit unavailable", current, "pnpm")
-    assert "| 🔴\u00a0`leaf` | fixes unconfirmed · 1 pending |" in result
+    assert "| `leaf` | fixes unconfirmed · 1 pending |" in result
     assert "🟢" not in result and "🟠" not in result
 
 
