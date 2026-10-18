@@ -113,9 +113,12 @@ A run with no qualifying changes creates no PR and leaves an
 existing proposal intact; read that run's summary for current findings. After a
 PR is merged or closed, a later qualifying proposal can open the next PR.
 
-The report headline states dependency updates, confirmed security fixes,
-remaining findings (including critical counts), and build status. A passing
-build alone does not establish that a security finding was fixed.
+The report leads with proposed dependency changes and install/build validation.
+Routine-only headlines show the update count and build status; security proposals
+also show confirmed fix counts. Existing blocked, unchanged findings appear as
+neutral background, with severities and constraints in expandable details.
+Newly reported findings remain visible. A passing build alone does not establish
+that a security finding was fixed. See [reports and PRs](../docusaurus/maintenance.md#reports-and-prs).
 
 ## Shared defaults and existing installations
 
