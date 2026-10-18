@@ -588,16 +588,16 @@ def test_documented_examples_resolve_against_the_actual_recommended_defaults(
         assert selected["minimumReleaseAge"] == days * 1440
 
 
-def test_readme_default_and_override_examples_match_effective_shared_schedule(
-    site, monkeypatch
-):
+def test_scheduling_guide_examples_match_effective_shared_schedule(site, monkeypatch):
     root, _ = site
     public_root = RUNTIME.parents[1]
     defaults = json.loads((public_root / "defaults/node-maintenance.json").read_text())
     examples = [
         json.loads(block)
         for block in re.findall(
-            r"```json\n(.*?)\n```", (public_root / "README.md").read_text(), re.S
+            r"```json\n(.*?)\n```",
+            (public_root / "docs/audit-schedules.md").read_text(),
+            re.S,
         )
     ]
     assert (
