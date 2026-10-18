@@ -1,0 +1,7 @@
+name: Report Node audit configuration
+description: Open, update, close or reopen one configuration issue in the calling repository.
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/configuration_issue.py" --report "$RUNNER_TEMP/node-audit-configuration/node-audit-configuration.json"
