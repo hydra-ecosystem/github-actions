@@ -1,23 +1,18 @@
 # Shared defaults for multiple Node installations
 
-Define shared defaults once, reuse them across many Node installations,
-and override settings in individual repositories when needed. A source is a
-regular JSON file in any **public GitHub.com repository**. It needs no service,
-App, or registration with this repository.
+Use one JSON file as the authoritative policy for several repositories. Each
+installation inherits toolchain constraints, release cooldown, maintenance
+options, and schedules, while keeping its own project settings and credentials.
 
-Shared toolchain and maintenance defaults require **integration version 6**;
-inherited schedules require **version 6**. The examples below include schedules.
-Inspect [`node/contract.json`](../node/contract.json) at your chosen reviewed
-workflow revision and confirm `integration_version` is `6`. Use the
-[caller template](../node/caller.yml) from that same revision and pin both
-reusable workflow calls to its full commit SHA. The
-[general setup guide](node-maintenance.md#set-it-up) supplies the version-6 caller;
-use the source configuration below to opt in to shared defaults.
+A source can be a regular file in **any public GitHub.com repository**. It needs
+no service, App, or registration here. The consuming repository may be private.
+Use integration version **6** and the [setup guide](node-maintenance.md#set-it-up)
+for local project verification, the caller workflow, and publication permissions.
 
 ## 1. Choose an authoritative defaults file
 
-For example, publish this as `defaults/node-maintenance.json` in your own public
-configuration repository:
+You can follow the [recommended defaults in this repository](../defaults/node-maintenance.json)
+or publish an equivalent file in your own public configuration repository:
 
 ```json
 {
@@ -38,15 +33,15 @@ configuration repository:
 }
 ```
 
-You can also use the [recommended defaults in this repository](../defaults/node-maintenance.json).
-They live outside the `node/` action implementation tree. Other maintainers
-can keep equivalent files in their own repositories and review changes through
-their normal pull-request process. Supported Node/pnpm combinations still apply;
-a shared file does not add support for an untested toolchain.
+This policy checks security weekly and proposes routine upgrades quarterly.
+It requires Node 24 and the listed version of the project's existing package
+manager; it does not choose or migrate the package manager. A shared file cannot
+add support for toolchain versions outside the [supported matrix](node-maintenance.md#supported-projects).
 
 ## 2. Point each installation at the source
 
-In each project repository, add the source to `.github/node-maintenance.json`:
+Use this as the configuration in step 2 of the setup guide, replacing `website`
+and `build` with your project directory and validation script:
 
 ```json
 {
@@ -60,48 +55,40 @@ In each project repository, add the source to `.github/node-maintenance.json`:
 }
 ```
 
-Change `repository` and `path` to use your own file. All three source fields are
-required. `ref` can be a branch, tag, or full commit SHA. Sources are read without
-credentials, so private source repositories are not supported; the project
-repository itself may be private.
+All three source fields are required. Change `repository` and `path` to use your
+own file. `ref` can be a branch, tag, or full commit SHA. Sources are fetched
+without credentials; private defaults repositories are not supported.
 
-The recommended file selects weekly security checks and quarterly upgrades, with
-`security-and-maintenance` mode. Integration version 6 inherits its schedules and
-supports [manual audit choices](audit-schedules.md). Updating a live source changes
-the policy for consumers that inherit those fields; pin the defaults ref if each
-policy update needs a separate review. 
+**Replace the basic setup's explicit policy fields rather than appending this
+source to them.** Local fields keep overriding the source. In particular, the
+basic `security-only` mode conflicts with inherited nonempty upgrade schedules.
+Keep explicit local values only when you intend to override shared policy.
 
-Each installation keeps its own directory, validation script, dependency
-declarations, security exceptions, deployment, and credentials. These values are
-not inherited. Keep the resolved schedule mirrored in the caller workflow. Remove
-explicit local toolchain or maintenance values when you want to inherit them.
-A local `maintenance.upgradeScope` keeps overriding the source after updates.
+## 3. Match the caller and run an audit
 
-## 3. Allow the configuration issue reporter
-
-The version-6 caller grants these permissions on its **`jobs.audit`**:
+Continue with [step 3 of the setup guide](node-maintenance.md#3-add-the-caller-workflow).
+For the recommended defaults, the caller must contain both cron entries:
 
 ```yaml
-permissions:
-  contents: read
-  issues: write
+schedule:
+- cron: '0 2 * * 1'
+- cron: '0 2 1 */3 *'
 ```
 
-Use the complete [caller template](../node/caller.yml) from your selected
-version-6 revision for these examples. Keep both workflow references pinned to
-that same full SHA.
-The workflow's internal audit job has only `contents: read`; a separate reporting
-job has only `issues: write`. The reporting job reads a bounded JSON status
-artifact and does not check out or execute project code. It receives no App key.
+Place this under `on` in the caller. Keep both reusable workflow calls pinned
+to the same reviewed version-6 SHA. Enable repository issues and publication as
+shown in [step 4](node-maintenance.md#4-enable-publication-and-run-the-first-audit),
+then run a manual security audit. Preflight checks the resolved tools, cooldown,
+and schedules before dependency changes.
 
-Enable repository issues. No App is required for reporting. The existing
-[PR-creation setup](node-maintenance.md#4-enable-publication-and-run-the-first-audit) still applies
-to publishing dependency proposals.
+A defaults edit does not rewrite local workflow triggers. When shared schedules
+change, update affected callers too. A mismatch fails preflight, including manual
+runs, and updates the single configuration issue. See the
+[scheduling guide](audit-schedules.md) for disabling or changing a cadence.
 
 ## Local overrides
 
-Local settings win independently for each toolchain, maintenance and schedule
-field:
+Local fields override inherited values independently. For example:
 
 ```json
 {
@@ -111,102 +98,62 @@ field:
     "path": "defaults/node-maintenance.json",
     "ref": "main"
   },
-  "toolchain": {
-    "node": "22"
-  },
+  "toolchain": {"node": "22"},
   "minimumReleaseAgeDays": 14,
-  "maintenance": {
-    "upgradeScope": "patch"
-  }
+  "maintenance": {"upgradeScope": "patch"}
 }
 ```
 
-This site requires Node 22 and a fourteen-day minimum cooldown. It inherits pnpm
-and maintenance mode, and restricts routine upgrades to patches. Its project
-declarations must agree with those resolved settings.
+This project requires Node 22 and a fourteen-day minimum cooldown. It inherits
+the package-manager constraint, maintenance mode, and both schedules, while
+limiting routine direct upgrades to patches. Its local declarations and pnpm
+policy, if used, must satisfy those settings.
 
-An empty `toolchain` object does not erase inherited constraints. Set either
-`toolchain.node` or `toolchain.pnpm` to `"project"` to explicitly follow that
-project's declaration instead of the inherited version requirement.
+| Setting | Override behavior |
+| --- | --- |
+| `toolchain.node`, `toolchain.npm`, `toolchain.pnpm` | Each local value replaces that inherited constraint. Use `"project"` to follow the consuming project's declaration. An empty object erases nothing. |
+| `minimumReleaseAgeDays` | A local integer replaces the inherited minimum; stricter pnpm workspace policy remains valid. |
+| `maintenance.mode`, `maintenance.upgradeScope` | Each local value replaces that inherited field. |
+| `schedule.security`, `schedule.upgrades` | Each local list replaces that cadence. Omitted lists inherit; `[]` disables a cadence. An empty object inherits both lists. |
 
-Schedule lists are replaced per kind. For example, `"schedule": {"upgrades": []}`
-disables automatic routine upgrades while retaining the inherited security
-cadence. `"schedule": {"security": [], "upgrades": []}` disables both automatic
-cadences. An empty schedule object inherits both lists. A legacy local cron list
-replaces the whole inherited schedule and retains legacy selection rules.
-
-After a source or local schedule change, update the caller workflow's cron
-entries to match the resolved lists. GitHub reads triggers from that local file.
-Until it matches, preflight fails and the existing configuration issue reports
-the required schedule; no workflow file is changed automatically.
-
-`minimumReleaseAgeDays` is a nonnegative integer and defaults to `10` when no
-source or local setting supplies it. The project's `pnpm-workspace.yaml` must
-have an integer `minimumReleaseAge` of at least `days * 1440` minutes. A stricter
-workspace value is accepted. Exact-version security exceptions remain intact;
-the workflow does not lower the global cooldown or rewrite declarations.
+Directory, validation script, dependency declarations, security exceptions,
+deployment, and credentials remain local. They are not inherited. Shared
+constraints are checked against declarations; they never rewrite them.
 
 ## Use another project as the authoritative source
 
-Point `repository` at that project's repository and `path` at its
-`.github/node-maintenance.json`. Its shared settings become live defaults for dependent
-projects. Source directory and validation script fields are ignored. Version 5 also
-inherits its schedule, with local overrides taking precedence.
+Point `repository` at that project's public repository and `path` at its
+`.github/node-maintenance.json`. Only its shared fields are inherited; its
+directory and validation script are ignored.
 
-The source can itself inherit defaults. Its inherited values are applied first,
-then its explicit shared values, then the dependent project's explicit values.
-This is live inheritance, not a one-time copy. Sources must declare shared
-values explicitly or inherit them; the resolver does not infer versions from
+The source can itself inherit defaults. Its inherited values apply first, then
+its explicit shared values, then the consuming project's explicit values.
+This is live inheritance, not a one-time copy. Versions are not inferred from
 another project's `.nvmrc` or `package.json`. `"project"` always refers to the
 consuming project.
 
 Cycles, chains longer than eight sources, unknown settings, invalid JSON,
 unreadable sources, and oversized files fail validation. Source files are limited
-to 64 KiB and are treated only as JSON data. Each source reference field is
-limited to 2048 characters.
+to 64 KiB; each source reference field is limited to 2048 characters. Sources are
+treated only as JSON data.
 
 ## Manage shared updates
 
-- **Follow a branch** for fleet-wide changes on each installation's next audit.
-- **Use a full commit SHA** for fixed defaults and adopt updates through local PRs.
-- A tag can move; use a full SHA when you need an immutable source.
+- Follow a **branch** to apply shared changes on each installation's next audit.
+- Use a **full commit SHA** when each policy update needs a local adoption PR.
+- A tag can move; use a full SHA for an immutable source.
 
-The source revision is independent of the workflow revision. Each audit resolves
-branch/tag references to full commits and freezes the effective configuration
-for that run. Failure reports record the source path, requested reference, and
-resolved commit. Changing a source during a run does not change that run's
-requirements. Future runs resolve the source again.
+The defaults ref is independent of the workflow pin. A pinned workflow that
+follows defaults at `main` still receives future defaults changes. Each audit
+resolves references to full commits and freezes its configuration for that run;
+source changes apply to later runs. Configuration reports retain source identities.
 
-Before changing fleet defaults, verify one site's declarations and build against
-the proposed values. Align affected sites' declarations when adopting a change.
-A shared change can cause sites that have drifted to fail their next preflight;
-it does not migrate them automatically.
+Before changing shared policy, verify a representative project's declarations
+and validation script against the proposed values. Align affected declarations,
+pnpm cooldowns, and caller triggers as needed. A shared change can cause the next
+preflight to fail; no automatic migration or repair PR is generated.
 
-## Failures and the single configuration issue
-
-Preflight runs before any project dependency command. Conflicting Node or pnpm
-declarations, an insufficient cooldown, or a bad source produce a GitHub Actions
-error annotation, a failed audit, and a configuration issue with the diagnostic,
-source information, and workflow-run link. Failed configuration checks do not
-publish a dependency proposal.
-
-There is **one bot-owned `Node audit configuration` issue per repository**:
-
-1. The first configuration failure opens it.
-2. Repeated failures update its body without adding per-run comments.
-3. Successful configuration and runtime validation closes it, even if a later
-   dependency install or build fails for a different reason.
-4. A later configuration failure reopens the same issue, including when the
-   defaults source has changed.
-
-Fix the named declaration, or explicitly override the inherited setting, then
-rerun the audit. The workflow never edits files to resolve a mismatch. Interrupted
-preflight does not close an existing issue. Ordinary build or dependency failures
-retain the existing audit-report/draft-PR behavior.
-
-Reporting is serialized per repository. Ambiguous duplicate marked issues,
-disabled repository issues, or insufficient issue permission produce a reporting
-error rather than creating another issue. Inspect that error before retrying.
-
-Automatic migration or repair PRs are not part of this feature. Repeated manual
-repair effort can inform whether an opt-in migration feature is worthwhile.
+Failures reuse one **Node audit configuration** issue per repository. Fix the
+named declaration or override, then rerun. Successful preflight closes the issue;
+recurrence reopens it. See [configuration issue behavior](../node/maintenance.md#configuration-issues)
+for reporting permissions and failure cases.

@@ -1,141 +1,124 @@
-# Node dependency maintenance
+# Node maintenance behavior
 
-Use the [setup guide](../docs/node-maintenance.md) to install the shared workflows.
-The project owns its dependency versions, build prerequisites, deployment, and
-pnpm policy. `.github/node-maintenance.json` selects the project directory, toolchain,
-validation script, maintenance options, and schedule.
+Use the [setup guide](../docs/node-maintenance.md) to install the workflows.
+This reference explains how dependency proposals, validation, reports, and
+publication work. The project owns its dependency declarations, validation
+script, build prerequisites, deployment, and package-manager policy.
 
 ## Toolchain and validation
 
-Node and the package manager follow the project declarations by default.
-Supported combinations use Node 22 (at least 22.13.0) or 24 with npm 11.9.0,
-or pnpm 11.20.0/11.21.0. Explicit constraints must agree with declarations.
-See [toolchain selection](../docs/node-maintenance.md#toolchain-selection).
+Preflight checks the selected standalone project, declared tools, supported
+lockfile, validation script, and release cooldown before dependency changes.
+Explicit or inherited toolchain constraints must agree with project declarations.
+A mismatch fails the run; it does not rewrite files or migrate the project.
+See [supported projects](../docs/node-maintenance.md#supported-projects) and
+[toolchain selection](../docs/node-maintenance.md#toolchain-selection).
 
-For pnpm, the recommended workspace policy uses a ten-day release delay, restricted dependency sources,
-and explicit dependency-script approvals. Existing application constraints,
-overrides, and exact security exceptions remain project configuration.
-
-`validationScript` defaults to `build` and must name an existing, nonempty project
-package script. Put prerequisites and checks in that script. Invalid configuration
-or a missing script stops the run before dependency changes.
-
-Integration version 6 supports [live shared defaults](../docs/shared-defaults.md)
-from a JSON file in any public GitHub repository, including another project's
-configuration. Toolchain, minimum cooldown and maintenance fields are
-inherited. Explicit local fields override inherited fields. Each run resolves
-references once and retains their full commit identities; source changes apply
-to subsequent runs. It also inherits schedule lists, with per-kind local
-overrides. Directory, validation script, deployment and credentials
-remain local.
-
-`minimumReleaseAgeDays` defaults to ten. For pnpm, preflight requires the standalone
-workspace's `minimumReleaseAge` to be an integer at least that many days in
-minutes. Stricter workspace settings and existing security exceptions remain
-valid. Conflicting toolchain declarations or insufficient cooldown fail loudly;
-the workflow does not rewrite them or automatically migrate a project.
+`validationScript` defaults to `build` and must name an existing, nonempty package
+script. Each proposal is validated with a frozen install and that script. Put
+required setup, tests, lint, or build commands in the script. Passing it proves
+only that those selected checks passed, not that every vulnerability was fixed.
 
 ## Maintenance behavior
 
-Cron-list/omitted schedules default to `security-and-maintenance`. This attempts
-compatible security fixes at all severities before routine stable upgrades, then performs a frozen
-installation and the selected project checks. `security-only` skips routine
-upgrade selection and resolution.
+Security audits attempt compatible fixes at all severities. Security-only runs
+retain changes only when before/after audit evidence confirms a security fix;
+unrelated changes are discarded. The engine does not force incompatible upgrades
+or remove project overrides automatically.
 
+Upgrade audits attempt security fixes first, then routine stable upgrades.
 `maintenance.upgradeScope` limits routine **direct** upgrades to `patch`, `minor`
-(including patches), or `major` (the default, including all levels). Restricted
-scopes check the actual resolved proposal against the accepted security snapshot.
-A violation restores that snapshot. Transitive changes can accompany an allowed
-direct upgrade. Security-fix compatibility stays independent of the routine limit.
-See [validation and maintenance options](../docs/node-maintenance.md#validation-and-maintenance-options).
+(including patches), or `major` (the default, including both). Restricted scopes
+check the actual resolved proposal against the accepted security snapshot. A
+violation restores that snapshot. Transitive changes can accompany an allowed
+direct upgrade. Security-fix compatibility is independent of the routine limit.
 
-The interface supports [separate security and upgrade schedules](../docs/audit-schedules.md).
-The recommended shared defaults check security weekly and propose routine
-upgrades quarterly. Without shared maintenance settings, a schedule object
-defaults to `security-only`; automatic upgrades require an explicit opt-in.
-Security-only runs discard dependency changes that
-fix no confirmed findings. A manual `audit-kind=upgrades` run can request routine
-upgrades without enabling them automatically. Cron lists keep their mode.
+The [scheduling guide](../docs/audit-schedules.md) explains automatic opt-in and
+manual audit choices. A manual upgrades run requests routine work once without
+changing automatic policy. See [shared defaults](../docs/shared-defaults.md) to
+apply policy across several repositories.
 
-The cron-list shorthand defaults to January 30 at 02:00 UTC. Keep it in the project
-configuration and mirror it in the caller workflow's cron trigger. The
-**Node dependency audit** workflow also supports manual dispatch from the
-consumer's default branch.
+## Release cooldown
+
+`minimumReleaseAgeDays` is a nonnegative integer and defaults to ten.
+
+For **pnpm**, the standalone workspace's `minimumReleaseAge` must be an integer
+at least that many days in minutes (`days * 1440`). Stricter workspace policy is
+preserved. The engine can retain exact security-related release-age exceptions
+and reports them. Existing overrides and script approvals remain project policy.
+
+For **npm**, the engine supplies a publication cutoff using `--before` during
+security and routine resolution. Routine direct candidates also use release-time
+metadata. There is no npm release-age exception mechanism in this version;
+recent fixes can remain blocked until the cutoff permits them. Existing locked
+versions are not downgraded just because they are younger than the cutoff.
 
 ## Reports and PRs
 
-The workflow opens or updates one PR whose title describes its dependency updates
-and confirmed security fixes. For example, **Node: 9 routine dependency
-updates, no security fixes** identifies a proposal with no confirmed security fix.
-If audit evidence is unavailable, the title says **security fixes unconfirmed**.
+All audit kinds use the same `maintenance/dependency-audit` branch and open PR.
 Only the project manifest, lockfile, and required pnpm security exceptions enter
 that PR. Reports remain in the PR body, run summary, and artifacts; they are not
-committed.
+committed. After a PR is merged or closed, a later qualifying proposal can open
+the next PR. Nothing merges automatically.
 
-All audit kinds share that PR and its stable branch. The publisher updates an
-outdated proposal and does not push another commit for an identical proposal.
-An outdated title is corrected without another dependency commit or report rewrite.
-Publisher jobs are serialized for the repository. The headline gives the proposed
-dependency update count and validation status. Routine-only proposals omit unrelated
-security counts from the headline; security proposals include confirmed fix counts.
-The body leads with the proposed dependency versions and validation results.
-Existing findings that all have known blockers and unchanged audit evidence appear
-as neutral background below validation. Their severities and constraints are
-expandable. Findings that need review or verification retain those distinctions.
-Run settings and full audit evidence are also expandable. Existing blocked fixes
-have no red status dots; newly reported findings remain visible with red markers.
+The title describes dependency updates and confirmed security fixes. For example,
+**Node: 9 routine dependency updates, no security fixes** identifies routine work.
+If audit evidence is unavailable, the title says **security fixes unconfirmed**.
+The report leads with proposed versions and validation results. Routine-only
+headlines omit unrelated security counts. Existing blocked findings with unchanged
+audit evidence appear as neutral background, with severity and constraints in
+expandable details. New findings and evidence that needs review remain visible.
 
 Reports retain unresolved findings, pin decisions, validation failures, changed
 locked version sets, and candidate dependency-file SHA-256 hashes. Grouped logs
-retain successful and failed command output, including warnings. Passing project checks
-does not prove every vulnerability is resolved.
+retain successful and failed command output, including warnings.
 
-Failed installation/validation candidates are published as drafts when a candidate can be
-retained, and the workflow fails after retaining the report. A successful rerun
-leaves an existing draft for human review. A run with no dependency changes leaves
-an existing PR branch and its report unchanged; the new report remains in the run
-summary and artifacts.
+| Rerun result | Publisher behavior |
+| --- | --- |
+| Changed dependency proposal | Updates the existing PR and branch. |
+| Same files, report, base branch, validation, and title | No commit, push, or PR edit. Run timestamps and workflow links alone do not count as changes. |
+| Same proposal with new report findings | Updates the body without another dependency commit. |
+| Same proposal with an outdated title | Corrects the title without rewriting the report or pushing a commit. |
+| Retained proposal with failed installation or checks | Publishes or updates a draft and fails the workflow. |
+| Successful rerun of an existing draft | Leaves it as a draft for human review. |
+| No qualifying dependency changes | Creates no PR and leaves an existing branch and report unchanged. Read the new run summary or artifacts. |
 
-The workflow does not change Dependabot settings or dismiss alerts. If a project
-chooses update suppression or alert dismissal, scope it to the selected project's
-lockfile and preserve other ecosystems. Verify those repository controls separately.
+Publisher jobs are serialized per repository. Publication is refused if the
+default branch's repository inputs changed since the audit; rerun from the current
+default branch in that case.
+
+The workflow does not change Dependabot settings or dismiss alerts. If you choose
+to suppress other update PRs or dismiss alerts, scope those repository controls
+to the selected project's lockfile and verify them separately.
+
+## Configuration issues
+
+Preflight failures update one marked, bot-owned **Node audit configuration** issue
+per repository. Repeated failures update its body without per-run comments.
+Successful configuration and runtime checks close it, even if a later dependency
+command or validation script fails. A later configuration failure reopens the
+same issue. Interrupted preflight does not close it.
+
+Enable repository issues and grant the caller's audit job `issues: write`.
+Ambiguous duplicate marked issues, disabled issues, or insufficient permission
+produce a reporting error instead of another issue. Dependency or validation
+failures do not create configuration issues. No automatic repair PR is generated.
 
 ## Publication and credentials
 
-The caller grants `issues: write` to the shared audit workflow for a
-separate, serialized configuration-reporting job. The dependency-execution job
-is explicitly read-only. The reporting job consumes only the current run's JSON
-status artifact and never checks out project code or receives the App key.
-It opens one marked bot-owned configuration issue, updates that issue on repeated
-failures, closes it after successful preflight, and reopens the same closed issue
-on recurrence. Ordinary dependency/validation failures do not create configuration
-issues. Automatic migration remains a possible follow-up, not current behavior.
+The dependency-execution job has only `contents: read` and checkout credentials
+are not persisted. A separate serialized reporter has only `issues: write`,
+reads the current run's configuration artifact, and never checks out project code.
+The publisher has Contents and Pull requests write access. Only it can push the
+maintenance branch and open the PR.
 
-The audit has read access. The separate publisher can push the maintenance branch
-and open its PR. It refuses publication if the default branch's repository inputs
-changed since the audit; rerun from the current default branch in that case.
+Publication uses `GITHUB_TOKEN` unless an optional App is configured. The App key
+and publisher token never reach the dependency job or configuration reporter.
+An App token is limited to the consumer repository and revoked at job completion.
+A configured App that cannot authenticate stops publication without falling back
+to the built-in token. See [credential setup and PR CI behavior](../docs/node-maintenance.md#optional-publish-with-a-github-app).
 
-By default, publication uses `GITHUB_TOKEN`. PR workflows triggered by opening or
-updating these PRs require approval by a user with write access; see
-[GitHub's token behavior](https://docs.github.com/en/actions/concepts/security/github_token).
-Normal commit messages keep consumer CI/deployment eligible to run under their
-configured triggers and token rules. Nothing is merged automatically.
-
-To avoid the built-in token's PR-workflow approval prompt, configure the
-[optional GitHub App](../docs/node-maintenance.md#optional-publish-with-a-github-app).
-It needs repository Contents and Pull requests read/write permissions and an
-installation on each consumer repository. The publisher mints a short-lived token
-limited to that repository and revokes it at job completion. The audit and project checks
-never receive the key or publisher token. A configured App that cannot authenticate
-fails publication without falling back to `GITHUB_TOKEN`. Neither authentication
-mode waits for all consumer CI or merges the PR.
-
-The consumer calls the shared audit and publisher at the same full commit SHA.
-Runtime scripts and supporting files stay in the shared repository. Before an
-update, compare the installed and proposed public contracts and caller templates,
-then change both SHA pins together and verify a manual audit.
-
-For npm, the engine enforces the resolved cooldown during security and routine
-resolution using `--before`, and checks publication times when selecting routine
-direct upgrades. npm has no release-age exception mechanism here; recent fixes
-can remain blocked by the cooldown. pnpm retains its exact security exceptions.
+The workflow does not add CI-skip markers. Consumer CI follows its configured
+triggers and token rules. Neither authentication mode waits for additional PR CI
+or merges the PR. Consumers call both shared workflows at the same full commit
+SHA; update both pins together using the [update instructions](../docs/node-maintenance.md#update-or-migrate-an-installation).
