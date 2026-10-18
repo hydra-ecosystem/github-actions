@@ -341,6 +341,32 @@ def test_audit_error_is_not_reported_as_zero_vulnerabilities(npm_project, monkey
     assert audit(npm_project) == "Audit unavailable (exit 1)."
 
 
+def test_npm_audit_explicitly_covers_every_dependency_type(npm_project, monkeypatch):
+    commands = fake_npm(monkeypatch)
+    audit(npm_project)
+    assert {
+        "--include=prod",
+        "--include=dev",
+        "--include=optional",
+        "--include=peer",
+    } <= set(commands[0])
+
+
+def test_npm_security_repair_disables_force_and_covers_every_dependency_type(
+    npm_project, monkeypatch
+):
+    commands = fake_npm(monkeypatch)
+    audit_module["fix_security"](npm_project, float("inf"))
+    assert commands[0][:2] == ["audit", "fix"]
+    assert {
+        "--no-force",
+        "--include=prod",
+        "--include=dev",
+        "--include=optional",
+        "--include=peer",
+    } <= set(commands[0])
+
+
 def test_breaking_fix_candidate_is_flagged_for_manual_review(npm_project, monkeypatch):
     data = {
         "metadata": {"vulnerabilities": {"high": 1, "total": 1}},
@@ -411,7 +437,18 @@ def test_shared_time_budget_stops_commands_and_writes_partial_report(
     clock = iter([0, 0, 2700])
     monkeypatch.setattr(audit_module["time"], "monotonic", lambda: next(clock, 2700))
     report = prepare(npm_project)
-    assert commands == [["audit", "--json", "--audit", "--package-lock-only"]]
+    assert commands == [
+        [
+            "audit",
+            "--json",
+            "--audit",
+            "--package-lock-only",
+            "--include=prod",
+            "--include=dev",
+            "--include=optional",
+            "--include=peer",
+        ]
+    ]
     assert "Could not look up renderer" in report
     assert "not run: npm frozen install failed (exit 124)" in report
     assert "**Security:** Audit unavailable (exit 124)." in report
