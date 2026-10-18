@@ -26,6 +26,12 @@ retain changes only when before/after audit evidence confirms a security fix;
 unrelated changes are discarded. The engine does not force incompatible upgrades
 or remove project overrides automatically.
 
+For npm, audits include production, development, optional, and peer dependencies,
+even when `.npmrc`, user configuration, or the environment omits a dependency
+type. Security repairs explicitly disable force mode, including inherited
+`force=true` settings. These overrides apply to audit and repair commands;
+project validation still uses the project's install settings.
+
 Upgrade audits attempt security fixes first, then routine stable upgrades.
 `maintenance.upgradeScope` limits routine **direct** upgrades to `patch`, `minor`
 (including patches), or `major` (the default, including both). Restricted scopes
