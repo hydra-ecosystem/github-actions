@@ -96,8 +96,8 @@ def test_upgrade_keeps_manual_constraints_and_reports_unfixed_findings(
     assert manifest["peerDependencies"] == {"react": "^19.0.0"}
     assert "high: 1, total: 1" in report
     assert "npm fix candidate not offered by npm" in report
-    assert "## Production build\n\nPassed." in report
-    assert "| Package | Affected package entries |" in report
+    assert "- Production build: passed." in report
+    assert "| Package | Blocked package entries |" in report
     assert "--force" not in [arg for command in commands for arg in command]
 
 
@@ -302,13 +302,14 @@ def test_security_report_lists_affected_direct_upgrade_once(npm_project, monkeyp
 
     monkeypatch.setattr(subprocess, "run", upgrade)
     report = prepare(npm_project)
-    changes = report.split("## Locked dependency changes")[0]
-    assert changes.count("- renderer:") == 1
-    assert "renderer: `1.0.0` → `2.0.0`; still reported by npm." in changes
-    locked = report.split("## Locked dependency changes")[1].split(
-        "## Remaining advisories"
+    visible = report.split("<details>", 1)[0]
+    assert visible.count("- renderer:") == 1
+    assert "- renderer: `1.0.0` → `2.0.0`" in visible
+    details = report.split("## Security findings and fixes", 1)[1].split(
+        "</details>", 1
     )[0]
-    assert "- renderer: `1.0.0` → `2.0.0`" in locked
+    assert details.count("- renderer:") == 1
+    assert "renderer: `1.0.0` → `2.0.0`; still reported by npm." in details
 
 
 @pytest.mark.parametrize("install,build", [(1, 0), (0, 1)])
@@ -318,7 +319,7 @@ def test_failed_validation_still_produces_an_honest_report(
     commands = fake_npm(monkeypatch, install=install, build=build)
     report = prepare(npm_project)
     assert "failed" in report.lower()
-    assert "## Production build\n\nPassed." not in report
+    assert "- Production build: passed." not in report
     if install:
         assert ["run", "build"] not in commands
 
@@ -396,7 +397,7 @@ def test_failed_audit_fix_preserves_validation_and_reports_error(
     fake_npm(monkeypatch, audit_fix=exit_code)
     report = prepare(npm_project)
     assert f"Automatic audit fix returned exit {exit_code}" in report
-    assert "## Production build\n\nPassed." in report
+    assert "- Production build: passed." in report
 
 
 def test_shared_time_budget_stops_commands_and_writes_partial_report(
@@ -408,7 +409,7 @@ def test_shared_time_budget_stops_commands_and_writes_partial_report(
     report = prepare(npm_project)
     assert commands == [["audit", "--json", "--audit", "--package-lock-only"]]
     assert "Could not look up renderer" in report
-    assert "Not run: npm frozen install failed (exit 124)" in report
+    assert "not run: npm frozen install failed (exit 124)" in report
     assert "**Security:** Audit unavailable (exit 124)." in report
     assert "time budget was exhausted" in report
 
@@ -487,7 +488,7 @@ def test_cli_entrypoint_prepares_selected_project(npm_project, monkeypatch):
         ["dependency-audit", "--directory", ".", "--report", str(report)],
     )
     runpy.run_path(audit_module["__file__"], run_name="__main__")
-    assert "| Package | Affected package entries |" in report.read_text()
+    assert "| Package | Blocked package entries |" in report.read_text()
     assert not (npm_project / "DEPENDENCY-AUDIT.md").exists()
     manifest = json.loads((npm_project / "package.json").read_text())
     assert manifest["dependencies"]["renderer"] == "2.0.0"

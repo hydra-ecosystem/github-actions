@@ -83,7 +83,6 @@ elif args[:2] == ['pr', 'list']:
             "NPM_PROJECT": "docs/site",
             "BASE_BRANCH": "main",
             "PR_BRANCH": PUBLISH["env"]["PR_BRANCH"],
-            "PR_TITLE": PUBLISH["env"]["PR_TITLE"],
             "PR_FOOTER": "Review validation before merging.",
             "EXPECTED_HEAD": "",
             "AUDIT_SHA": "audit-sha",
@@ -188,6 +187,49 @@ def test_publisher_creates_or_updates_one_regular_pr(publisher, tmp_path, existi
         "## Security findings and fixes\n\n$(never-execute)\n\n"
         "Review validation before merging.\n"
     )
+
+
+@pytest.mark.parametrize(
+    "summary,expected_title",
+    [
+        (
+            "**9 routine dependency updates · Build passed**",
+            "Docusaurus: 9 routine dependency updates, no security fixes",
+        ),
+        (
+            "**1 routine dependency update · Build passed**",
+            "Docusaurus: 1 routine dependency update, no security fixes",
+        ),
+        (
+            "**1 dependency update · 0 security fixes · Build passed**",
+            "Docusaurus: 1 dependency update, no security fixes",
+        ),
+        (
+            "**1 dependency update · 2 security fixes · Build passed**",
+            "Docusaurus: 1 dependency update, 2 security fixes",
+        ),
+        (
+            "**3 dependency updates · 1 security fix · Build failed or unavailable**",
+            "Docusaurus: 3 dependency updates, 1 security fix",
+        ),
+        (
+            "**4 dependency updates · Security fixes unconfirmed · Build passed**",
+            "Docusaurus: 4 dependency updates, security fixes unconfirmed",
+        ),
+        (
+            "Legacy report without security-fix evidence",
+            "Docusaurus: dependency updates, security fixes unconfirmed",
+        ),
+    ],
+)
+def test_publisher_titles_describe_proposed_changes(
+    publisher, tmp_path, summary, expected_title
+):
+    (tmp_path / "dependency-audit-pr.md").write_text(summary + "\n")
+    result, commands = publisher.publish()
+    assert result.returncode == 0, result.stderr
+    create = next(c for c in commands if c[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--title") + 1] == expected_title
 
 
 @pytest.mark.parametrize(
