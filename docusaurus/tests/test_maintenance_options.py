@@ -347,9 +347,7 @@ def test_clear_headline_reports_optional_updates_and_unfixed_security(
 ):
     fake_commands(monkeypatch)
     report = helper["prepare"](site)
-    assert report.startswith(
-        "**1 dependency update · 0 security fixes · 0 advisories remain · Build passed**"
-    )
+    assert report.startswith("**1 routine dependency update · Build passed**")
 
 
 def test_registry_finding_removal_does_not_turn_unrelated_churn_into_a_security_fix(
@@ -1955,8 +1953,22 @@ def test_upgrades_mode_can_retain_an_independent_direct_upgrade(site, monkeypatc
     assert helper["direct_versions"](final)[("dependencies", "unaffected")] == (1, 3, 0)
 
 
-def test_headline_counts_advisories_and_critical_findings_not_packages(
-    site, monkeypatch
+@pytest.mark.parametrize(
+    "status, changed_evidence, blocked",
+    [
+        ("No patched version declared by the registry.", False, True),
+        ("No patched version declared by the registry.", True, False),
+        ("Published patch: `worker@2.0.0`.", False, False),
+        ("Publication could not be fully verified.", False, False),
+        (
+            "Published patch: `worker@2.0.0`. Blocked by retained override.",
+            False,
+            False,
+        ),
+    ],
+)
+def test_routine_report_keeps_only_known_blockers_in_the_background(
+    site, monkeypatch, status, changed_evidence, blocked
 ):
     fake_commands(monkeypatch)
     findings = {
@@ -1982,16 +1994,97 @@ def test_headline_counts_advisories_and_critical_findings_not_packages(
                 "title": "Test finding",
                 "severity": severity,
                 "range": "*",
+                "fixStatus": status
+                if index == 0
+                else "No patched version declared by the registry.",
                 "nodes": [],
             }
         )
-    monkeypatch.setitem(
-        helper["prepare"].__globals__, "audit", lambda *a, **k: findings
-    )
+    calls = 0
+
+    def audit(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = json.loads(json.dumps(findings))
+        if changed_evidence and calls == 1:
+            result["vulnerabilities"]["worker"]["via"][0]["severity"] = "high"
+            result["metadata"]["vulnerabilities"].update(critical=1, high=2)
+        return result
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
     report = helper["prepare"](site)
-    assert report.startswith(
-        "**1 dependency update · 0 security fixes · 4 advisories remain (2 critical) · Build passed**"
+    assert report.startswith("**1 routine dependency update · Build passed**")
+    visible, details = report.split("<details>", 1)
+    assert (
+        visible.index("## Proposed dependency changes")
+        < visible.index("- renderer:")
+        < visible.index("## Validation")
+        < visible.index(
+            "## Existing security findings" if blocked else "## Security status"
+        )
     )
+    assert "- Frozen install: passed." in visible
+    assert "- Production build: passed." in visible
+    assert "**Maintenance:**" not in visible
+    if blocked:
+        assert "4 advisories are blocked, unchanged by this PR." in visible
+        assert "critical" not in visible
+        assert "Blocked findings and constraints" in details
+        assert "| `worker` | 2 critical |" in details
+        assert "The registry supplies no patched version." in details
+    else:
+        assert "unchanged by this PR" not in report
+        assert "4 advisories remain (2 critical)" in visible
+        assert "Security findings and blockers" in details
+        if not changed_evidence:
+            assert (
+                "your review" in details
+                if "Published patch:" in status
+                else "verification" in details
+            )
+    assert "worker" not in visible and "Fixes blocked" not in visible
+    assert "Build script:" not in visible
+    assert "Build script:" in details
+    assert "🔴" not in report
+
+
+def test_new_security_findings_stay_visible_above_collapsed_details(site, monkeypatch):
+    fake_commands(monkeypatch)
+    calls = 0
+
+    def audit(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "vulnerabilities": {},
+                "metadata": {"vulnerabilities": {"total": 0}},
+            }
+        return {
+            "metadata": {"vulnerabilities": {"critical": 1, "total": 1}},
+            "vulnerabilities": {
+                "worker": {
+                    "severity": "critical",
+                    "range": "*",
+                    "nodes": [],
+                    "via": [
+                        {
+                            "url": "https://github.com/advisories/GHSA-new-worker",
+                            "title": "New finding",
+                            "severity": "critical",
+                            "range": "*",
+                            "fixStatus": "No patched version declared by the registry.",
+                        }
+                    ],
+                }
+            },
+        }
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
+    report = helper["prepare"](site)
+    visible = report.split("<details>", 1)[0]
+    assert "🔴 **1 newly reported advisory; review before merging.**" in visible
+    assert "1 advisory remains (1 critical)" in visible
 
 
 @pytest.mark.parametrize(

@@ -595,7 +595,7 @@ def test_nonmutating_commands_preserve_exact_package_files(
         assert (project / name).read_bytes() == content
     assert "restored" in report
     if operation in {"frozen", "build"}:
-        assert "## Production build\n\nPassed." not in report
+        assert "- Production build: passed." not in report
     if operation == "final-audit":
         assert "## Remaining advisories\n\nAudit unavailable" in report
 
