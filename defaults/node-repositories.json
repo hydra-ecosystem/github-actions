@@ -6,6 +6,14 @@
   },
   "repositories": [
     "hydra-ecosystem/hydra",
-    "hydra-ecosystem/omegaconf"
+    "hydra-ecosystem/omegaconf",
+    "omry/arbiter",
+    "omry/cli.dev",
+    "omry/hoodlefinance",
+    "omry/omegaflow",
+    "omry/reploy",
+    "omry/yadan.net",
+    "omry/airport-time-space",
+    "omry/stale-buffer-guard"
   ]
 }

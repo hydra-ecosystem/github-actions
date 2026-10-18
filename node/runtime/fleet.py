@@ -12,14 +12,17 @@ import runpy
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from threading import Lock
 
 import yaml
 
 PROJECT = runpy.run_path(str(Path(__file__).with_name("project.py")))
 CONFIGURATION = PROJECT["CONFIGURATION"]
 MAX_REPOSITORIES = 25
+MAX_CONCURRENT_REPOSITORIES = 5
 MAX_FILE_BYTES = 2_000_000
 CONFIG_PATH = ".github/node-maintenance.json"
 CALLER_PATH = ".github/workflows/dependency-audit.yml"
@@ -58,8 +61,16 @@ class GitHub:
     def __init__(self, token=""):
         self.token = token
         self.snapshots = {}
+        self.snapshot_locks = {}
+        self.snapshot_locks_guard = Lock()
+        self.defaults_lock = Lock()
         # Defaults remain public and unauthenticated, as in the individual audit.
-        self.read_defaults = functools.cache(CONFIGURATION["public_read"])
+        self.cached_defaults = functools.cache(CONFIGURATION["public_read"])
+
+    def read_defaults(self, url, accept="application/json"):
+        # Resolve each shared ref once, even when several repositories need it.
+        with self.defaults_lock:
+            return self.cached_defaults(url, accept)
 
     @functools.cache
     def get(self, path):
@@ -99,9 +110,12 @@ class GitHub:
     def snapshot(self, repository, ref=""):
         repository = repository.lower()
         key = (repository, ref)
-        if key not in self.snapshots:
-            self.snapshots[key] = Repository(self, repository, ref)
-        return self.snapshots[key]
+        with self.snapshot_locks_guard:
+            lock = self.snapshot_locks.setdefault(key, Lock())
+        with lock:
+            if key not in self.snapshots:
+                self.snapshots[key] = Repository(self, repository, ref)
+            return self.snapshots[key]
 
 
 class Repository:
@@ -564,9 +578,14 @@ def check_fleet(github, source):
                 repository.read(source["path"]), "fleet inventory"
             )
         )
-        for name in settings["repositories"]:
-            report["results"].append(
-                check_repository(github, name, settings["defaults"])
+        with ThreadPoolExecutor(
+            max_workers=min(MAX_CONCURRENT_REPOSITORIES, len(settings["repositories"]))
+        ) as executor:
+            report["results"] = list(
+                executor.map(
+                    lambda name: check_repository(github, name, settings["defaults"]),
+                    settings["repositories"],
+                )
             )
         report["status"] = (
             "ok"
@@ -585,7 +604,7 @@ def summary(report):
         return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ")
 
     lines = [
-        "## Node fleet setup",
+        "## Node maintenance setup check",
         "",
         "| Repository | Static setup | Detail |",
         "| --- | --- | --- |",
@@ -627,7 +646,7 @@ def main():
             output.write(text)
     print(text)
     if report["status"] != "ok":
-        parser.exit(1, "Fleet setup needs attention; inspect the report.\n")
+        parser.exit(1, "Node maintenance setup needs attention; inspect the report.\n")
 
 
 if __name__ == "__main__":

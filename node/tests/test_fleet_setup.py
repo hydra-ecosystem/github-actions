@@ -6,7 +6,9 @@ import hashlib
 import json
 import runpy
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
 
 import pytest
 import yaml
@@ -168,6 +170,113 @@ def test_healthy_fleet_without_running_project_commands(monkeypatch, manager):
     assert all(call.startswith("repos/") for call in github.calls)
 
 
+def test_fleet_checks_five_at_a_time_and_retains_order_and_failures(monkeypatch):
+    github = GitHub()
+    names = [f"owner/project-{number}" for number in range(9)]
+    github.repos["owner/settings"]["defaults/repos.json"] = data(
+        {"defaults": SOURCE, "repositories": names}
+    )
+    ready = Barrier(6)
+    release = Event()
+    guard = Lock()
+    active = maximum = 0
+
+    def check(github, name, expected):
+        nonlocal active, maximum
+        assert expected == SOURCE
+        with guard:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            if names.index(name) < 5:
+                ready.wait(timeout=5)
+                assert release.wait(timeout=5)
+            return {
+                "repository": name,
+                "commit": SHA,
+                "status": "failed" if name == names[2] else "ok",
+                "diagnostic": "example failure" if name == names[2] else "passed",
+            }
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setitem(FLEET["check_fleet"].__globals__, "check_repository", check)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            FLEET["check_fleet"],
+            github,
+            {
+                "repository": "owner/settings",
+                "path": "defaults/repos.json",
+                "ref": "main",
+            },
+        )
+        try:
+            ready.wait(timeout=5)
+        finally:
+            release.set()
+        report = future.result(timeout=5)
+    assert maximum == 5
+    assert [item["repository"] for item in report["results"]] == names
+    assert report["status"] == "failed"
+    assert report["results"][2]["diagnostic"] == "example failure"
+
+
+def test_concurrent_checks_share_one_pinned_repository_snapshot(monkeypatch):
+    github = FLEET["GitHub"]()
+    entered = Event()
+    release = Event()
+    ready = Barrier(6)
+    constructions = []
+
+    def repository(client, name, ref):
+        constructions.append((name, ref))
+        entered.set()
+        assert release.wait(timeout=5)
+        return object()
+
+    monkeypatch.setitem(FLEET["GitHub"].snapshot.__globals__, "Repository", repository)
+
+    def snapshot():
+        ready.wait(timeout=5)
+        return github.snapshot("OWNER/PROJECT", "main")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(snapshot) for _ in range(5)]
+        try:
+            ready.wait(timeout=5)
+            assert entered.wait(timeout=5)
+        finally:
+            release.set()
+        snapshots = [future.result(timeout=5) for future in futures]
+    assert constructions == [("owner/project", "main")]
+    assert all(item is snapshots[0] for item in snapshots)
+
+
+def test_concurrent_defaults_reads_resolve_shared_ref_once(monkeypatch):
+    calls = []
+
+    def public(url, accept):
+        calls.append((url, accept))
+        return b"immutable result"
+
+    monkeypatch.setitem(FLEET["CONFIGURATION"], "public_read", public)
+    github = FLEET["GitHub"]()
+    ready = Barrier(5)
+
+    def read():
+        ready.wait(timeout=5)
+        return github.read_defaults(
+            "https://api.github.com/repos/owner/settings/commits/main"
+        )
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(lambda _: read(), range(5)))
+    assert results == [b"immutable result"] * 5
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -323,7 +432,8 @@ def test_one_issue_per_inventory_updates_closes_and_reopens():
     )
     report["status"] = "failed"
     report["results"][0].update(
-        status="failed", diagnostic="Node mismatch <script>@someone</script>"
+        status="failed",
+        diagnostic="Node mismatch <script>@someone</script> | extra\n[link]",
     )
 
     def update():
@@ -337,6 +447,13 @@ def test_one_issue_per_inventory_updates_closes_and_reopens():
     assert update()["operation"] == "created"
     assert update()["operation"] == "unchanged"
     assert "<script>" not in issues.items[0]["body"]
+    assert "| Repository | Setup | Detail |" in issues.items[0]["body"]
+    assert (
+        "| [owner/project](https://github.com/owner/project) | ⚠️ Needs attention |"
+        in issues.items[0]["body"]
+    )
+    assert "&#124; extra<br>&#91;link&#93;" in issues.items[0]["body"]
+    assert "<summary>Checked revisions</summary>" in issues.items[0]["body"]
     report["status"] = "ok"
     report["results"][0].update(status="ok", diagnostic="Static setup checks passed")
     assert update()["operation"] == "closed"
@@ -352,7 +469,12 @@ def test_workflow_splits_read_access_and_host_issue_write_access():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/node-fleet-check.yml").read_text()
     )
-    assert {"workflow_call", "workflow_dispatch"} == set(workflow["on"])
+    assert {"workflow_call", "workflow_dispatch", "schedule"} == set(workflow["on"])
+    assert workflow["on"]["schedule"] == [{"cron": "0 3 * * 1"}]
+    assert workflow["name"] == "Node maintenance setup check"
+    assert workflow["jobs"]["check"]["steps"][0]["with"]["inventory-path"] == (
+        "${{ inputs.inventory-path || 'defaults/node-repositories.json' }}"
+    )
     assert workflow["jobs"]["check"]["permissions"] == {
         "contents": "read",
         "actions": "read",
@@ -656,7 +778,11 @@ def test_large_fleet_issue_is_bounded_and_retains_member_identity():
     assert "not tested" in body
     for index in range(25):
         status = "failed" if index % 2 else "unverified"
-        assert f"### owner/repository-{index}: {status}" in body
+        label = "⚠️ Needs attention" if status == "failed" else "❔ Unverified"
+        assert (
+            f"| [owner/repository-{index}](https://github.com/owner/repository-{index}) | {label} |"
+            in body
+        )
 
     for item in report["results"]:
         item.update(commit=SHA, status="ok", diagnostic="Static setup checks passed")

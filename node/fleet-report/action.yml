@@ -1,4 +1,4 @@
-name: Report Node fleet setup
+name: Report Node maintenance setup
 description: Maintain one setup issue per inventory in the calling repository.
 runs:
   using: composite
