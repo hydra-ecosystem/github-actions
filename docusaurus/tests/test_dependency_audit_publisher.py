@@ -49,8 +49,9 @@ def test_app_credentials_are_scoped_to_trusted_repository_publishing():
 @pytest.mark.parametrize("failed_replay", [False, True])
 @pytest.mark.parametrize("changed_base", [False, True])
 @pytest.mark.parametrize("changed_report", [False, True])
+@pytest.mark.parametrize("changed_title", [False, True])
 def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
-    tmp_path, failed_replay, changed_base, changed_report
+    tmp_path, failed_replay, changed_base, changed_report, changed_title
 ):
 
     def git(*args, cwd=None):
@@ -80,10 +81,11 @@ def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
         "state = Path(os.environ['PR_STATE'])\n"
         "with open(os.environ['COMMAND_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
         "if args[:2] == ['pr', 'list']: print('42' if state.exists() else '')\n"
-        "elif args[:2] == ['pr', 'view']: print(state.with_suffix('.md').read_text() if 'body' in args else os.environ['EXISTING_BASE'] if 'baseRefName' in args else 'false')\n"
+        "elif args[:2] == ['pr', 'view']: print(state.with_suffix('.md').read_text() if 'body' in args else state.with_suffix('.title').read_text() if 'title' in args else os.environ['EXISTING_BASE'] if 'baseRefName' in args else 'false')\n"
         "elif args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
         "    state.write_text('42')\n"
-        "    state.with_suffix('.md').write_text(Path(args[args.index('--body-file') + 1]).read_text())\n"
+        "    state.with_suffix('.title').write_text(args[args.index('--title') + 1])\n"
+        "    if '--body-file' in args: state.with_suffix('.md').write_text(Path(args[args.index('--body-file') + 1]).read_text())\n"
     )
     gh.chmod(0o755)
     log = tmp_path / "commands"
@@ -95,7 +97,6 @@ def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
         "NPM_PROJECT": "website",
         "BASE_BRANCH": "main",
         "PR_BRANCH": "maintenance/dependency-audit",
-        "PR_TITLE": "Dependency maintenance",
         "VALIDATION_PASSED": "true",
         "RUNNER_TEMP": str(tmp_path),
         "PR_FOOTER": "workflow",
@@ -110,7 +111,9 @@ def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
         git("checkout", "-B", "audit-input", "origin/main")
         (work / "website/pnpm-lock.yaml").write_text(version + "\n")
         (tmp_path / "dependency-audit-pr.md").write_text(
-            report + f"\nRun: 2026-10-17T12:00:{iteration:02d}Z\n"
+            "**9 routine dependency updates · Build passed**\n\n"
+            + report
+            + f"\nRun: 2026-10-17T12:00:{iteration:02d}Z\n"
         )
         result = subprocess.run(
             ["bash", "-e", "-c", PUBLISH["run"]],
@@ -128,6 +131,8 @@ def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
         return git("rev-parse", "refs/remotes/origin/maintenance/dependency-audit")
 
     first = publish("candidate-1")
+    if changed_title:
+        (tmp_path / "pr-state.title").write_text("Outdated generic title")
     assert (
         publish(
             "candidate-1",
@@ -140,9 +145,23 @@ def test_repeated_audits_refresh_one_pr_only_when_proposal_is_outdated(
     commands = [json.loads(line) for line in log.read_text().splitlines()]
     assert len([c for c in commands if c[:2] == ["pr", "create"]]) == 1
     edits = [c for c in commands if c[:2] == ["pr", "edit"]]
-    assert len(edits) == 1 + (failed_replay or changed_base or changed_report)
+    assert len(edits) == 1 + (
+        failed_replay or changed_base or changed_report or changed_title
+    )
     assert all(edit[2] == "42" for edit in edits)
-    assert all(edit[edit.index("--base") + 1] == "main" for edit in edits)
+    assert all(
+        edit[edit.index("--base") + 1] == "main" for edit in edits if "--base" in edit
+    )
+    title_only_edits = [edit for edit in edits if "--body-file" not in edit]
+    assert len(title_only_edits) == int(
+        changed_title and not (failed_replay or changed_base or changed_report)
+    )
+    writes = [c for c in commands if c[:2] in (["pr", "create"], ["pr", "edit"])]
+    assert all(
+        command[command.index("--title") + 1]
+        == "Docusaurus: 9 routine dependency updates, no security fixes"
+        for command in writes
+    )
     assert all(
         "--base" not in command for command in commands if command[:2] == ["pr", "list"]
     )
@@ -242,7 +261,7 @@ def test_publication_preserves_reports_and_signals_failed_validation(
         assert writes[0][2] == ("edit" if existing else "create")
         assert ("--draft" in writes[0]) == (not existing and not passed)
         assert writes[0][writes[0].index("--title") + 1] == (
-            "Docusaurus maintenance: security audit and dependency upgrades"
+            "Docusaurus: dependency updates, security fixes unconfirmed"
         )
     assert (tmp_path / "dependency-audit-pr.md").read_text().startswith(report)
     draft_commands = [

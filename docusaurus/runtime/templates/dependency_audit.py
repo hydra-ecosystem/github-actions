@@ -2076,24 +2076,110 @@ def security_only_direct_violation(
     return None
 
 
+def audit_entries(data, source):
+    if isinstance(data, str):
+        return []
+    return [
+        (detail["url"] if source == "pnpm" else name, name, detail)
+        for name, vulnerability in data.get("vulnerabilities", {}).items()
+        for detail in (
+            [via for via in vulnerability.get("via", []) if isinstance(via, dict)]
+            if source == "pnpm"
+            else [vulnerability]
+        )
+    ]
+
+
+def newly_reported_findings(before, after, source):
+    old, current = finding_ids(before, source), finding_ids(after, source)
+    if old is None or current is None:
+        return set()
+    added = current - old
+    if source == "npm":
+        # npm counts affected packages, but an existing entry can gain advisories.
+        for name, vulnerability in after.get("vulnerabilities", {}).items():
+            previous = before.get("vulnerabilities", {}).get(name, {})
+            old_urls, current_urls = (
+                {via["url"] for via in entry.get("via", []) if isinstance(via, dict)}
+                for entry in (previous, vulnerability)
+            )
+            if current_urls - old_urls:
+                added.add(name)
+    return added
+
+
+def audit_fix_reason(detail, source):
+    status = detail.get("fixStatus", "")
+    if "Blocked by retained override" in status:
+        return "review", "A retained override blocks the published patch."
+    if "no single patch satisfies all" in status:
+        parents = sorted(set(re.findall(r"`([^`]+)` requires `[^`]+`", status)))
+        if len(parents) == 1:
+            return (
+                "blocked",
+                f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint.",
+            )
+        return "blocked", "No published patch fits all checked parent constraints."
+    if status.startswith("No published stable patch"):
+        return "blocked", "No published patch matches the fix range."
+    if status.startswith("No patched version declared"):
+        return "blocked", "The registry supplies no patched version."
+    if "could not be fully verified" in status:
+        return "unconfirmed", "Patch compatibility still needs verification."
+    if status.startswith("Published patch:"):
+        return "review", "A published patch is available; selection needs review."
+    candidate = detail.get("fixAvailable")
+    if isinstance(candidate, dict) and candidate.get("isSemVerMajor"):
+        return "review", "The offered fix requires a major upgrade."
+    if source == "npm" and not candidate:
+        return "blocked", "No fix offered by npm."
+    return "unconfirmed", "Fix availability or resolution is unconfirmed."
+
+
+def format_blocked_findings(data, source):
+    """Return a neutral table only when every reported finding has a known blocker."""
+    entries = audit_entries(data, source)
+    if not entries or any(
+        audit_fix_reason(detail, source)[0] != "blocked" for _, _, detail in entries
+    ):
+        return None
+    groups: dict = {}
+    for identity, name, detail in entries:
+        groups.setdefault(name, {})[identity] = detail
+    unit = "Blocked advisories" if source == "pnpm" else "Blocked package entries"
+    rows = [f"| Package | {unit} | Reason |", "| --- | --- | --- |"]
+    for name, findings in sorted(
+        groups.items(),
+        key=lambda item: (
+            min(
+                SEVERITY_ORDER.get(detail.get("severity"), 5)
+                for detail in item[1].values()
+            ),
+            item[0],
+        ),
+    ):
+        counts = {}
+        for detail in findings.values():
+            severity = detail.get("severity", "unknown")
+            counts[severity] = counts.get(severity, 0) + 1
+        severities = " · ".join(
+            f"{counts[level]} {level}"
+            for level in sorted(counts, key=lambda level: SEVERITY_ORDER.get(level, 5))
+        )
+        reasons = " ".join(
+            dict.fromkeys(
+                audit_fix_reason(detail, source)[1] for detail in findings.values()
+            )
+        )
+        rows.append(f"| `{name}` | {severities} | {reasons} |")
+    return "\n".join(rows)
+
+
 def format_audit_summary(
     before: dict | str, after: dict | str, source: str, *, fixed_ids=None
 ) -> str:
     if isinstance(after, str):
         return f"⚪ **Security:** {after}"
-
-    def entries(data):
-        if isinstance(data, str):
-            return []
-        return [
-            (detail["url"] if source == "pnpm" else name, name, detail)
-            for name, vulnerability in data.get("vulnerabilities", {}).items()
-            for detail in (
-                [via for via in vulnerability.get("via", []) if isinstance(via, dict)]
-                if source == "pnpm"
-                else [vulnerability]
-            )
-        ]
 
     def complete(data, rows):
         return isinstance(data, dict) and (
@@ -2104,7 +2190,7 @@ def format_audit_summary(
             )
         )
 
-    old, current = entries(before), entries(after)
+    old, current = audit_entries(before, source), audit_entries(after, source)
     old_ids, current_ids = {row[0] for row in old}, {row[0] for row in current}
     comparable = complete(before, old) and complete(after, current)
     resolved_ids = old_ids - current_ids if comparable else set()
@@ -2113,39 +2199,12 @@ def format_audit_summary(
     unconfirmed_ids = (
         (old_ids - current_ids) - resolved_ids if fixed_ids is not None else set()
     )
-    new_ids = current_ids - old_ids if comparable else set()
+    new_ids = newly_reported_findings(before, after, source) if comparable else set()
     old_groups: dict = {}
     groups: dict = {}
     for rows, target in ((old, old_groups), (current, groups)):
         for identity, name, detail in rows:
             target.setdefault(name, {})[identity] = detail
-
-    def reason(detail):
-        status = detail.get("fixStatus", "")
-        if "Blocked by retained override" in status:
-            return "review", "A retained override blocks the published patch."
-        if "no single patch satisfies all" in status:
-            parents = sorted(set(re.findall(r"`([^`]+)` requires `[^`]+`", status)))
-            if len(parents) == 1:
-                return (
-                    "blocked",
-                    f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint.",
-                )
-            return "blocked", "No published patch fits all checked parent constraints."
-        if status.startswith("No published stable patch"):
-            return "blocked", "No published patch matches the fix range."
-        if status.startswith("No patched version declared"):
-            return "blocked", "The registry supplies no patched version."
-        if "could not be fully verified" in status:
-            return "unconfirmed", "Patch compatibility still needs verification."
-        if status.startswith("Published patch:"):
-            return "review", "A published patch is available; selection needs review."
-        candidate = detail.get("fixAvailable")
-        if isinstance(candidate, dict) and candidate.get("isSemVerMajor"):
-            return "review", "The offered fix requires a major upgrade."
-        if source == "npm" and not candidate:
-            return "blocked", "No fix offered by npm."
-        return "unconfirmed", "Fix availability or resolution is unconfirmed."
 
     rows = []
     fixed_packages, review_packages, blocked_packages = set(), set(), set()
@@ -2161,7 +2220,7 @@ def format_audit_summary(
         moved = set(previous).intersection(current_ids) - pending.keys()
         pending_count = len(pending.keys() | moved)
         details = list(pending.values())
-        outcomes = [reason(detail) for detail in details]
+        outcomes = [audit_fix_reason(detail, source) for detail in details]
         statuses = [detail.get("fixStatus", "") for detail in details]
         pinned = any("Blocked by retained override" in status for status in statuses)
         review = any(kind == "review" for kind, _ in outcomes)
@@ -2225,7 +2284,7 @@ def format_audit_summary(
             if any("no single patch satisfies all" in status for status in statuses):
                 action += " Parent constraints also block the fix; see details."
             extra = [
-                reason(detail)[1]
+                audit_fix_reason(detail, source)[1]
                 for detail in details
                 if "Blocked by retained override" not in detail.get("fixStatus", "")
             ]
@@ -2252,7 +2311,11 @@ def format_audit_summary(
                     else "affected package entries"
                 )
             )
-            action = f"{new_count} new {unit}. " + action
+            action = (
+                "New advisories reported for this affected package entry. "
+                if source == "npm" and name in old_groups
+                else f"{new_count} new {unit}. "
+            ) + action
         counts = []
         if fixed:
             counts.append(f"{fixed} fixed")
@@ -2266,8 +2329,10 @@ def format_audit_summary(
             badge, rank, action = "🟢", 0, "Resolved."
         elif review:
             badge, rank = "🟠", 1
-        elif blocked or new_count:
+        elif new_count:
             badge, rank = "🔴", 2
+        elif blocked:
+            badge, rank = "", 2
         else:
             badge, rank = "⚪", 3
         severity = min(
@@ -2277,10 +2342,11 @@ def format_audit_summary(
             ),
             default=5,
         )
+        label = f"{badge}\u00a0" if badge else ""
         rows.append(
             (
                 (rank, severity, name),
-                f"| {badge}\u00a0`{name}` | {' · '.join(counts)} | {action.strip()} |",
+                f"| {label}`{name}` | {' · '.join(counts)} | {action.strip()} |",
             )
         )
 
@@ -2301,7 +2367,7 @@ def format_audit_summary(
         verb = "needs" if len(review_packages) == 1 else "need"
         headline += f" · 🟠 **{packages(len(review_packages))} {verb} your review**"
     if blocked_packages:
-        headline += f" · 🔴 **Fixes blocked for {packages(len(blocked_packages))}**"
+        headline += f" · **Fixes blocked for {packages(len(blocked_packages))}**"
     if unconfirmed_packages:
         verb = "needs" if len(unconfirmed_packages) == 1 else "need"
         headline += (
@@ -2884,10 +2950,6 @@ def prepare(
         change_sections.append(
             "## Other stable dependency upgrades\n\n" + "\n".join(other_changes)
         )
-    if locked_updates:
-        change_sections.append(
-            "## Locked dependency changes\n\n" + "\n".join(locked_updates)
-        )
     if isinstance(before, dict) and isinstance(after, dict):
         security_packages = affected | set(after.get("vulnerabilities", {}))
         maintenance_updates = [
@@ -2911,11 +2973,23 @@ def prepare(
         before, after, package_manager, initial_snapshot, after_snapshot
     )
     fixed_count = len(fixed_ids)
+    initial_ids = finding_ids(before, package_manager)
     remaining_ids = finding_ids(after, package_manager)
+    new_ids = newly_reported_findings(before, after, package_manager)
+    remaining_count = len(remaining_ids or ())
+    remaining_unit = (
+        ("advisory" if remaining_count == 1 else "advisories")
+        if package_manager == "pnpm"
+        else (
+            "affected package entry"
+            if remaining_count == 1
+            else "affected package entries"
+        )
+    )
+    remaining_verb = "remains" if remaining_count == 1 else "remain"
     security_counts = (
-        f"{fixed_count} security {'fix' if fixed_count == 1 else 'fixes'} · {len(remaining_ids)} {'advisories' if package_manager == 'pnpm' else 'affected package entries'} remain"
-        if finding_ids(before, package_manager) is not None
-        and remaining_ids is not None
+        f"{fixed_count} security {'fix' if fixed_count == 1 else 'fixes'} · {remaining_count} {remaining_unit} {remaining_verb}"
+        if initial_ids is not None and remaining_ids is not None
         else "Security fixes unconfirmed"
     )
     if isinstance(after, dict) and (
@@ -2924,24 +2998,86 @@ def prepare(
         .get("critical", 0)
     ):
         security_counts += f" ({critical} critical)"
-    report = (
-        f"**{len(locked_updates)} dependency {'update' if len(locked_updates) == 1 else 'updates'} · {security_counts} · Build {'passed' if build_status == 'Passed.' else 'failed or unavailable'}**\n\n"
-        f"`{directory}` · `{package_manager}`\n\n"
-        f"Build script: `{build_script}` · Maintenance: `{maintenance_mode}` · Routine direct upgrade scope: `{upgrade_scope}`\n\n"
-        f"{format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids)}\n\n"
-        f"{maintenance}\n\n"
-        f"## Production build\n\n{build_status} {'✅' if build_status == 'Passed.' else '❌'}\n\n"
+    proposed_changes = "\n".join(locked_updates or [line for _, line in changes])
+    if not proposed_changes:
+        proposed_changes = "No dependency version changes are proposed."
+    install_status = (
+        "Passed." if not install.returncode and not invalid_install_state else "Failed."
     )
-    if not initial_audit_available:
-        report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
-    if change_sections:
-        report += (
-            "<details>\n<summary>Dependency changes</summary>\n\n"
-            + "\n\n".join(change_sections)
-            + "\n\n</details>\n\n"
+    if build_status.startswith("Proposal discarded:"):
+        install_status = (
+            "Not confirmed for the retained proposal; the candidate was discarded."
+        )
+    routine_only = (
+        bool(locked_updates)
+        and initial_ids is not None
+        and initial_ids == remaining_ids
+        and not new_ids
+        and not security_changes
+    )
+    update_label = "update" if len(locked_updates) == 1 else "updates"
+    proposal_summary = f"{len(locked_updates)} {'routine ' if routine_only else ''}dependency {update_label}"
+    if not routine_only:
+        proposal_summary += (
+            f" · {fixed_count} security {'fix' if fixed_count == 1 else 'fixes'}"
+            if initial_ids is not None and remaining_ids is not None
+            else " · Security fixes unconfirmed"
         )
     before_audit = format_audit(before, before_lock)
     after_audit = format_audit(after, after_lock)
+    blocked_findings = (
+        format_blocked_findings(after, package_manager)
+        if initial_ids is not None
+        and initial_ids == remaining_ids
+        and before_audit == after_audit
+        and not security_changes
+        else None
+    )
+    report = (
+        f"**{proposal_summary} · Build {'passed' if build_status == 'Passed.' else 'failed or unavailable'}**\n\n"
+        f"## Proposed dependency changes\n\n"
+        f"{proposed_changes}\n\n"
+        f"## Validation\n\n"
+        f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
+        f"- Production build: {build_status[0].lower() + build_status[1:]}\n\n"
+        + (
+            f"## Existing security findings\n\n{remaining_count} {remaining_unit} {'is' if remaining_count == 1 else 'are'} blocked, unchanged by this PR.\n\n"
+            if blocked_findings
+            else f"## Security status\n\n{security_counts}.\n\n"
+        )
+    )
+    if isinstance(after, str):
+        report += f"{after}\n\n"
+    if initial_ids is not None and remaining_ids is not None:
+        new_count = len(new_ids)
+        if new_count:
+            unit = (
+                ("advisory" if new_count == 1 else "advisories")
+                if package_manager == "pnpm"
+                else (
+                    "affected package entry"
+                    if new_count == 1
+                    else "affected package entries"
+                )
+            )
+            report += (
+                f"🔴 **New security findings in {new_count} {unit}; review before merging.**\n\n"
+                if package_manager == "npm"
+                else f"🔴 **{new_count} newly reported {unit}; review before merging.**\n\n"
+            )
+    if not initial_audit_available:
+        report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
+    report += (
+        f"<details>\n<summary>{'Blocked findings and constraints' if blocked_findings else 'Security findings and blockers'}</summary>\n\n"
+        f"{blocked_findings or format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids)}\n\n"
+        "</details>\n\n"
+    )
+    if change_sections:
+        report += (
+            "<details>\n<summary>Additional dependency change details</summary>\n\n"
+            + "\n\n".join(change_sections)
+            + "\n\n</details>\n\n"
+        )
     # Keep the complete final findings once, including npm propagated packages.
     remaining = (
         (
@@ -2962,7 +3098,10 @@ def prepare(
             else f"### Before\n\n{before_audit}\n\n"
         )
         + "</details>\n\n"
-        "<details>\n<summary>Audit evidence</summary>\n\n"
+        "<details>\n<summary>Run configuration and audit evidence</summary>\n\n"
+        f"`{directory}` · `{package_manager}`\n\n"
+        f"{maintenance}\n\n"
+        f"Build script: `{build_script}` · Maintenance: `{maintenance_mode}` · Routine direct upgrade scope: `{upgrade_scope}`\n\n"
         f"Run: {datetime.now(timezone.utc).isoformat()}\n\n"
         f"{count_explanation}\n\n"
         + (
