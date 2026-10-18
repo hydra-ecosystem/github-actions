@@ -1,4 +1,4 @@
-# Schedules and manual audits
+# Node maintenance schedules and manual audits
 
 Each installation keeps its policy in `.github/node-maintenance.json` and its
 GitHub triggers in `.github/workflows/dependency-audit.yml`. **Update both when

@@ -1,48 +1,61 @@
 # Shared GitHub Actions
 
-Reusable GitHub workflows for organization-owned and personal repositories.
-Each repository keeps its project configuration and pins the shared workflows
-to a reviewed commit.
+Reusable workflows for organization-owned and personal repositories. Each
+installation keeps its configuration and pins shared workflow code to a reviewed
+commit. Supports GitHub.com.
+
+## Available workflows
+
+| Workflow | Use it to | Get started |
+| --- | --- | --- |
+| Node dependency maintenance | Attempt compatible security fixes, optionally propose routine upgrades, validate the project, and maintain one dependency PR. | [Setup guide](docs/node-maintenance.md) |
+| Node fleet setup | Check a list of maintenance installations for broken setup or configuration drift, and maintain one central issue per list. | [Fleet setup guide](docs/node-fleet-setup.md) |
+
+The workflows are independent. Install maintenance in each Node repository you
+want to maintain. Run the fleet checker from one repository to monitor those
+installations. Fleet checks do not audit dependencies, install packages, or run
+project scripts. Nothing merges or repairs configuration automatically.
 
 ## Node dependency maintenance
 
-Maintain dependencies for a standalone Node application, library, or website
-using npm or pnpm. The workflow attempts compatible security fixes, optionally
-proposes routine upgrades, and validates the result with a frozen install and
-your project's checks.
+Supports standalone Node applications, libraries, and websites using npm or pnpm.
+A maintenance run validates its proposal with a frozen install and your project's
+checks. All audit kinds maintain **one open dependency PR per repository**;
+reruns update that PR rather than opening one PR per dependency. Reports show
+proposed versions, validation, and blocked findings.
 
-All audit kinds maintain **one open dependency PR per repository**. Reruns update
-that PR rather than opening a PR for each dependency. Reports show the proposed
-versions, validation results, and any blocked findings. Nothing merges automatically.
-
-**[Set up Node maintenance](docs/node-maintenance.md)** for supported versions,
-complete npm and pnpm instructions, and your first audit.
-
-## Choose your maintenance policy
-
-| Setup | Automatic security checks | Automatic routine upgrades |
+| Maintenance setup | Automatic security checks | Automatic routine upgrades |
 | --- | --- | --- |
 | Basic setup in the guide | Weekly | Disabled; run upgrades manually |
 | Follow this repository's shared defaults | Weekly | Every three months |
 
-Both setups use a ten-day release cooldown. The basic setup follows your
+Both examples use a ten-day release cooldown. The basic setup follows your
 supported project toolchain. The [shared defaults](defaults/node-maintenance.json)
-require Node 24 and pnpm 11.21.0 or npm 11.9.0. Local settings can override
-inherited defaults; conflicts with project declarations fail preflight and
-update one reusable configuration issue.
+require Node 24 and pnpm 11.21.0 or npm 11.9.0. Local overrides remain valid;
+conflicting declarations fail preflight and update the repository's reusable
+configuration issue. See the [setup guide](docs/node-maintenance.md) and
+[scheduling guide](docs/audit-schedules.md).
 
-For several installations, [share defaults from a public GitHub JSON file](docs/shared-defaults.md).
-To change cadence, disable automatic upgrades, or run an audit on demand, use
-the [scheduling guide](docs/audit-schedules.md). GitHub cron entries remain in
-each repository's caller workflow and must match its resolved configuration.
+## Manage several installations
+
+Keep an authoritative [defaults file](docs/shared-defaults.md) in any public
+GitHub repository. Optionally keep a [repository inventory](defaults/node-repositories.json)
+beside it. The inventory names the expected defaults source and the repositories
+that should follow it. You do not need to register either file here.
+
+The [fleet checker](docs/node-fleet-setup.md) inspects each default branch, honors
+local overrides, and reports failed or unverifiable setup in the host repository.
+It reuses one issue per inventory, closes it when every static check passes, and
+reopens it on recurrence. Run it manually or add your own caller schedule.
 
 ## Documentation
 
-- [Setup, first run, updates, and troubleshooting](docs/node-maintenance.md)
-- [Schedules and manual audits](docs/audit-schedules.md)
+- [Node maintenance: setup, first run, updates, and troubleshooting](docs/node-maintenance.md)
+- [Fleet setup checks: inventory, caller, results, and limits](docs/node-fleet-setup.md)
+- [Maintenance schedules and manual audits](docs/audit-schedules.md)
 - [Shared defaults for multiple installations](docs/shared-defaults.md)
 - [Maintenance behavior, reports, and permissions](node/maintenance.md)
 - [Migrate an earlier Docusaurus installation](docs/node-migration.md)
-- [Caller template](node/caller.yml) and [integration contract](node/contract.json)
+- [Maintenance caller template](node/caller.yml) and [integration contract](node/contract.json)
 
-Supports GitHub.com. The Node implementation retains its BSD 3-Clause license.
+The Node implementation retains its BSD 3-Clause license.

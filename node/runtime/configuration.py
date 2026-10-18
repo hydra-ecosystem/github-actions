@@ -174,7 +174,8 @@ def local_configuration(root):
     return config
 
 
-def load_configuration(root, sources=None, *, inherit_schedule=True):
+def load_configuration(root, sources=None, *, inherit_schedule=True, read=None):
+    read = public_read if read is None else read
     local = local_configuration(root)
     sources = sources if sources is not None else []
     commits = {}
@@ -191,7 +192,7 @@ def load_configuration(root, sources=None, *, inherit_schedule=True):
                     f"https://api.github.com/repos/{repository}/commits/"
                     + urllib.parse.quote(ref, safe="")
                 )
-                commit = public_read(url, "application/vnd.github.sha").decode().strip()
+                commit = read(url, "application/vnd.github.sha").decode().strip()
             if not re.fullmatch(r"[0-9a-f]{40}", commit):
                 raise ValueError(
                     f"{repository}@{ref}: GitHub did not return a full commit"
@@ -214,7 +215,7 @@ def load_configuration(root, sources=None, *, inherit_schedule=True):
             "commit": commit,
         }
         sources.append(source_info)
-        config = json_object(public_read(url), f"{repository}/{path}@{commit}")
+        config = json_object(read(url), f"{repository}/{path}@{commit}")
         validate_settings(config, f"{repository}/{path}@{commit}")
         inherited = (
             inherit(config["defaults"], (*stack, identity))
