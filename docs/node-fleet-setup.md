@@ -46,13 +46,15 @@ Use a branch ref for live defaults or a full commit SHA for fixed policy.
 The inventory ref used to fetch this list is independent of the defaults ref
 inside it. See [shared defaults](shared-defaults.md) for inheritance rules.
 
-This repository's [inventory](../defaults/node-repositories.json) lists Hydra
-and OmegaConf. Other maintainers can own their own files in their own repositories;
-no registration here is required.
+This repository's [inventory](../defaults/node-repositories.json) lists ten public
+repositories: Hydra, OmegaConf, and eight personal Node projects. Repositories
+that are not installed yet remain listed so their missing setup stays visible.
+Other maintainers can keep their own inventories in their own repositories; no
+registration here is required.
 
 ## 2. Choose where the checker and issue run
 
-To check this repository's inventory, use **Actions → Node fleet setup → Run
+To check this repository's inventory, use **Actions → Node maintenance setup check → Run
 workflow** after the workflow is merged. Its default inputs select
 `defaults/node-repositories.json` on this repository's default branch. Set
 `inventory-repository`, `inventory-path`, and `inventory-ref` to read another list.
@@ -63,8 +65,10 @@ To host the check elsewhere, add `.github/workflows/node-fleet-setup.yml` to tha
 repository's default branch:
 
 ```yaml
-name: Node fleet setup
+name: Node maintenance setup check
 'on':
+  schedule:
+  - cron: '0 3 * * 1'
   workflow_dispatch:
 permissions:
   contents: read
@@ -85,7 +89,11 @@ Replace `REVIEWED_FULL_COMMIT_SHA` with a reviewed full SHA that contains
 `node-fleet-check.yml`. Use your inventory location. Enable issues in the host
 repository. Only the host needs issue-write permission; listed repositories do
 not need a new workflow, extra write permission, or an issue opened in them.
-Reports have the host repository's visibility.
+Reports have the host repository's visibility. Keep private-repository inventories
+and their checker in a host that will remain private if names, checked commits,
+and diagnostics must stay private. A private inventory alone does not make
+issues or run summaries in a public host private. Changing the host to public
+also requires reviewing its inventory history and existing reports.
 
 For public repositories, the built-in token is sufficient. To read private
 listed repositories or a private inventory in another repository, add a host
@@ -103,7 +111,7 @@ maintenance resolver. No private key or secret content is inspected.
 
 ## 3. Run and inspect results
 
-Open **Actions → Node fleet setup → Run workflow** in the host. From a checkout
+Open **Actions → Node maintenance setup check → Run workflow** in the host. From a checkout
 of that repository, you can also run:
 
 ```sh
@@ -122,12 +130,18 @@ its exact checked default-branch commit, and an actionable diagnostic:
 | `failed` | Setup violates a checked requirement, such as mismatched Node policy or caller schedules. |
 | `unverified` | A required observation was unavailable, such as inaccessible repository data, API limits, or an incomplete tree. It is not a pass. |
 
+The scanner checks up to five repositories concurrently in one runner, while
+keeping results in inventory order. Each repository has isolated temporary files.
+Shared defaults and pinned repository snapshots are reused across checks.
 The scan continues after an individual repository fails. Any failed or unverified
-result fails the scanner job and opens or updates one **Node fleet setup** issue
+result fails the scanner job and opens or updates one **Node maintenance setup check** issue
 in the host. The reporter still runs after scan failures. A fully passing scan
 closes that issue; recurrence reopens it. Repeated failures update the body
 without per-run comments. An invalid or unreadable inventory also reports against
 that list when its repository/path identity is valid.
+
+The issue starts with a results table and links to each repository. Exact commit
+identities are in the expandable **Checked revisions** section.
 
 Issue identity uses the inventory repository and path, so changing its contents
 or ref keeps the same issue. Different paths have separate issues. Runs are
@@ -173,10 +187,11 @@ versions, credential contents, effective PR-creation permissions, dependency
 health, and project builds are labeled **not tested**. Use a manual maintenance
 run to exercise installation, project checks, and publication.
 
-## Optional: schedule the fleet check
+## Change the weekly schedule
 
-There is no automatic fleet-check schedule by default. To check weekly, add a
-schedule alongside `workflow_dispatch` in the host caller:
+This repository checks its inventory every Monday at 03:00 UTC (11:00 in
+Singapore). The caller example above uses the same weekly schedule.
+To change it, edit the `schedule` block in the host workflow:
 
 ```yaml
 'on':
@@ -185,6 +200,8 @@ schedule alongside `workflow_dispatch` in the host caller:
   workflow_dispatch:
 ```
 
-This runs Mondays at 03:00 UTC. It is independent of the security and upgrade
-cadences in each maintenance installation; do not add the fleet cron to those
-installations' maintenance configuration.
+Remove the `schedule` block to run only manually. Keep `workflow_dispatch` for
+on-demand checks. A reusable workflow uses its caller's schedule; it does not
+inherit this repository's cron. This schedule is independent of the security
+and upgrade cadences in each maintenance installation; do not add the fleet
+cron to those installations' maintenance configuration.

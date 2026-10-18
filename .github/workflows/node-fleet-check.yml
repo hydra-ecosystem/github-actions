@@ -1,5 +1,7 @@
-name: Node fleet setup
+name: Node maintenance setup check
 'on':
+  schedule:
+  - cron: '0 3 * * 1'
   workflow_call:
     inputs:
       inventory-repository:
@@ -51,7 +53,7 @@ jobs:
         GH_TOKEN: ${{ secrets.read-token || github.token }}
       with:
         inventory-repository: ${{ inputs.inventory-repository }}
-        inventory-path: ${{ inputs.inventory-path }}
+        inventory-path: ${{ inputs.inventory-path || 'defaults/node-repositories.json' }}
         inventory-ref: ${{ inputs.inventory-ref }}
     - name: Retain the setup report
       if: ${{ always() && !cancelled() }}

@@ -1,4 +1,4 @@
-name: Check Node fleet setup
+name: Check Node maintenance setup
 description: Inspect listed installations as data without running project commands.
 inputs:
   inventory-repository:

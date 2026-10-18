@@ -115,27 +115,73 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
             truncated = True
             return html.escape(value[:limit] + TRUNCATION_SUFFIX)
 
+        def cell(value):
+            return (
+                re.sub(
+                    r"[\\`*_\[\]~!|]",
+                    lambda match: f"&#{ord(match[0])};",
+                    value,
+                )
+                .replace("\r\n", "\n")
+                .replace("\r", "\n")
+                .replace("\n", "<br>")
+            )
+
+        counts = {
+            status: sum(item["status"] == status for item in report["results"])
+            for status in ("ok", "failed", "unverified")
+        }
+        statuses = {
+            "ok": "✅ Passed",
+            "failed": "⚠️ Needs attention",
+            "unverified": "❔ Unverified",
+        }
+        headline = (
+            " · ".join(
+                f"{counts[status]} {label}"
+                for status, label in (
+                    ("failed", "need attention"),
+                    ("ok", "passed"),
+                    ("unverified", "unverified"),
+                )
+                if counts[status]
+            )
+            or "No repositories verified"
+        )
         lines = [
             marker(source),
             "",
-            "## Node fleet setup",
+            "## Node maintenance setup check",
+            "",
+            f"**{headline}**",
             "",
             f"Inventory: <code>{text(source['repository'])}/{text(source['path'])}</code>",
-            f"Revision: <code>{text(source['ref'])} @ {text(source['commit'] or 'unverified')}</code>",
             "",
         ]
         if report["diagnostic"]:
-            lines.append("<pre>" + diagnostic(report["diagnostic"]) + "</pre>")
+            lines.extend(["<pre>" + diagnostic(report["diagnostic"]) + "</pre>", ""])
+        lines.extend(["| Repository | Setup | Detail |", "| --- | --- | --- |"])
         for item in report["results"]:
-            lines.extend(
-                [
-                    f"### {text(item['repository'])}: {text(item['status'])}",
-                    "",
-                    "<pre>" + diagnostic(item["diagnostic"]) + "</pre>",
-                    f"Checked commit: <code>{text(item['commit'] or 'unverified')}</code>",
-                    "",
-                ]
+            lines.append(
+                f"| [{cell(text(item['repository']))}](https://github.com/{item['repository']}) | {statuses[item['status']]} | {cell(diagnostic(item['diagnostic']))} |"
             )
+        lines.extend(
+            [
+                "",
+                "<details>",
+                "<summary>Checked revisions</summary>",
+                "",
+                f"Inventory: <code>{text(source['ref'])} @ {text(source['commit'] or 'unverified')}</code>",
+                "",
+                "| Repository | Commit |",
+                "| --- | --- |",
+            ]
+        )
+        for item in report["results"]:
+            lines.append(
+                f"| {cell(text(item['repository']))} | <code>{text(item['commit'] or 'unverified')}</code> |"
+            )
+        lines.extend(["", "</details>", ""])
         if truncated:
             lines.extend(
                 [
@@ -174,7 +220,7 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
     return ISSUES["maintain_issue"](
         repository,
         marker=marker(source),
-        title="Node fleet setup: " + source["path"][:180],
+        title="Node maintenance setup check: " + source["path"][:180],
         body=body,
         failing=report["status"] != "ok",
         request=request,

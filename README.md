@@ -9,7 +9,7 @@ commit. Supports GitHub.com.
 | Workflow | Use it to | Get started |
 | --- | --- | --- |
 | Node dependency maintenance | Attempt compatible security fixes, optionally propose routine upgrades, validate the project, and maintain one dependency PR. | [Setup guide](docs/node-maintenance.md) |
-| Node fleet setup | Check a list of maintenance installations for broken setup or configuration drift, and maintain one central issue per list. | [Fleet setup guide](docs/node-fleet-setup.md) |
+| Node maintenance setup check | Check a list of maintenance installations for broken setup or configuration drift, and maintain one central issue per list. | [Fleet setup guide](docs/node-fleet-setup.md) |
 
 The workflows are independent. Install maintenance in each Node repository you
 want to maintain. Run the fleet checker from one repository to monitor those
@@ -46,7 +46,10 @@ that should follow it. You do not need to register either file here.
 The [fleet checker](docs/node-fleet-setup.md) inspects each default branch, honors
 local overrides, and reports failed or unverifiable setup in the host repository.
 It reuses one issue per inventory, closes it when every static check passes, and
-reopens it on recurrence. Run it manually or add your own caller schedule.
+reopens it on recurrence. This repository checks ten public repositories weekly
+on Mondays at 03:00 UTC. Keep private inventories and reports in a private host;
+other hosts choose their own caller schedule. Checks run five repositories at a time in one
+runner, with one combined report and issue.
 
 ## Documentation
 
