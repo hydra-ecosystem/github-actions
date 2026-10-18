@@ -1,7 +1,7 @@
 # Security and upgrade schedules
 
-Integration contract **version 5** supports separate automatic cadences and a
-manual choice of audit work. The [recommended shared defaults](../defaults/docusaurus.json)
+Integration contract **version 6** supports separate automatic cadences and a
+manual choice of audit work. The [recommended shared defaults](../defaults/node-maintenance.json)
 check security weekly and propose routine upgrades quarterly. A security-only
 run proposes dependency changes only
 when before/after audit evidence confirms a security fix. Blocked findings and
@@ -9,12 +9,12 @@ reports remain available in the Actions run summary and artifacts.
 
 ## Weekly security, quarterly upgrades
 
-Set these fields in the installation's `.github/docusaurus.json`, keeping its
+Set these fields in the installation's `.github/node-maintenance.json`, keeping its
 directory, toolchain, shared defaults source, and other settings:
 
 ```json
 {
-  "directory": "website",
+  "directory": "project",
   "toolchain": {},
   "maintenance": {
     "mode": "security-and-maintenance",
@@ -39,11 +39,11 @@ both an upgrades cadence and `maintenance.mode=security-and-maintenance`.
 
 ## Update the caller too
 
-Choose a reviewed revision whose `docusaurus/contract.json` declares version 5 or
-later. Start from that revision's [caller template](../docusaurus/caller.yml).
+Choose a reviewed revision whose `node/contract.json` declares version 6 or
+later. Start from that revision's [caller template](../node/caller.yml).
 Replace both repository and revision markers with the shared repository name and
-the same full commit SHA. A version-4-or-earlier workflow does not implement this
-interface; changing JSON alone does not add it.
+the same full commit SHA. Earlier Docusaurus workflow paths do not implement the Node interface;
+follow the [migration checklist](node-migration.md).
 
 Replace the template's schedule marker with the unique cron entries from both
 lists. For the weekly/quarterly example:
@@ -86,11 +86,11 @@ reference](https://docs.github.com/en/actions/reference/workflows-and-actions/wo
 
 ## Run upgrades on demand
 
-Open **Actions → Docusaurus dependency audit → Run workflow** on the default
+Open **Actions → Node dependency audit → Run workflow** on the default
 branch. Choose **security** for security fixes only, or **upgrades** for security
 plus routine upgrades. The choice applies to this run and does not change your
 automatic policy. It still obeys `maintenance.upgradeScope`, cooldown, project
-constraints, frozen install, and the selected production build.
+constraints, frozen install, and the selected project checks.
 
 From the CLI:
 
@@ -113,12 +113,12 @@ A run with no qualifying changes creates no PR and leaves an
 existing proposal intact; read that run's summary for current findings. After a
 PR is merged or closed, a later qualifying proposal can open the next PR.
 
-The report leads with proposed dependency changes and install/build validation.
-Routine-only headlines show the update count and build status; security proposals
+The report leads with proposed dependency changes and installation and project validation.
+Routine-only headlines show the update count and validation status; security proposals
 also show confirmed fix counts. Existing blocked, unchanged findings appear as
 neutral background, with severities and constraints in expandable details.
-Newly reported findings remain visible. A passing build alone does not establish
-that a security finding was fixed. See [reports and PRs](../docusaurus/maintenance.md#reports-and-prs).
+Newly reported findings remain visible. Passing project checks alone does not establish
+that a security finding was fixed. See [reports and PRs](../node/maintenance.md#reports-and-prs).
 
 ## Shared defaults and existing installations
 
@@ -130,16 +130,12 @@ inherits both lists. The recommended file selects weekly security and quarterly
 upgrades. GitHub still requires matching cron entries in each consumer workflow.
 A live schedule change can therefore require updates to those local triggers;
 until then, preflight reports the mismatch in the reusable configuration issue.
-Source schedules are ignored by version 4 and earlier.
 
-Legacy `"schedule": ["..."]` lists and omitted schedules retain their existing
-mode: omitted `maintenance.mode` means `security-and-maintenance`. They do not
-gain separate cadences automatically. With the version-5 caller, a manual run
-defaults to security; `audit-kind=upgrades` explicitly requests routine upgrades.
-Old callers that omit the new input keep their existing automatic selection.
+A cron-list shorthand (`"schedule": ["..."]`) is also accepted. It uses one
+configured maintenance mode rather than selecting separate kinds per cron.
+Without an explicit mode it uses `security-and-maintenance`. Use the schedule
+object shown above for separate cadences and the quieter security-only default.
+Omitted schedules do not add GitHub triggers; define the schedule explicitly.
 
-To adopt the quieter policy, upgrade both workflow references, copy the version-5
-manual input and forwarding, replace the legacy schedule list with the object,
-and mirror its cron entries in the caller. No toolchain declaration or dependency
-rewrite is required. Public installation and execution use only the checked-in
-caller, actions, and runtime.
+Public installation and execution use only the checked-in caller, actions,
+and runtime. No private tooling is required.

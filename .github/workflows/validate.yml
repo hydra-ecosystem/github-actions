@@ -17,22 +17,35 @@ jobs:
       with:
         python-version: '3.13'
     - run: python -m pip install pytest==8.4.2 PyYAML==6.0.3 ruff==0.15.22 pyrefly==1.2.0
-    - run: python -m pytest docusaurus/tests -q
-    - run: ruff check docusaurus
-    - run: ruff format --check docusaurus
-    - run: pyrefly check docusaurus/runtime
+    - run: python -m pytest node/tests -q
+    - run: ruff check node
+    - run: ruff format --check node
+    - run: pyrefly check node/runtime
   toolchain:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        node:
-        - '22'
-        - '24'
-        pnpm:
-        - 11.20.0
-        - 11.21.0
+        include:
+        - node: '22'
+          manager: npm
+          version: 11.9.0
+        - node: '22'
+          manager: pnpm
+          version: 11.20.0
+        - node: '22'
+          manager: pnpm
+          version: 11.21.0
+        - node: '24'
+          manager: npm
+          version: 11.9.0
+        - node: '24'
+          manager: pnpm
+          version: 11.20.0
+        - node: '24'
+          manager: pnpm
+          version: 11.21.0
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -46,8 +59,18 @@ jobs:
     - run: 'corepack enable
 
         python -m pip install PyYAML==6.0.3'
+    - name: Install pinned npm
+      if: ${{ matrix.manager == 'npm' }}
+      env:
+        NPM_VERSION: ${{ matrix.version }}
+      run: npm install --global "npm@$NPM_VERSION" --ignore-scripts --no-audit --no-fund
     - env:
         TEST_NODE: ${{ matrix.node }}
-        TEST_PNPM: ${{ matrix.pnpm }}
-      run: python docusaurus/tests/verify_toolchain.py --node "$TEST_NODE" --pnpm
-        "$TEST_PNPM"
+        TEST_MANAGER: ${{ matrix.manager }}
+        TEST_VERSION: ${{ matrix.version }}
+      run: python node/tests/verify_node_project.py --node "$TEST_NODE" --manager
+        "$TEST_MANAGER" --version "$TEST_VERSION"
+    - name: Verify a Docusaurus production build
+      if: ${{ matrix.node == '24' && matrix.manager == 'pnpm' && matrix.version ==
+        '11.21.0' }}
+      run: python node/tests/verify_toolchain.py --node 24 --pnpm 11.21.0

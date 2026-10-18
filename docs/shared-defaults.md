@@ -1,28 +1,29 @@
-# Shared defaults for multiple Docusaurus installations
+# Shared defaults for multiple Node installations
 
-Define shared defaults once, reuse them across many Docusaurus installations,
+Define shared defaults once, reuse them across many Node installations,
 and override settings in individual repositories when needed. A source is a
 regular JSON file in any **public GitHub.com repository**. It needs no service,
 App, or registration with this repository.
 
-Shared toolchain and maintenance defaults require **integration version 4**;
-inherited schedules require **version 5**. The examples below include schedules.
-Inspect [`docusaurus/contract.json`](../docusaurus/contract.json) at your chosen reviewed
-workflow revision and confirm `integration_version` is at least `5`. Use the
-[caller template](../docusaurus/caller.yml) from that same revision and pin both
+Shared toolchain and maintenance defaults require **integration version 6**;
+inherited schedules require **version 6**. The examples below include schedules.
+Inspect [`node/contract.json`](../node/contract.json) at your chosen reviewed
+workflow revision and confirm `integration_version` is `6`. Use the
+[caller template](../node/caller.yml) from that same revision and pin both
 reusable workflow calls to its full commit SHA. The
-[general setup guide](docusaurus.md#set-it-up) supplies the version-5 caller;
+[general setup guide](node-maintenance.md#set-it-up) supplies the version-6 caller;
 use the source configuration below to opt in to shared defaults.
 
 ## 1. Choose an authoritative defaults file
 
-For example, publish this as `defaults/docusaurus.json` in your own public
+For example, publish this as `defaults/node-maintenance.json` in your own public
 configuration repository:
 
 ```json
 {
   "toolchain": {
     "node": "24",
+    "npm": "11.9.0",
     "pnpm": "11.21.0"
   },
   "minimumReleaseAgeDays": 10,
@@ -37,40 +38,40 @@ configuration repository:
 }
 ```
 
-You can also use the [recommended defaults in this repository](../defaults/docusaurus.json).
-They live outside the `docusaurus/` action implementation tree. Other maintainers
+You can also use the [recommended defaults in this repository](../defaults/node-maintenance.json).
+They live outside the `node/` action implementation tree. Other maintainers
 can keep equivalent files in their own repositories and review changes through
 their normal pull-request process. Supported Node/pnpm combinations still apply;
 a shared file does not add support for an untested toolchain.
 
 ## 2. Point each installation at the source
 
-In each website repository, add the source to `.github/docusaurus.json`:
+In each project repository, add the source to `.github/node-maintenance.json`:
 
 ```json
 {
   "directory": "website",
   "defaults": {
     "repository": "hydra-ecosystem/github-actions",
-    "path": "defaults/docusaurus.json",
+    "path": "defaults/node-maintenance.json",
     "ref": "main"
   },
-  "buildScript": "build"
+  "validationScript": "build"
 }
 ```
 
 Change `repository` and `path` to use your own file. All three source fields are
 required. `ref` can be a branch, tag, or full commit SHA. Sources are read without
-credentials, so private source repositories are not supported; the website
+credentials, so private source repositories are not supported; the project
 repository itself may be private.
 
 The recommended file selects weekly security checks and quarterly upgrades, with
-`security-and-maintenance` mode. Integration version 5 inherits its schedules and
+`security-and-maintenance` mode. Integration version 6 inherits its schedules and
 supports [manual audit choices](audit-schedules.md). Updating a live source changes
 the policy for consumers that inherit those fields; pin the defaults ref if each
-policy update needs a separate review. Version 4 ignores source schedules.
+policy update needs a separate review. 
 
-Each installation keeps its own directory, build script, dependency
+Each installation keeps its own directory, validation script, dependency
 declarations, security exceptions, deployment, and credentials. These values are
 not inherited. Keep the resolved schedule mirrored in the caller workflow. Remove
 explicit local toolchain or maintenance values when you want to inherit them.
@@ -78,7 +79,7 @@ A local `maintenance.upgradeScope` keeps overriding the source after updates.
 
 ## 3. Allow the configuration issue reporter
 
-The version-4 caller grants these permissions on its **`jobs.audit`**:
+The version-6 caller grants these permissions on its **`jobs.audit`**:
 
 ```yaml
 permissions:
@@ -86,15 +87,15 @@ permissions:
   issues: write
 ```
 
-Use the complete [caller template](../docusaurus/caller.yml) from your selected
-version-5 revision for these examples. Keep both workflow references pinned to
+Use the complete [caller template](../node/caller.yml) from your selected
+version-6 revision for these examples. Keep both workflow references pinned to
 that same full SHA.
 The workflow's internal audit job has only `contents: read`; a separate reporting
 job has only `issues: write`. The reporting job reads a bounded JSON status
-artifact and does not check out or execute website code. It receives no App key.
+artifact and does not check out or execute project code. It receives no App key.
 
 Enable repository issues. No App is required for reporting. The existing
-[PR-creation setup](docusaurus.md#4-allow-the-workflow-to-open-prs) still applies
+[PR-creation setup](node-maintenance.md#4-enable-publication-and-run-the-first-audit) still applies
 to publishing dependency proposals.
 
 ## Local overrides
@@ -107,7 +108,7 @@ field:
   "directory": "website",
   "defaults": {
     "repository": "hydra-ecosystem/github-actions",
-    "path": "defaults/docusaurus.json",
+    "path": "defaults/node-maintenance.json",
     "ref": "main"
   },
   "toolchain": {
@@ -140,24 +141,24 @@ Until it matches, preflight fails and the existing configuration issue reports
 the required schedule; no workflow file is changed automatically.
 
 `minimumReleaseAgeDays` is a nonnegative integer and defaults to `10` when no
-source or local setting supplies it. The website's `pnpm-workspace.yaml` must
+source or local setting supplies it. The project's `pnpm-workspace.yaml` must
 have an integer `minimumReleaseAge` of at least `days * 1440` minutes. A stricter
 workspace value is accepted. Exact-version security exceptions remain intact;
 the workflow does not lower the global cooldown or rewrite declarations.
 
-## Use another website as the authoritative source
+## Use another project as the authoritative source
 
-Point `repository` at that website's repository and `path` at its
-`.github/docusaurus.json`. Its shared settings become live defaults for dependent
-websites. Source directory and build script fields are ignored. Version 5 also
+Point `repository` at that project's repository and `path` at its
+`.github/node-maintenance.json`. Its shared settings become live defaults for dependent
+projects. Source directory and validation script fields are ignored. Version 5 also
 inherits its schedule, with local overrides taking precedence.
 
 The source can itself inherit defaults. Its inherited values are applied first,
-then its explicit shared values, then the dependent website's explicit values.
+then its explicit shared values, then the dependent project's explicit values.
 This is live inheritance, not a one-time copy. Sources must declare shared
 values explicitly or inherit them; the resolver does not infer versions from
-another website's `.nvmrc` or `package.json`. `"project"` always refers to the
-consuming website.
+another project's `.nvmrc` or `package.json`. `"project"` always refers to the
+consuming project.
 
 Cycles, chains longer than eight sources, unknown settings, invalid JSON,
 unreadable sources, and oversized files fail validation. Source files are limited
@@ -183,13 +184,13 @@ it does not migrate them automatically.
 
 ## Failures and the single configuration issue
 
-Preflight runs before any website dependency command. Conflicting Node or pnpm
+Preflight runs before any project dependency command. Conflicting Node or pnpm
 declarations, an insufficient cooldown, or a bad source produce a GitHub Actions
 error annotation, a failed audit, and a configuration issue with the diagnostic,
 source information, and workflow-run link. Failed configuration checks do not
 publish a dependency proposal.
 
-There is **one bot-owned `Docusaurus configuration` issue per repository**:
+There is **one bot-owned `Node audit configuration` issue per repository**:
 
 1. The first configuration failure opens it.
 2. Repeated failures update its body without adding per-run comments.

@@ -1,0 +1,27 @@
+{
+  "tests/test_dependency_audit.py": {
+    "source_sha256": "54f474d342ff76ce731cf25a20742697248028b8b4821cf5be3621a41fcca4e7",
+    "transferred_path": "node/tests/test_dependency_audit.py",
+    "transferred_sha256": "17972830a5b229a0189db13737f58b18d4b59b4d71f2fd2fb58b62cf39ea4a12"
+  },
+  "tests/test_dependency_audit_invariants.py": {
+    "source_sha256": "229cdaa093eac2696febd15e72786886b6c2619ef27e79b4153d4f39f07b3b27",
+    "transferred_path": "node/tests/test_transferred_invariants.py",
+    "transferred_sha256": "e556c9649c6bc6005aa2a6f17ad1bb883c7fbcdc0bec6feae39cf5797c6377bd"
+  },
+  "tests/test_dependency_audit_pnpm.py": {
+    "source_sha256": "3b0acce9e8e8c8bac7fb941ea0c17b87af49ef09adc60d081451ca14348da322",
+    "transferred_path": "node/tests/test_transferred_pnpm.py",
+    "transferred_sha256": "0030bb49e71fea30dd6513d69b975fddb8ef3edb08e669a1c4476d50555b3343"
+  },
+  "tests/test_dependency_audit_repairs.py": {
+    "source_sha256": "ac4089fe5153b66088d3474ca28f6525363c464a0fb48397d13b53f51e922ac6",
+    "transferred_path": "node/tests/test_transferred_repairs.py",
+    "transferred_sha256": "cc9909411e3669083592816c109cc79c1e63b61437f9303b42141d4b046b7dc5"
+  },
+  "tests/test_dependency_audit_workflow.py": {
+    "source_sha256": "02914b5ef5bd3b6e9184fc7bf55c40f43ae231be723d928622bd42893d8a4b94",
+    "transferred_path": "node/tests/test_transferred_workflow.py",
+    "transferred_sha256": "01e41ab4e2f10dbd32f4a01129c40f9a7f9a7b971b8467224dfa0bd990632e22"
+  }
+}
