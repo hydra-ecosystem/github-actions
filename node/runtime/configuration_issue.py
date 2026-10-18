@@ -120,7 +120,7 @@ def github_request(method, path, payload=None):
     return json.loads(data)
 
 
-def existing_issue(repository, request):
+def existing_issue(repository, request, marker=MARKER):
     matches = []
     for page in range(1, 101):
         query = urllib.parse.urlencode(
@@ -138,7 +138,7 @@ def existing_issue(repository, request):
                 and author.get("login") == BOT
                 and author.get("type") == "Bot"
                 and isinstance(issue.get("body"), str)
-                and issue["body"].startswith(MARKER + "\n")
+                and issue["body"].startswith(marker + "\n")
             ):
                 if (
                     type(issue.get("number")) is not int
@@ -150,12 +150,10 @@ def existing_issue(repository, request):
         if len(issues) < 100:
             break
     else:
-        raise ValueError(
-            "Cannot prove complete configuration issue history; no issue created"
-        )
+        raise ValueError("Cannot prove complete marked issue history; no issue created")
     if len(matches) > 1:
         raise ValueError(
-            "Multiple bot-owned configuration issues found; reconcile duplicates before rerunning"
+            "Multiple bot-owned marked issues found; reconcile duplicates before rerunning"
         )
     return matches[0] if matches else None
 
@@ -164,17 +162,30 @@ def update_issue(repository, report, run_url, request=github_request):
     validate_report(report)
     if report["status"] == "pending":
         return {"operation": "skipped", "reason": "preflight did not finish"}
-    issue = existing_issue(repository, request)
-    if report["status"] == "ok" and (issue is None or issue["state"] == "closed"):
+    return maintain_issue(
+        repository,
+        marker=MARKER,
+        title=TITLE,
+        body=issue_body(report, run_url),
+        failing=report["status"] == "error",
+        request=request,
+    )
+
+
+def maintain_issue(repository, *, marker, title, body, failing, request=github_request):
+    """Reuse one bot-owned marked issue, including after closure."""
+    if not body.startswith(marker + "\n") or len(body.encode()) > MAX_ISSUE_BYTES:
+        raise ValueError("invalid marked issue body")
+    issue = existing_issue(repository, request, marker)
+    if not failing and (issue is None or issue["state"] == "closed"):
         return {"operation": "unchanged", "number": issue["number"] if issue else None}
-    body = issue_body(report, run_url)
     if issue is None:
         result = request(
-            "POST", f"repos/{repository}/issues", {"title": TITLE, "body": body}
+            "POST", f"repos/{repository}/issues", {"title": title, "body": body}
         )
         operation = "created"
     else:
-        state = "open" if report["status"] == "error" else "closed"
+        state = "open" if failing else "closed"
         if issue["state"] == state and issue["body"] == body:
             return {"operation": "unchanged", "number": issue["number"]}
         result = request(

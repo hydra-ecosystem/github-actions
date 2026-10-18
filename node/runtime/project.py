@@ -319,8 +319,6 @@ def verify_release_age(directory, selected):
 
 
 def verify_runtime(directory, selected):
-    import yaml
-
     def output(command):
         result = subprocess.run(
             command,
@@ -357,6 +355,14 @@ def verify_runtime(directory, selected):
         raise ValueError(
             f"Installed {kind} {actual_manager} differs from package.json/toolchain {kind} {selected[kind]}"
         )
+    verify_package_files(directory, selected)
+
+
+def verify_package_files(directory, selected):
+    """Verify package declarations and lockfiles without invoking project tools."""
+    import yaml
+
+    kind = selected["manager"]
     shrinkwrap = directory / "npm-shrinkwrap.json"
     if shrinkwrap.is_symlink() or shrinkwrap.exists():
         raise ValueError(
