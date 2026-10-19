@@ -66,6 +66,8 @@ class GitHub:
         self.defaults_lock = Lock()
         # Defaults remain public and unauthenticated, as in the individual audit.
         self.cached_defaults = functools.cache(CONFIGURATION["public_read"])
+        # Public workflow metadata must not inherit private repository credentials.
+        self.public_github = GitHub() if token else self
 
     def read_defaults(self, url, accept="application/json"):
         # Resolve each shared ref once, even when several repositories need it.
@@ -442,7 +444,7 @@ def check_caller(root, config, selected, github):
         raise ValueError(
             "Caller must serialize runs with concurrency and cancel-in-progress: false"
         )
-    source = github.snapshot(match[1], match[2])
+    source = github.public_github.snapshot(match[1], match[2])
     contract = CONFIGURATION["json_object"](
         source.read("node/contract.json"), "pinned Node contract"
     )

@@ -46,9 +46,9 @@ Use a branch ref for live defaults or a full commit SHA for fixed policy.
 The inventory ref used to fetch this list is independent of the defaults ref
 inside it. See [shared defaults](shared-defaults.md) for inheritance rules.
 
-This repository's [inventory](../defaults/node-repositories.json) lists ten public
-repositories: Hydra, OmegaConf, and eight personal Node projects. Repositories
-that are not installed yet remain listed so their missing setup stays visible.
+This repository's [inventory](../defaults/node-repositories.json) lists Hydra and
+OmegaConf. Repositories that are not installed yet can also remain in an
+inventory so their missing setup stays visible.
 Other maintainers can keep their own inventories in their own repositories; no
 registration here is required.
 
@@ -107,7 +107,12 @@ secrets:
 
 The optional token goes only to the scanner. The reporter uses the host's
 built-in token. Shared defaults sources remain public, as required by the
-maintenance resolver. No private key or secret content is inspected.
+maintenance resolver. Pinned central workflow repositories must also be public:
+the scanner reads their metadata and files without authentication. The optional
+token remains in use for the inventory, listed repositories, and their Actions
+status. This avoids applying the central organization's token policies to a
+credential intended for your private repositories. No private key or secret
+content is inspected.
 
 ## 3. Run and inspect results
 
