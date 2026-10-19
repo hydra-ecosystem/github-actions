@@ -172,10 +172,25 @@ def update_issue(repository, report, run_url, request=github_request):
     )
 
 
-def maintain_issue(repository, *, marker, title, body, failing, request=github_request):
+def maintain_issue(
+    repository,
+    *,
+    marker,
+    title,
+    body,
+    failing,
+    request=github_request,
+    resolution_comment=None,
+):
     """Reuse one bot-owned marked issue, including after closure."""
     if not body.startswith(marker + "\n") or len(body.encode()) > MAX_ISSUE_BYTES:
         raise ValueError("invalid marked issue body")
+    if resolution_comment is not None and (
+        not isinstance(resolution_comment, str)
+        or not resolution_comment.strip()
+        or len(resolution_comment.encode()) > MAX_ISSUE_BYTES
+    ):
+        raise ValueError("invalid issue resolution comment")
     issue = existing_issue(repository, request, marker)
     if not failing and (issue is None or issue["state"] == "closed"):
         return {"operation": "unchanged", "number": issue["number"] if issue else None}
@@ -188,10 +203,16 @@ def maintain_issue(repository, *, marker, title, body, failing, request=github_r
         state = "open" if failing else "closed"
         if issue["state"] == state and issue["body"] == body:
             return {"operation": "unchanged", "number": issue["number"]}
+        payload = {"body": body, "state": state}
+        if not failing and resolution_comment is not None:
+            request(
+                "POST",
+                f"repos/{repository}/issues/{issue['number']}/comments",
+                {"body": resolution_comment},
+            )
+            payload = {"state": state}
         result = request(
-            "PATCH",
-            f"repos/{repository}/issues/{issue['number']}",
-            {"body": body, "state": state},
+            "PATCH", f"repos/{repository}/issues/{issue['number']}", payload
         )
         operation = (
             "closed"

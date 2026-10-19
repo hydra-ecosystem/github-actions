@@ -34,6 +34,7 @@ class GitHub:
     def __init__(self, issues=None):
         self.issues = copy.deepcopy(issues or [])
         self.calls = []
+        self.comments = []
 
     def request(self, method, path, payload=None):
         self.calls.append((method, path, copy.deepcopy(payload)))
@@ -44,6 +45,10 @@ class GitHub:
             assert query["state"] == ["all"] and query["creator"] == [BOT["login"]]
             return copy.deepcopy(self.issues[(page - 1) * 100 : page * 100])
         if method == "POST":
+            if path.endswith("/comments"):
+                comment = {"id": len(self.comments) + 1, "user": BOT, **payload}
+                self.comments.append(comment)
+                return copy.deepcopy(comment)
             issue = {"number": 77, "user": BOT, "state": "open", **payload}
             self.issues.append(issue)
             return copy.deepcopy(issue)

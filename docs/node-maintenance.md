@@ -338,7 +338,9 @@ fixes available** issue is created, updated, or reopened for the repository.
 Availability does not prove compatibility or release-cooldown eligibility. Review
 the upstream fix and everything your patch changes before upgrading, removing the
 patch and obsolete assertion, and rerunning. **Patches are never removed automatically.**
-A complete check with no remaining notifications closes the issue; unavailable
+A complete check with no remaining notifications adds a resolution comment with
+the verification run and closes the issue, preserving its last findings and any
+maintainer notes. Later healthy runs do not add more comments. Unavailable
 evidence does not close it. The reporter uses the existing `issues: write`
 permission without checking out or executing project code.
 
