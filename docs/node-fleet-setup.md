@@ -136,17 +136,29 @@ Shared defaults and pinned repository snapshots are reused across checks.
 The scan continues after an individual repository fails. Any failed or unverified
 result fails the scanner job and opens or updates one **Node maintenance setup check** issue
 in the host. The reporter still runs after scan failures. A fully passing scan
-closes that issue; recurrence reopens it. Repeated failures update the body
-without per-run comments. An invalid or unreadable inventory also reports against
-that list when its repository/path identity is valid.
+closes that issue and records recovery. A later regression creates a new issue.
+Repeated failures, including changed findings, update the current issue body
+without per-run comments. If you close an unresolved issue manually, the next
+failing scan reopens that issue. An invalid or unreadable inventory also reports
+against that list when its repository/path identity is valid.
 
 The issue starts with a results table and links to each repository. Exact commit
 identities are in the expandable **Checked revisions** section.
 
 Issue identity uses the inventory repository and path, so changing its contents
-or ref keeps the same issue. Different paths have separate issues. Runs are
-serialized in the host to avoid competing issue creation. Existing ambiguous
-duplicate marked issues cause a reporting error instead of another issue.
+or ref keeps the current incident. Different paths have separate incidents. Runs
+are serialized in the host to avoid competing issue creation. The reporter reads
+bot-created issues from newest to oldest and stops at the latest matching issue;
+it does not scan older incidents or add comments on every run. Newer unrelated
+bot issues still count toward the lookup limit of 100 pages of 100 entries. If
+the lookup cannot finish, it fails without creating another issue.
+
+Recovery is recorded in a hidden marker in the issue body. Keep this marker when
+editing an issue. Existing issues from earlier workflow versions are adopted as
+unresolved until a scan with the new version confirms recovery, even if already
+closed. Fully passing scans then leave the closed incident unchanged. No new
+permissions or external state store are needed.
+
 Invalid inventory location inputs that cannot identify a safe list fail the
 workflow without opening an issue.
 

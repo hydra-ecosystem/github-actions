@@ -1,4 +1,4 @@
-"""Maintain one central setup issue per inventory, without touching consumers."""
+"""Maintain one setup issue per failure episode, without touching consumers."""
 
 import argparse
 import hashlib
@@ -7,6 +7,7 @@ import json
 import os
 import re
 import runpy
+import urllib.parse
 from pathlib import Path
 
 ISSUES = runpy.run_path(str(Path(__file__).with_name("configuration_issue.py")))
@@ -14,6 +15,8 @@ CONFIGURATION = runpy.run_path(str(Path(__file__).with_name("configuration.py"))
 MAX_ISSUE_BYTES = ISSUES["MAX_ISSUE_BYTES"]
 DIAGNOSTIC_LIMIT = 1000
 TRUNCATION_SUFFIX = "… [truncated]"
+RESOLVED = "<!-- node-fleet-incident:v1:resolved -->"
+ACTIVE = "<!-- node-fleet-incident:v1:active -->"
 
 
 def validate_report(report):
@@ -97,6 +100,93 @@ def marker(source):
     )
 
 
+def latest_issue(repository, identity, request):
+    """Stop at the newest matching bot issue; older incidents are historical."""
+    for page in range(1, 101):
+        query = urllib.parse.urlencode(
+            {
+                "state": "all",
+                "creator": ISSUES["BOT"],
+                "sort": "created",
+                "direction": "desc",
+                "per_page": 100,
+                "page": page,
+            }
+        )
+        issues = request("GET", f"repos/{repository}/issues?{query}")
+        if not isinstance(issues, list):
+            raise ValueError("GitHub did not return an issue list; no issue created")
+        for issue in issues:
+            if not isinstance(issue, dict):
+                raise ValueError("GitHub returned an invalid issue; no issue created")
+            author = issue.get("user")
+            if (
+                "pull_request" not in issue
+                and isinstance(author, dict)
+                and author.get("login") == ISSUES["BOT"]
+                and author.get("type") == "Bot"
+                and isinstance(issue.get("body"), str)
+                and issue["body"].startswith(identity + "\n")
+            ):
+                if (
+                    type(issue.get("number")) is not int
+                    or issue["number"] <= 0
+                    or issue.get("state") not in ("open", "closed")
+                ):
+                    raise ValueError("GitHub returned an invalid marked fleet issue")
+                return issue
+        if len(issues) < 100:
+            return None
+    raise ValueError(
+        "Cannot find latest fleet issue within lookup limit; no issue created"
+    )
+
+
+def maintain_incident(repository, *, identity, title, body, failing, request):
+    if not body.startswith(identity + "\n") or len(body.encode()) > MAX_ISSUE_BYTES:
+        raise ValueError("invalid marked fleet issue body")
+    issue = latest_issue(repository, identity, request)
+    recovered = issue is not None and issue["body"].startswith(
+        identity + "\n" + RESOLVED + "\n"
+    )
+    if not failing and (issue is None or (recovered and issue["state"] == "closed")):
+        return {"operation": "unchanged", "number": issue["number"] if issue else None}
+    if issue is None or (failing and recovered):
+        result = request(
+            "POST", f"repos/{repository}/issues", {"title": title, "body": body}
+        )
+        operation = "created"
+    else:
+        state = "open" if failing else "closed"
+        if issue["state"] == state and issue["body"] == body:
+            return {"operation": "unchanged", "number": issue["number"]}
+        result = request(
+            "PATCH",
+            f"repos/{repository}/issues/{issue['number']}",
+            {"body": body, "state": state},
+        )
+        operation = (
+            "closed"
+            if not failing
+            else "reopened"
+            if issue["state"] == "closed"
+            else "updated"
+        )
+        if not isinstance(result, dict) or result.get("number") != issue["number"]:
+            raise ValueError(
+                "Fleet issue update identity changed; no additional issue created"
+            )
+    if (
+        not isinstance(result, dict)
+        or type(result.get("number")) is not int
+        or result["number"] <= 0
+    ):
+        raise ValueError(
+            "GitHub did not return a fleet issue identity; inspect the run before retrying"
+        )
+    return {"operation": operation, "number": result["number"]}
+
+
 def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
     validate_report(report)
     source = report["inventory"]
@@ -150,6 +240,7 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
         )
         lines = [
             marker(source),
+            RESOLVED if report["status"] == "ok" else ACTIVE,
             "",
             "## Node maintenance setup check",
             "",
@@ -195,7 +286,7 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
                 "",
                 f"[Workflow run]({run_url})",
                 "",
-                "This issue is reused for this inventory. A fully passing scan closes it; a later failure or unverifiable setup reopens it.",
+                "This issue tracks one failure episode for this inventory. A fully passing scan closes it; a later regression creates a new issue. Closing it manually while problems persist causes it to reopen on the next scan.",
             ]
         )
         return "\n".join(lines)
@@ -217,9 +308,9 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
                 "fleet issue body exceeds its fixed identity and status budget"
             )
         body = best
-    return ISSUES["maintain_issue"](
+    return maintain_incident(
         repository,
-        marker=marker(source),
+        identity=marker(source),
         title="Node maintenance setup check: " + source["path"][:180],
         body=body,
         failing=report["status"] != "ok",

@@ -45,11 +45,11 @@ that should follow it. You do not need to register either file here.
 
 The [fleet checker](docs/node-fleet-setup.md) inspects each default branch, honors
 local overrides, and reports failed or unverifiable setup in the host repository.
-It reuses one issue per inventory, closes it when every static check passes, and
-reopens it on recurrence. This repository checks ten public repositories weekly
-on Mondays at 03:00 UTC. Keep private inventories and reports in a private host;
-other hosts choose their own caller schedule. Checks run five repositories at a time in one
-runner, with one combined report and issue.
+It keeps one issue per failure episode, closes it when every static check passes,
+and creates a new issue after a later regression. This repository checks Hydra
+and OmegaConf weekly on Mondays at 03:00 UTC. Keep private inventories and reports
+in a private host; other hosts choose their own caller schedule. Checks run five
+repositories at a time in one runner, with one combined report and issue.
 
 ## Documentation
 
