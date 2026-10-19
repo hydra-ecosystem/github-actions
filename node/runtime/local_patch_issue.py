@@ -55,6 +55,17 @@ def update_issue(repository, report, run_url, request=ISSUES["github_request"]):
         body=body,
         failing=available,
         request=request,
+        resolution_comment=(
+            "Local-patch notification resolved.\n\n"
+            + (
+                "No local patch declarations remain in the project configuration.\n\n"
+                if not report["patches"]
+                else "The latest complete audit has no declared local patch with a verified newer official fix requiring notification.\n\n"
+                + preview
+            )
+            + "The original findings above are preserved as history. This does not certify local patches or resolve unrelated security findings.\n\n"
+            + f"[Verification run]({run_url})"
+        ),
     )
 
 

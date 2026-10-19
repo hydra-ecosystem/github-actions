@@ -1,6 +1,7 @@
 """Maintain one bot-owned configuration issue using a data-only audit report."""
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -172,10 +173,68 @@ def update_issue(repository, report, run_url, request=github_request):
     )
 
 
-def maintain_issue(repository, *, marker, title, body, failing, request=github_request):
+def ensure_resolution_comment(repository, issue, body, request):
+    """Reuse the bot's resolution for the same preserved finding body on retry."""
+    digest = hashlib.sha256(issue["body"].encode()).hexdigest()
+    marker = f"<!-- node-issue-resolution:v1:{digest} -->"
+    comment_body = marker + "\n\n" + body
+    if len(comment_body.encode()) > MAX_ISSUE_BYTES:
+        raise ValueError("issue resolution comment exceeds its size limit")
+    for page in range(1, 101):
+        comments = request(
+            "GET",
+            f"repos/{repository}/issues/{issue['number']}/comments?per_page=100&page={page}",
+        )
+        if not isinstance(comments, list) or any(
+            not isinstance(comment, dict) for comment in comments
+        ):
+            raise ValueError("GitHub did not return valid issue comments")
+        for comment in comments:
+            author = comment.get("user", {})
+            if (
+                author.get("login") == BOT
+                and author.get("type") == "Bot"
+                and isinstance(comment.get("body"), str)
+                and comment["body"].startswith(marker + "\n")
+            ):
+                return
+        if len(comments) < 100:
+            result = request(
+                "POST",
+                f"repos/{repository}/issues/{issue['number']}/comments",
+                {"body": comment_body},
+            )
+            if (
+                not isinstance(result, dict)
+                or type(result.get("id")) is not int
+                or result["id"] <= 0
+            ):
+                raise ValueError("GitHub did not confirm the resolution comment")
+            return
+    raise ValueError(
+        "Cannot prove complete resolution comment history; issue left open"
+    )
+
+
+def maintain_issue(
+    repository,
+    *,
+    marker,
+    title,
+    body,
+    failing,
+    request=github_request,
+    resolution_comment=None,
+):
     """Reuse one bot-owned marked issue, including after closure."""
     if not body.startswith(marker + "\n") or len(body.encode()) > MAX_ISSUE_BYTES:
         raise ValueError("invalid marked issue body")
+    if resolution_comment is not None and (
+        not isinstance(resolution_comment, str)
+        or not resolution_comment.strip()
+        or len(resolution_comment.encode()) > MAX_ISSUE_BYTES
+    ):
+        raise ValueError("invalid issue resolution comment")
     issue = existing_issue(repository, request, marker)
     if not failing and (issue is None or issue["state"] == "closed"):
         return {"operation": "unchanged", "number": issue["number"] if issue else None}
@@ -188,10 +247,12 @@ def maintain_issue(repository, *, marker, title, body, failing, request=github_r
         state = "open" if failing else "closed"
         if issue["state"] == state and issue["body"] == body:
             return {"operation": "unchanged", "number": issue["number"]}
+        payload = {"body": body, "state": state}
+        if not failing and resolution_comment is not None:
+            ensure_resolution_comment(repository, issue, resolution_comment, request)
+            payload = {"state": state}
         result = request(
-            "PATCH",
-            f"repos/{repository}/issues/{issue['number']}",
-            {"body": body, "state": state},
+            "PATCH", f"repos/{repository}/issues/{issue['number']}", payload
         )
         operation = (
             "closed"

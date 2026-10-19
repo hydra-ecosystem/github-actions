@@ -251,11 +251,154 @@ def test_one_issue_lifecycle_preserves_unknown_evidence_and_escapes_comments():
     )
     assert update(value)["operation"] == "reopened"
     assert len(github.issues) == 1
-    assert sum(method == "POST" for method, _, _ in github.calls) == 1
+    assert (
+        sum(
+            method == "POST" and not path.endswith("/comments")
+            for method, path, _ in github.calls
+        )
+        == 1
+    )
     assert (
         "&#124;" in github.issues[0]["body"]
         and "<script>" not in github.issues[0]["body"]
     )
+
+
+def test_resolution_preserves_findings_and_manual_notes_then_comments_and_closes():
+    github = GitHub()
+    ISSUE["update_issue"]("owner/site", report(), "original-run", github.request)
+    issue = github.issues[0]
+    issue["body"] += "\n\nMaintainer note: check this patch's other changes."
+    original_body = issue["body"]
+    healthy = {"schema_version": 1, "complete": True, "patches": []}
+    result = ISSUE["update_issue"](
+        "owner/site", healthy, "verification-run", github.request
+    )
+    assert result == {"operation": "closed", "number": 77}
+    assert issue["state"] == "closed" and issue["body"] == original_body
+    assert ID in issue["body"] and "renderer@1.0.0" in issue["body"]
+    assert len(github.comments) == 1
+    comment = github.comments[0]["body"]
+    assert "No local patch declarations remain" in comment
+    assert "verification-run" in comment and "resolve unrelated" in comment
+    assert github.calls[-2][0:2] == ("POST", "repos/owner/site/issues/77/comments")
+    assert github.calls[-1] == (
+        "PATCH",
+        "repos/owner/site/issues/77",
+        {"state": "closed"},
+    )
+    assert (
+        ISSUE["update_issue"]("owner/site", healthy, "next-run", github.request)[
+            "operation"
+        ]
+        == "unchanged"
+    )
+    assert len(github.comments) == 1 and issue["body"] == original_body
+
+
+def test_failed_resolution_comment_keeps_issue_open_and_findings_unchanged():
+    github = GitHub()
+    ISSUE["update_issue"]("owner/site", report(), "run", github.request)
+    original = copy.deepcopy(github.issues[0])
+
+    def request(method, path, payload=None):
+        if method == "POST" and path.endswith("/comments"):
+            raise ValueError("GitHub comment request failed")
+        return github.request(method, path, payload)
+
+    with pytest.raises(ValueError, match="comment request failed"):
+        ISSUE["update_issue"](
+            "owner/site",
+            {"schema_version": 1, "complete": True, "patches": []},
+            "run",
+            request,
+        )
+    assert github.issues[0] == original
+
+
+@pytest.mark.parametrize("earlier_comments", [0, 100])
+def test_failed_close_reuses_resolution_comment_even_from_a_later_audit(
+    earlier_comments,
+):
+    github = GitHub()
+    github.comments = [
+        {"id": i + 1, "user": {"login": "maintainer", "type": "User"}, "body": "Note"}
+        for i in range(earlier_comments)
+    ]
+    ISSUE["update_issue"]("owner/site", report(), "run", github.request)
+    original_body = github.issues[0]["body"]
+    healthy = {"schema_version": 1, "complete": True, "patches": []}
+
+    def request(method, path, payload=None):
+        if method == "PATCH":
+            raise ValueError("Transient close failure")
+        return github.request(method, path, payload)
+
+    with pytest.raises(ValueError, match="close failure"):
+        ISSUE["update_issue"]("owner/site", healthy, "first-audit", request)
+    assert github.issues[0]["state"] == "open"
+    assert len(github.comments) == earlier_comments + 1
+    assert (
+        ISSUE["update_issue"]("owner/site", healthy, "later-audit", github.request)[
+            "operation"
+        ]
+        == "closed"
+    )
+    assert len(github.comments) == earlier_comments + 1
+    assert "first-audit" in github.comments[-1]["body"]
+    assert github.issues[0]["body"] == original_body
+
+
+def test_unavailable_comment_history_cannot_post_or_close():
+    github = GitHub()
+    ISSUE["update_issue"]("owner/site", report(), "run", github.request)
+    original = copy.deepcopy(github.issues[0])
+
+    def request(method, path, payload=None):
+        if "/comments?" in path:
+            return {"message": "Comments unavailable"}
+        return github.request(method, path, payload)
+
+    with pytest.raises(ValueError, match="valid issue comments"):
+        ISSUE["update_issue"](
+            "owner/site",
+            {"schema_version": 1, "complete": True, "patches": []},
+            "run",
+            request,
+        )
+    assert github.issues[0] == original and github.comments == []
+
+
+def test_human_resolution_marker_cannot_suppress_bot_comment():
+    github = GitHub()
+    ISSUE["update_issue"]("owner/site", report(), "run", github.request)
+    healthy = {"schema_version": 1, "complete": True, "patches": []}
+    ISSUE["update_issue"]("owner/site", healthy, "audit", github.request)
+    github.comments[0]["user"] = {"login": "contributor", "type": "User"}
+    github.issues[0]["state"] = "open"
+    ISSUE["update_issue"]("owner/site", healthy, "retry", github.request)
+    assert len(github.comments) == 2 and "retry" in github.comments[-1]["body"]
+
+
+def test_new_findings_get_their_own_resolution_comment():
+    github = GitHub()
+    healthy = {"schema_version": 1, "complete": True, "patches": []}
+    ISSUE["update_issue"]("owner/site", report(), "first-finding", github.request)
+    ISSUE["update_issue"]("owner/site", healthy, "first-resolution", github.request)
+    ISSUE["update_issue"]("owner/site", report(), "later-finding", github.request)
+    ISSUE["update_issue"]("owner/site", healthy, "later-resolution", github.request)
+    assert len(github.comments) == 2
+    assert "later-resolution" in github.comments[-1]["body"]
+
+
+def test_resolution_with_remaining_assertions_explains_status_without_claiming_fixed():
+    github = GitHub()
+    ISSUE["update_issue"]("owner/site", report(), "run", github.request)
+    original_body = github.issues[0]["body"]
+    ISSUE["update_issue"]("owner/site", report("no-fix"), "new-run", github.request)
+    assert github.issues[0]["body"] == original_body
+    assert "No local patch declarations remain" not in github.comments[0]["body"]
+    assert ID in github.comments[0]["body"]
 
 
 def test_unknown_official_fix_availability_cannot_close_an_issue():
