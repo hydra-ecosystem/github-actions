@@ -179,6 +179,7 @@ def check(node, manager, version):
             maintenance_mode="security-only",
         )
         assert validation["passed"], report
+        assert not validation["audit_errors"], report
         assert "Project checks: passed." in report, report
         assert all(
             (project / name).read_bytes() == data for name, data in before.items()

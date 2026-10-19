@@ -1,0 +1,7 @@
+name: Report official fixes for local patches
+description: Maintain one issue without modifying patches or executing project code.
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/local_patch_issue.py" --report "$RUNNER_TEMP/node-audit-local-patches/node-audit-local-patches.json"

@@ -61,3 +61,16 @@ jobs:
       uses: $/node/configuration-issue
       env:
         GH_TOKEN: ${{ github.token }}
+    - name: Read local patch status from this run
+      if: ${{ always() && !cancelled() }}
+      id: local-patches
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: node-audit-local-patches
+        path: ${{ runner.temp }}/node-audit-local-patches
+    - name: Maintain the local patch notification issue
+      if: ${{ always() && !cancelled() && steps.local-patches.outcome == 'success' }}
+      uses: $/node/local-patch-issue
+      env:
+        GH_TOKEN: ${{ github.token }}

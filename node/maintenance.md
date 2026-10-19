@@ -32,6 +32,14 @@ type. Security repairs explicitly disable force mode, including inherited
 `force=true` settings. These overrides apply to audit and repair commands;
 project validation still uses the project's install settings.
 
+For pnpm, audit commands override advisory-ignore lists without rewriting them.
+This keeps registry evidence complete while preserving project policy. A
+`localPatches` entry records a maintainer's assertion about an advisory, with
+an optional comment. Affected packages and versions come from audit and lockfile
+evidence. It does not prove patch application or security effectiveness, remove
+raw findings, or count as a confirmed security fix. See
+[declaring local patches](../docs/node-maintenance.md#local-security-patches).
+
 Upgrade audits attempt security fixes first, then routine stable upgrades.
 `maintenance.upgradeScope` limits routine **direct** upgrades to `patch`, `minor`
 (including patches), or `major` (the default, including both). Restricted scopes
@@ -69,7 +77,10 @@ the next PR. Nothing merges automatically.
 
 The title describes dependency updates and confirmed security fixes. For example,
 **Node: 9 routine dependency updates, no security fixes** identifies routine work.
-If audit evidence is unavailable, the title says **security fixes unconfirmed**.
+If initial or final audit evidence is unavailable or incomplete, the run fails
+and skips publication. The report identifies the cause and retains the separate
+frozen-install and project-check results. Its summary and report artifact remain
+available after failure; passing project checks do not make the audit complete.
 The report leads with proposed versions and validation results. Routine-only
 headlines omit unrelated security counts. Existing blocked findings with unchanged
 audit evidence appear as neutral background, with severity and constraints in
@@ -79,6 +90,13 @@ Reports retain unresolved findings, pin decisions, validation failures, changed
 locked version sets, and candidate dependency-file SHA-256 hashes. Grouped logs
 retain successful and failed command output, including warnings.
 
+For declared local patches, reports also retain the advisory, inferred package/version,
+optional maintainer comment, and verified official-fix availability in the
+`node-audit-local-patches` artifact. A separate reporter updates one bot-owned
+**Node local patches: official fixes available** issue when a newer stable fixed
+release is verified. It never removes a patch or claims the release is compatible
+with project constraints. Missing evidence cannot close that notification.
+
 | Rerun result | Publisher behavior |
 | --- | --- |
 | Changed dependency proposal | Updates the existing PR and branch. |
@@ -86,6 +104,7 @@ retain successful and failed command output, including warnings.
 | Same proposal with new report findings | Updates the body without another dependency commit. |
 | Same proposal with an outdated title | Corrects the title without rewriting the report or pushing a commit. |
 | Retained proposal with failed installation or checks | Publishes or updates a draft and fails the workflow. |
+| Initial or final security audit unavailable or incomplete | Fails the audit and skips publication; retains the diagnostic summary and report artifact. |
 | Successful rerun of an existing draft | Leaves it as a draft for human review. |
 | No qualifying dependency changes | Creates no PR and leaves an existing branch and report unchanged. Read the new run summary or artifacts. |
 

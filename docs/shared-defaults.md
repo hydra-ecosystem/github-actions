@@ -123,6 +123,8 @@ policy, if used, must satisfy those settings.
 Directory, validation script, dependency declarations, security exceptions,
 deployment, and credentials remain local. They are not inherited. Shared
 constraints are checked against declarations; they never rewrite them.
+`localPatches` declarations are also project-local and never inherited; see
+[local security patches](node-maintenance.md#local-security-patches).
 
 ## Use another project as the authoritative source
 
