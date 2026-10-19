@@ -96,6 +96,9 @@ optional maintainer comment, and verified official-fix availability in the
 **Node local patches: official fixes available** issue when a newer stable fixed
 release is verified. It never removes a patch or claims the release is compatible
 with project constraints. Missing evidence cannot close that notification.
+When a complete check clears the notification, the reporter preserves the issue
+body, adds a resolution comment linking to the verification run, and closes it.
+Further healthy runs leave the closed issue unchanged.
 
 | Rerun result | Publisher behavior |
 | --- | --- |
