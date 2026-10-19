@@ -1394,7 +1394,14 @@ def test_info_advisory_is_reported_and_fix_attempt_includes_info(
     data = audit(pnpm_project)
     audit_module["fix_security"](pnpm_project, float("inf"), before=data)
     assert commands[:2] == [
-        ["audit", "--json", "--audit-level", "info"],
+        [
+            "audit",
+            "--json",
+            "--audit-level",
+            "info",
+            '--config.audit={"ignore":[]}',
+            '--config.auditConfig={"ignoreGhsas":[]}',
+        ],
         ["audit", "--fix=update", "--audit-level", "info", "--ignore-scripts"],
     ]
     resolution = next(args for args in commands[2:] if args[0] == "install")

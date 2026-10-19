@@ -40,6 +40,7 @@ def test_reusable_workflows_bind_sibling_actions_to_their_own_commit():
         "$/node/project",
         "$/node/publish",
         "$/node/configuration-issue",
+        "$/node/local-patch-issue",
     }
 
 
