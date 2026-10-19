@@ -3,9 +3,12 @@
 import base64
 import copy
 import hashlib
+import io
 import json
 import runpy
 import subprocess
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event, Lock
@@ -882,6 +885,58 @@ def test_api_token_stays_on_fixed_origin_and_redirects_are_disabled(monkeypatch)
         FLEET["GitHub"]("test-token").get("repos/owner/project")
     assert urllib.parse.urlsplit(observed[0].full_url).netloc == "api.github.com"
     assert observed[0].get_header("Authorization") == "Bearer test-token"
+
+
+@pytest.mark.parametrize("central_error", [None, 403])
+def test_public_workflow_reads_do_not_inherit_private_monitoring_token(
+    monkeypatch, central_error
+):
+    server = GitHub("npm")
+    observed = []
+
+    class Opener:
+        def open(self, request, timeout):
+            path = urlparse(request.full_url).path.lstrip("/")
+            if urlparse(request.full_url).query:
+                path += "?" + urlparse(request.full_url).query
+            authorization = request.get_header("Authorization")
+            observed.append((path, authorization))
+            if path.startswith("repos/owner/actions"):
+                # Reproduce an organization rejecting an otherwise valid PAT.
+                if authorization or central_error:
+                    raise urllib.error.HTTPError(
+                        request.full_url, 403, "organization policy", {}, None
+                    )
+            else:
+                # Inventory, project files and Actions state still need the PAT.
+                assert authorization == "Bearer test-token"
+            return io.BytesIO(json.dumps(server.get(path)).encode())
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda handler: Opener())
+    github = FLEET["GitHub"]("test-token")
+    github.read_defaults = server.public
+    source = {
+        "repository": "owner/settings",
+        "path": "defaults/repos.json",
+        "ref": "main",
+    }
+    report = FLEET["check_fleet"](github, source)
+    result = report["results"][0]
+    assert result["status"] == ("unverified" if central_error else "ok")
+    central_reads = [
+        item for item in observed if item[0].startswith("repos/owner/actions")
+    ]
+    assert central_reads and all(auth is None for _, auth in central_reads)
+    if central_error:
+        assert "HTTP 403" in result["diagnostic"]
+        assert len(central_reads) == 1  # No retry with the private credential.
+    else:
+        assert any("git/blobs/" in path for path, _ in central_reads)
+        assert any("actions/workflows/" in path for path, _ in observed)
+        # Repeated installations share the unauthenticated pinned snapshot.
+        before = len(observed)
+        assert FLEET["check_fleet"](github, source)["status"] == "ok"
+        assert len(observed) == before
 
 
 def test_pinned_workflow_must_support_the_resolved_toolchain():
