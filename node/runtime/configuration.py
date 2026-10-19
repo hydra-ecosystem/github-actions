@@ -9,11 +9,12 @@ import urllib.request
 from pathlib import Path
 
 SCHEDULING = runpy.run_path(str(Path(__file__).with_name("scheduling.py")))
+LOCAL_PATCHES = runpy.run_path(str(Path(__file__).with_name("local_patches.py")))
 
 MAX_BYTES = 65536
 MAX_SOURCES = 8
 SHARED_KEYS = {"toolchain", "maintenance", "minimumReleaseAgeDays", "schedule"}
-LOCAL_KEYS = {"directory", "validationScript"}
+LOCAL_KEYS = {"directory", "validationScript", "localPatches"}
 
 
 def json_object(data, location, max_bytes=MAX_BYTES):
@@ -74,6 +75,8 @@ def validate_settings(config, location):
     unknown = set(config) - SHARED_KEYS - LOCAL_KEYS - {"defaults"}
     if unknown:
         raise ValueError(f"{location}: unknown configuration fields: {sorted(unknown)}")
+    if "localPatches" in config:
+        LOCAL_PATCHES["validate_declarations"](config["localPatches"])
     if "schedule" in config:
         SCHEDULING["validate_schedule"](config["schedule"])
     if "defaults" in config:

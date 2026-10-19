@@ -355,19 +355,36 @@ def test_snapshot_rejects_mixed_package_managers(request, project_name, other_lo
 
 
 @pytest.mark.parametrize("rule", ["audit", "auditConfig"])
-def test_pnpm_audit_refuses_advisory_ignore_rules(pnpm_project, monkeypatch, rule):
+def test_pnpm_audit_overrides_ignore_rules_without_rewriting_them(
+    pnpm_project, monkeypatch, rule
+):
     workspace = pnpm_project / "pnpm-workspace.yaml"
     policy = yaml.safe_load(workspace.read_text())
     policy[rule] = (
         {"ignore": [123]} if rule == "audit" else {"ignoreGhsas": ["GHSA-example"]}
     )
     workspace.write_text(yaml.safe_dump(policy))
+    original = workspace.read_bytes()
+
+    def invoke(command, **kwargs):
+        assert '--config.audit={"ignore":[]}' in command
+        assert '--config.auditConfig={"ignoreGhsas":[]}' in command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {"metadata": {"vulnerabilities": {"total": 0}}, "advisories": {}}
+            ),
+            "",
+        )
+
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *args, **kwargs: pytest.fail("audit must not run with hidden findings"),
+        invoke,
     )
-    assert "advisory-ignore rules would hide dependency findings" in audit(pnpm_project)
+    assert isinstance(audit(pnpm_project), dict)
+    assert workspace.read_bytes() == original
 
 
 @pytest.mark.parametrize(

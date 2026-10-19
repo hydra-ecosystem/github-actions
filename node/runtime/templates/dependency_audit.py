@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import re
+import runpy
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import yaml
+
+LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
@@ -573,15 +576,14 @@ def counts_match_details(
 def audit(directory: Path, *, deadline: float | None = None) -> dict | str:
     package_manager = manager(directory)
     if package_manager == "pnpm":
-        policy = yaml.safe_load((directory / "pnpm-workspace.yaml").read_bytes())
-        if policy.get("audit", {}).get("ignore") or policy.get("auditConfig", {}).get(
-            "ignoreGhsas"
-        ):
-            return (
-                "Audit unavailable: pnpm advisory-ignore rules would hide dependency "
-                "findings; manual review required."
-            )
-        flags = ["--audit-level", "info"]
+        # Audit all advisories without rewriting the project's ignore decisions.
+        # Override whole objects: dotted CLI keys do not clear YAML ignore lists.
+        flags = [
+            "--audit-level",
+            "info",
+            '--config.audit={"ignore":[]}',
+            '--config.auditConfig={"ignoreGhsas":[]}',
+        ]
     else:
         # CLI includes override project, user and environment omission settings.
         flags = ["--audit", "--package-lock-only", *NPM_AUDIT_INCLUDES]
@@ -2623,6 +2625,7 @@ def prepare(
     minimum_release_age_days=10,
     maintenance_mode="security-and-maintenance",
     upgrade_scope="major",
+    local_patches=None,
 ) -> str:
     # Leave time in the 60-minute job to write and upload a partial report.
     deadline = time.monotonic() + 45 * 60
@@ -2647,6 +2650,7 @@ def prepare(
         raise ValueError(
             "Valid manifest, one deployment lockfile and package-manager policy are required"
         )
+    declared_patches = LOCAL_PATCHES["validate_declarations"](local_patches or [])
     scripts = initial_snapshot[2].get("scripts", {})
     if (
         not isinstance(validation_script, str)
@@ -2991,8 +2995,91 @@ def prepare(
             "Discarded dependency changes because final security evidence was unavailable or no longer confirmed a fix."
         )
     after_lock = after_snapshot[3]
+    audit_errors = [
+        f"{phase}: {evidence}"
+        for phase, evidence in (("Initial audit", before), ("Final audit", after))
+        if isinstance(evidence, str)
+    ]
+
+    def published_patch_versions(specifier, *, all_versions=False):
+        key = ("local-patch", specifier, all_versions)
+        if key not in cache:
+            snapshot = valid_snapshot(directory)
+            result = run(
+                directory,
+                "view",
+                specifier,
+                "versions" if all_versions else "version",
+                "--json",
+                deadline=deadline,
+            )
+            if snapshot is None or restore_invalid_state(
+                directory, snapshot, notes, "Local patch metadata lookup", frozen=True
+            ):
+                cache[key] = None
+            else:
+                try:
+                    data = json.loads(result.stdout)
+                except ValueError:
+                    data = None
+                error = data.get("error") if isinstance(data, dict) else None
+                if (
+                    result.returncode == 1
+                    and isinstance(error, dict)
+                    and error.get("code")
+                    in {
+                        "ERR_PNPM_NO_MATCHING_VERSION",
+                    }
+                ):
+                    cache[key] = set()
+                elif (
+                    result.returncode == 1
+                    and isinstance(error, dict)
+                    and error.get("code") == "E404"
+                ):
+                    summary = " ".join(
+                        str(error.get(field, ""))
+                        for field in ("summary", "detail", "message")
+                    )
+                    cache[key] = (
+                        set()
+                        if not all_versions
+                        and re.search(r"\bNo match found for version\b", summary)
+                        else None
+                    )
+                elif (
+                    isinstance(error, dict)
+                    and error.get("code") == "ERR_PNPM_PACKAGE_NOT_FOUND"
+                ):
+                    cache[key] = None
+                else:
+                    values = [data] if isinstance(data, str) else data
+                    cache[key] = (
+                        {
+                            v
+                            for v in values
+                            if re.fullmatch(
+                                r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", v
+                            )
+                        }
+                        if result.returncode == 0
+                        and isinstance(values, list)
+                        and all(isinstance(v, str) for v in values)
+                        else None
+                    )
+        return cache[key]
+
+    patch_report = LOCAL_PATCHES["assess"](
+        declared_patches,
+        before,
+        after,
+        published_patch_versions,
+        initial_snapshot[3] if isinstance(before, dict) else after_snapshot[3],
+    )
     if validation is not None:
         validation["passed"] = check_status == "Passed."
+        validation["audit_errors"] = audit_errors
+        validation["local_patches"] = patch_report
     fingerprints = "\n".join(
         f"- `{name}`: `{hashlib.sha256(content).hexdigest()}`"
         for name, content in {
@@ -3163,11 +3250,22 @@ def prepare(
     )
     report = (
         f"**{proposal_summary} · Validation {'passed' if check_status == 'Passed.' else 'failed or unavailable'}**\n\n"
-        f"## Proposed dependency changes\n\n"
-        f"{proposed_changes}\n\n"
-        f"## Validation\n\n"
-        f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
-        f"- Project checks: {check_status[0].lower() + check_status[1:]}\n\n"
+        + (
+            "## Security audit incomplete\n\n"
+            "This run fails because complete before/after security evidence is unavailable. "
+            "Project validation results are separate.\n\n"
+            + "\n".join(f"- {error}" for error in audit_errors)
+            + "\n\n"
+            if audit_errors
+            else ""
+        )
+        + (
+            f"## Proposed dependency changes\n\n"
+            f"{proposed_changes}\n\n"
+            f"## Validation\n\n"
+            f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
+            f"- Project checks: {check_status[0].lower() + check_status[1:]}\n\n"
+        )
         + (
             f"## Existing security findings\n\n{remaining_count} {remaining_unit} {'is' if remaining_count == 1 else 'are'} blocked, unchanged by this PR.\n\n"
             if blocked_findings
@@ -3176,6 +3274,7 @@ def prepare(
     )
     if isinstance(after, str):
         report += f"{after}\n\n"
+    report += LOCAL_PATCHES["render"](patch_report)
     if initial_ids is not None and remaining_ids is not None:
         new_count = len(new_ids)
         if new_count:
@@ -3263,6 +3362,8 @@ def main() -> None:
         type=Path,
         help="Write machine-readable validation status for the publisher",
     )
+    parser.add_argument("--resolved-config", type=Path)
+    parser.add_argument("--local-patches-report", type=Path)
     args = parser.parse_args()
     directory = Path(args.directory)
     if (
@@ -3277,6 +3378,18 @@ def main() -> None:
         )
     validation: dict = {}
     try:
+        patches = []
+        if args.resolved_config is not None:
+            if not args.resolved_config.is_file():
+                raise ValueError("Resolved configuration snapshot is missing")
+            project = runpy.run_path(str(Path(__file__).parents[1] / "project.py"))
+            selected, _ = project["resolve_for_run"](
+                Path.cwd().resolve(), args.resolved_config, []
+            )
+            if selected != directory.resolve():
+                raise ValueError("Selected directory differs from the resolved project")
+            resolved = json.loads(args.resolved_config.read_bytes())
+            patches = resolved["configuration"].get("localPatches", [])
         report = prepare(
             directory,
             validation=validation,
@@ -3284,14 +3397,38 @@ def main() -> None:
             minimum_release_age_days=args.minimum_release_age_days,
             maintenance_mode=args.maintenance_mode,
             upgrade_scope=args.upgrade_scope,
+            local_patches=patches,
         )
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         parser.error(str(error))
+    if args.local_patches_report is not None:
+        try:
+            local_patches_report = LOCAL_PATCHES["serialize_report"](
+                validation["local_patches"]
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        local_patches_report = None
     args.report.write_text(report)
+    if local_patches_report is not None:
+        args.local_patches_report.write_bytes(local_patches_report)
     if args.github_output is not None:
         with args.github_output.open("a") as output:
             output.write(f"validation_passed={str(validation['passed']).lower()}\n")
     print(report)
+    if validation["audit_errors"]:
+        print(
+            "::error title=Node security audit incomplete::Complete before/after "
+            "security evidence is unavailable. See the retained report for the cause; "
+            "project validation results are separate."
+        )
+        parser.exit(
+            1,
+            "Security audit incomplete: "
+            + "; ".join(validation["audit_errors"])
+            + "\n",
+        )
 
 
 if __name__ == "__main__":
