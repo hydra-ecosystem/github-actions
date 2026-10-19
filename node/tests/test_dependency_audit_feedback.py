@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -64,6 +66,128 @@ def test_cli_exports_validation_status_without_preventing_report_publication(
     assert report.exists()
     assert output.read_text() == (
         f"existing=value\nvalidation_passed={'true' if build == 0 else 'false'}\n"
+    )
+
+
+@pytest.mark.parametrize("missing", ["initial", "final", "both"])
+def test_cli_fails_incomplete_audit_but_retains_successful_project_checks(
+    npm_project, monkeypatch, capsys, missing
+):
+    fake_npm(monkeypatch)
+    original_audit = audit_module["audit"]
+    calls = 0
+
+    def evidence(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        phase = "initial" if calls == 1 else "final"
+        if missing in (phase, "both"):
+            return f"Audit unavailable: {phase} registry response is incomplete."
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setitem(audit_module["prepare"].__globals__, "audit", evidence)
+    monkeypatch.chdir(npm_project.parent)
+    report = npm_project / "report.md"
+    output = npm_project / "github-output"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dependency_audit.py",
+            "--directory",
+            npm_project.name,
+            "--maintenance-mode",
+            "security-only",
+            "--report",
+            str(report),
+            "--github-output",
+            str(output),
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        audit_module["main"]()
+    assert error.value.code == 1
+    assert calls == 2
+    assert "- Project checks: passed." in report.read_text()
+    assert "Security audit incomplete" in report.read_text()
+    assert output.read_text() == "validation_passed=true\n"
+    assert "registry response is incomplete" in capsys.readouterr().err
+
+
+def test_cli_fails_unavailable_pnpm_evidence_without_rewriting_project_policy(
+    pnpm_project, monkeypatch
+):
+    workspace = pnpm_project / "pnpm-workspace.yaml"
+    policy = yaml.safe_load(workspace.read_bytes())
+    policy["auditConfig"] = {"ignoreGhsas": ["GHSA-example"]}
+    workspace.write_text(yaml.safe_dump(policy))
+    original = workspace.read_bytes()
+    module = audit_module["prepare"].__globals__
+    monkeypatch.setitem(
+        module,
+        "fix_security",
+        lambda *a, **kw: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setitem(
+        module, "run", lambda *a, **kw: subprocess.CompletedProcess([], 0, "", "")
+    )
+    monkeypatch.chdir(pnpm_project.parent)
+    report = pnpm_project / "report.md"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dependency_audit.py",
+            "--directory",
+            pnpm_project.name,
+            "--maintenance-mode",
+            "security-only",
+            "--report",
+            str(report),
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        audit_module["main"]()
+    assert error.value.code == 1
+    assert workspace.read_bytes() == original
+    assert "Audit unavailable" in report.read_text()
+    assert "- Project checks: passed." in report.read_text()
+
+
+@pytest.mark.parametrize("report_exists", [False, True])
+def test_action_retains_incomplete_audit_summary_and_artifact(tmp_path, report_exists):
+    action = yaml.safe_load(
+        (Path(__file__).parents[1] / "audit/action.yml").read_text()
+    )
+    steps = action["runs"]["steps"]
+    summary = next(
+        step
+        for step in steps
+        if step.get("name", "").startswith("Retain the audit summary")
+    )
+    artifact = next(
+        step
+        for step in steps
+        if step.get("with", {}).get("name") == "dependency-audit-report"
+    )
+    for step in (summary, artifact):
+        assert step["if"] == "${{ always() && !cancelled() }}"
+    assert artifact["with"]["if-no-files-found"] == "ignore"
+    text = "Security audit incomplete.\nProject checks passed.\n$(never-execute)\n"
+    if report_exists:
+        (tmp_path / "dependency-audit-pr.md").write_text(text)
+    destination = tmp_path / "summary.md"
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", summary["run"]],
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(destination),
+        },
+        check=True,
+    )
+    assert (
+        destination.read_text() == text if report_exists else not destination.exists()
     )
 
 

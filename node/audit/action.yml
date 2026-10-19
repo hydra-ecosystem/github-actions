@@ -65,10 +65,17 @@ runs:
       --validation-script "$NODE_AUDIT_VALIDATION_SCRIPT" --maintenance-mode "$NODE_AUDIT_MAINTENANCE_MODE"
       --upgrade-scope "$NODE_AUDIT_UPGRADE_SCOPE"
       --minimum-release-age-days "$NODE_AUDIT_MINIMUM_RELEASE_AGE_DAYS"
-
-      cat "$RUNNER_TEMP/dependency-audit-pr.md" >> "$GITHUB_STEP_SUMMARY"
+      --resolved-config "$RUNNER_TEMP/node-audit-resolved-config.json"
+      --local-patches-report "$RUNNER_TEMP/node-audit-local-patches.json"
 
       '
+    shell: bash
+  - name: Retain the audit summary even when the audit fails
+    if: ${{ always() && !cancelled() }}
+    run: |
+      if [ -f "$RUNNER_TEMP/dependency-audit-pr.md" ]; then
+        cat "$RUNNER_TEMP/dependency-audit-pr.md" >> "$GITHUB_STEP_SUMMARY"
+      fi
     shell: bash
   - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
@@ -84,7 +91,15 @@ runs:
 
         '
   - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    if: ${{ always() && !cancelled() }}
     with:
       name: dependency-audit-report
-      if-no-files-found: error
+      if-no-files-found: ignore
       path: ${{ runner.temp }}/dependency-audit-pr.md
+  - name: Retain local patch status for the issue reporter
+    if: ${{ always() && !cancelled() }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: node-audit-local-patches
+      if-no-files-found: ignore
+      path: ${{ runner.temp }}/node-audit-local-patches.json

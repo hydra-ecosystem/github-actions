@@ -249,6 +249,7 @@ installation, validation, and the audit result:
 | --- | --- |
 | Validated dependency changes | Opens or updates the single maintenance PR. |
 | Dependency changes with failed installation or checks | Retains a draft proposal when possible and fails the workflow. |
+| Incomplete or unavailable security audit | Fails the run and skips publication, even if project checks pass; retains the diagnostic summary and report artifact. |
 | No dependency changes | Creates no PR and leaves any existing proposal untouched; read the current run summary or report artifact. |
 | Invalid configuration | Stops before dependency changes and updates one reusable configuration issue. Successful preflight closes it. |
 
@@ -277,6 +278,7 @@ See the [tested versions](../node/runtime/toolchain.json).
 | Setting | Behavior |
 | --- | --- |
 | `validationScript` | Existing nonempty package script; default `"build"`. Names start with a letter or digit and contain only letters, digits, `:`, `_`, `.`, or `-`. |
+| `localPatches` | Project-local declarations identifying advisories mitigated by local patches. These are maintainer assertions, never inherited or counted as independently confirmed security fixes. See [local patches](#local-security-patches). |
 | `minimumReleaseAgeDays` | Minimum release cooldown in days; nonnegative integer, default `10`. pnpm workspace policy must be at least this strict. |
 | `maintenance.mode` | `"security-only"` or `"security-and-maintenance"`. A schedule object defaults to security-only unless a mode is supplied locally or inherited. |
 | `maintenance.upgradeScope` | Maximum routine direct upgrade level: `"patch"`, `"minor"` including patches, or `"major"` including both (default). Security fixes are handled separately. |
@@ -305,6 +307,44 @@ PR require approval by a user with write access. An App token avoids that prompt
 subject to the repository's other policies. The maintenance run already performs
 the frozen install and selected project checks; neither authentication mode waits
 for additional PR CI. See [GitHub's token behavior](https://docs.github.com/en/actions/concepts/security/github_token).
+
+## Local security patches
+
+Record a maintainer assertion in `.github/node-maintenance.json` using an advisory
+ID alone, or `[advisory, comment]` when you want to add context:
+
+```json
+{
+  "localPatches": [
+    "GHSA-5p2g-fcmc-qvqq",
+    ["GHSA-w3rx-r6r6-pgpr", "Covered by regression tests."]
+  ]
+}
+```
+
+Merge this field into the existing configuration. The optional comment is a
+single-line string of at most 2048 characters. Up to 32 distinct advisories are
+supported. Assertions stay local to this repository; they are not inherited.
+Package names and affected versions come from audit and lockfile evidence.
+
+This records your assertion; the Action does not inspect, apply, or certify
+arbitrary patches. Raw advisory findings stay visible and assertions never count
+as confirmed security fixes. pnpm ignore rules stay unchanged while audits collect
+the complete findings. An assertion whose advisory is absent from a complete
+audit remains recorded as **not reported**, rather than being certified fixed.
+
+When a newer stable official fix is verified, one **Node local patches: official
+fixes available** issue is created, updated, or reopened for the repository.
+Availability does not prove compatibility or release-cooldown eligibility. Review
+the upstream fix and everything your patch changes before upgrading, removing the
+patch and obsolete assertion, and rerunning. **Patches are never removed automatically.**
+A complete check with no remaining notifications closes the issue; unavailable
+evidence does not close it. The reporter uses the existing `issues: write`
+permission without checking out or executing project code.
+
+Use a workflow revision whose `node/contract.json` includes `local_patches`
+support. Update both caller pins together; older version-6 revisions do not
+accept `localPatches`.
 
 ## Update or migrate an installation
 

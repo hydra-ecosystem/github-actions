@@ -174,6 +174,30 @@ def test_healthy_fleet_without_running_project_commands(monkeypatch, manager):
     assert all(call.startswith("repos/") for call in github.calls)
 
 
+@pytest.mark.parametrize("failure", [None, "old-pin"])
+def test_fleet_verifies_compact_patch_assertions_and_pinned_support(
+    monkeypatch, failure
+):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("Fleet checks execute no project commands"),
+    )
+    github = GitHub()
+    files = github.repos["owner/project"]
+    config = json.loads(files[".github/node-maintenance.json"])
+    config["localPatches"] = ["GHSA-2345-6789-cfgh"]
+    files[".github/node-maintenance.json"] = data(config)
+    if failure == "old-pin":
+        contract = json.loads(github.repos["owner/actions"]["node/contract.json"])
+        contract.pop("local_patches")
+        github.repos["owner/actions"]["node/contract.json"] = data(contract)
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == ("ok" if failure is None else "failed")
+    if failure == "old-pin":
+        assert "do not support localPatches" in result["diagnostic"]
+
+
 def test_fleet_checks_five_at_a_time_and_retains_order_and_failures(monkeypatch):
     github = GitHub()
     names = [f"owner/project-{number}" for number in range(9)]
