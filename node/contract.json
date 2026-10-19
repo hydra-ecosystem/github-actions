@@ -67,6 +67,13 @@
   ],
   "project_scope": "one standalone package directory and lockfile",
   "validation_script_default": "build",
+  "local_patches": {
+    "config_key": "localPatches",
+    "inherited": false,
+    "assertion": "maintainer-declared, not independently certified",
+    "automatic_patch_removal": false,
+    "notification": "one issue per repository for published official fixes"
+  },
   "breaking_changes": {
     "previous_component": "docusaurus",
     "old_configuration": ".github/docusaurus.json",

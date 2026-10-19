@@ -452,6 +452,13 @@ def check_caller(root, config, selected, github):
         raise ValueError(
             "Pinned workflows must declare the supported Node integration version 6"
         )
+    if (
+        "localPatches" in config
+        and contract.get("local_patches", {}).get("config_key") != "localPatches"
+    ):
+        raise ValueError(
+            "Pinned workflows do not support localPatches; update both workflow pins"
+        )
     toolchain = CONFIGURATION["json_object"](
         source.read("node/runtime/toolchain.json"), "pinned toolchain support"
     ).get("supported", {})

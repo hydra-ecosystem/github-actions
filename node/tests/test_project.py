@@ -108,10 +108,15 @@ def test_reader_cli_output_is_accepted_by_helper_cli_without_network(
     npm_project = environment.read_text().splitlines()[0].removeprefix("NPM_PROJECT=")
 
     audit = runpy.run_path(str(AUDIT))
+
+    def prepared(selected, *, validation, **kwargs):
+        validation.update(passed=True, audit_errors=[])
+        return "mocked report\n"
+
     monkeypatch.setitem(
         audit["main"].__globals__,
         "prepare",
-        lambda selected, **kwargs: "mocked report\n",
+        prepared,
     )
     report = tmp_path / "report.md"
     monkeypatch.chdir(tmp_path)
