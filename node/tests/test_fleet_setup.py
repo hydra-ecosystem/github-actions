@@ -9,6 +9,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event, Lock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
@@ -405,10 +406,20 @@ def test_symlink_and_changed_blob_are_rejected():
 class Issues:
     def __init__(self):
         self.items = []
+        self.calls = []
 
     def request(self, method, path, payload=None):
+        self.calls.append((method, path, copy.deepcopy(payload)))
         if method == "GET":
-            return copy.deepcopy(self.items)
+            query = parse_qs(urlparse(path).query)
+            assert query["state"] == ["all"]
+            assert query["creator"] == ["github-actions[bot]"]
+            assert query["sort"] == ["created"]
+            assert query["direction"] == ["desc"]
+            page = int(query["page"][0])
+            assert query["per_page"] == ["100"]
+            items = sorted(self.items, key=lambda issue: issue["number"], reverse=True)
+            return copy.deepcopy(items[(page - 1) * 100 : page * 100])
         if method == "POST":
             result = {
                 **payload,
@@ -423,7 +434,7 @@ class Issues:
         return self.items[number - 1]
 
 
-def test_one_issue_per_inventory_updates_closes_and_reopens():
+def test_one_issue_per_failure_episode_with_manual_closure_and_recovery():
     github = GitHub()
     issues = Issues()
     report = FLEET["check_fleet"](
@@ -454,15 +465,153 @@ def test_one_issue_per_inventory_updates_closes_and_reopens():
     )
     assert "&#124; extra<br>&#91;link&#93;" in issues.items[0]["body"]
     assert "<summary>Checked revisions</summary>" in issues.items[0]["body"]
+    issues.items[0]["state"] = "closed"
+    assert update() == {"operation": "reopened", "number": 1}
+    report["results"][0]["diagnostic"] = "Different setup failure"
+    assert update() == {"operation": "updated", "number": 1}
     report["status"] = "ok"
     report["results"][0].update(status="ok", diagnostic="Static setup checks passed")
     assert update()["operation"] == "closed"
+    recovered = copy.deepcopy(issues.items[0])
+    assert REPORTER["RESOLVED"] in recovered["body"]
+    assert update() == {"operation": "unchanged", "number": 1}
+    recovered_body = issues.items[0]["body"]
+    issues.items[0]["state"] = "open"
     report["status"] = "unverified"
     report["diagnostic"] = "Access unavailable"
-    assert update()["operation"] == "reopened"
-    assert len(issues.items) == 1
+    assert update() == {"operation": "created", "number": 2}
+    assert issues.items[0]["body"] == recovered_body == recovered["body"]
+    assert update() == {"operation": "unchanged", "number": 2}
     report["inventory"]["path"] = "defaults/other.json"
-    assert update()["operation"] == "created" and len(issues.items) == 2
+    assert update()["operation"] == "created" and len(issues.items) == 3
+
+
+@pytest.fixture
+def fleet_report():
+    return FLEET["check_fleet"](
+        GitHub(),
+        {"repository": "owner/settings", "path": "defaults/repos.json", "ref": "main"},
+    )
+
+
+def test_healthy_fleet_does_not_create_issue_or_rewrite_recovered_history(fleet_report):
+    issues = Issues()
+
+    def update():
+        return REPORTER["update_issue"](
+            "owner/host", fleet_report, "run", issues.request
+        )
+
+    assert update() == {"operation": "unchanged", "number": None}
+    assert all(call[0] == "GET" for call in issues.calls)
+    fleet_report["status"] = "unverified"
+    assert update()["operation"] == "created"
+    fleet_report["status"] = "ok"
+    assert update()["operation"] == "closed"
+    issues.calls.clear()
+    assert update() == {"operation": "unchanged", "number": 1}
+    assert len(issues.calls) == 1 and issues.calls[0][0] == "GET"
+
+
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("healthy", [False, True])
+def test_legacy_issue_is_adopted_until_recovery_is_confirmed(
+    fleet_report, closed, healthy
+):
+    issues = Issues()
+    fleet_report["status"] = "unverified"
+    REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    issue = issues.items[0]
+    issue["body"] = issue["body"].replace(REPORTER["ACTIVE"] + "\n", "")
+    issue["state"] = "closed" if closed else "open"
+    fleet_report["status"] = "ok" if healthy else "unverified"
+    result = REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    assert result == {
+        "operation": "closed" if healthy else "reopened" if closed else "updated",
+        "number": 1,
+    }
+    assert len(issues.items) == 1
+    assert (REPORTER["RESOLVED"] if healthy else REPORTER["ACTIVE"]) in issue["body"]
+
+
+def test_lookup_stops_at_newest_matching_incident_without_scanning_history(
+    fleet_report,
+):
+    issues = Issues()
+    fleet_report["status"] = "unverified"
+    REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    historical = copy.deepcopy(issues.items[0])
+    for number in range(2, 302):
+        issues.items.append({**historical, "number": number, "state": "closed"})
+    # The newest incident wins even with many historical matches. PRs and
+    # user-authored lookalikes cannot take over the reporter's identity.
+    issues.items.extend(
+        [
+            {**historical, "number": 302, "pull_request": {}},
+            {**historical, "number": 303, "user": {"login": "someone", "type": "User"}},
+        ]
+    )
+    issues.calls.clear()
+    result = REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    assert result == {"operation": "reopened", "number": 301}
+    assert [call[0] for call in issues.calls] == ["GET", "PATCH"]
+    assert issues.items[0] == historical
+
+
+def test_lookup_paginates_newer_unrelated_issues(fleet_report):
+    issues = Issues()
+    fleet_report["status"] = "unverified"
+    REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    for number in range(2, 102):
+        issues.items.append({"number": number, "body": "unrelated"})
+    issues.calls.clear()
+    result = REPORTER["update_issue"]("owner/host", fleet_report, "run", issues.request)
+    assert result == {"operation": "unchanged", "number": 1}
+    assert len(issues.calls) == 2
+    assert issues.calls[-1][1].endswith("page=2")
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        ({}, "issue list"),
+        ([None], "invalid issue"),
+        ([{"number": 1, "state": "unknown"}], "invalid marked fleet issue"),
+        ([{"number": True, "state": "open"}], "invalid marked fleet issue"),
+    ],
+)
+def test_lookup_rejects_invalid_api_evidence_without_writes(
+    fleet_report, response, message
+):
+    calls = []
+
+    def request(method, path, payload=None):
+        calls.append(method)
+        if isinstance(response, list) and response[0] is not None:
+            return [
+                {
+                    **response[0],
+                    "body": REPORTER["marker"](fleet_report["inventory"]) + "\nold",
+                    "user": {"login": "github-actions[bot]", "type": "Bot"},
+                }
+            ]
+        return response
+
+    with pytest.raises(ValueError, match=message):
+        REPORTER["update_issue"]("owner/host", fleet_report, "run", request)
+    assert calls == ["GET"]
+
+
+def test_incomplete_lookup_does_not_create_duplicate(fleet_report):
+    calls = []
+
+    def request(method, path, payload=None):
+        calls.append(method)
+        return [{"body": "unrelated"}] * 100
+
+    with pytest.raises(ValueError, match="lookup limit"):
+        REPORTER["update_issue"]("owner/host", fleet_report, "run", request)
+    assert calls == ["GET"] * 100
 
 
 def test_workflow_splits_read_access_and_host_issue_write_access():
@@ -799,5 +948,5 @@ def test_large_fleet_issue_is_bounded_and_retains_member_identity():
         REPORTER["update_issue"]("owner/host", report, run_url, issues.request)[
             "operation"
         ]
-        == "reopened"
+        == "created"
     )
