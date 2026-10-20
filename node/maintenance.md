@@ -168,5 +168,6 @@ to the built-in token. See [credential setup and PR CI behavior](../docs/node-ma
 
 The workflow does not add CI-skip markers. Consumer CI follows its configured
 triggers and token rules. Neither authentication mode waits for additional PR CI
-or merges the PR. Consumers call both shared workflows at the same full commit
-SHA; update both pins together using the [update instructions](../docs/node-maintenance.md#update-or-migrate-an-installation).
+or merges the PR. Consumers call both shared workflows at the same major release
+tag, such as `@v1`, or the same full commit SHA. Change both references together
+using the [update instructions](../docs/node-maintenance.md#update-or-migrate-an-installation).

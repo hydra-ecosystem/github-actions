@@ -53,7 +53,8 @@ In the [setup guide's caller](node-maintenance.md#3-add-the-caller-workflow), us
         - upgrades
 ```
 
-Keep the remaining caller jobs, permissions, SHA pins, and audit input forwarding:
+Keep the remaining caller jobs, permissions, workflow references (`@v1` or matching
+full commit SHAs), and audit input forwarding:
 
 ```yaml
 with:
