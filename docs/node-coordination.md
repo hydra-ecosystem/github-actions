@@ -14,10 +14,10 @@ Keep the project configuration and prerequisites from the
 [setup guide](node-maintenance.md). This is an opt-in caller change; existing
 two-job callers retain their combined-PR behavior.
 
-This interface is not in the currently published `v1` release. Until it is
-released, select a reviewed full commit SHA containing
-`.github/workflows/node-maintenance.yml`. After a compatible release, `@v1` can
-be used. Do not point this new caller at an older release that lacks the workflow.
+The coordinated caller is available in `@v1`. Use that tag to receive
+compatible updates, or select a reviewed full commit SHA containing
+`.github/workflows/node-maintenance.yml` for an immutable installation.
+Do not point this caller at an older revision that lacks the workflow.
 
 1. Merge or close any existing PR from `maintenance/dependency-audit`. Review
    that proposal before discarding it. The coordinator refuses to proceed while
