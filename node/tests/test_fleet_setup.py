@@ -174,6 +174,79 @@ def test_healthy_fleet_without_running_project_commands(monkeypatch, manager):
     assert all(call.startswith("repos/") for call in github.calls)
 
 
+def test_inventory_major_release_branch_keeps_generic_ref_resolution():
+    github = GitHub()
+    report = FLEET["check_fleet"](
+        github,
+        {"repository": "owner/settings", "path": "defaults/repos.json", "ref": "v1"},
+    )
+    assert report["status"] == "ok"
+    assert report["inventory"]["ref"] == "v1"
+    assert [call for call in github.calls if "owner/settings/commits/" in call] == [
+        "repos/owner/settings/commits/v1"
+    ]
+
+
+@pytest.mark.parametrize("ref", ["v1", "v2", "v123", SHA])
+def test_matching_release_references_are_resolved_once_per_scan(ref):
+    github = GitHub()
+    files = project("npm")
+    path = ".github/workflows/dependency-audit.yml"
+    files[path] = files[path].replace(SHA.encode(), ref.encode())
+    for name in ("owner/one", "owner/two"):
+        github.add(name, files)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda name: FLEET["check_repository"](github, name, SOURCE),
+                ["owner/one", "owner/two"],
+            )
+        )
+    assert [result["status"] for result in results] == ["ok", "ok"]
+    # Explicit tag namespace avoids inspecting a same-named branch instead.
+    resolved = "tags%2F" + ref if ref.startswith("v") else ref
+    calls = [call for call in github.calls if "owner/actions/commits/" in call]
+    assert calls == ["repos/owner/actions/commits/" + resolved]
+
+
+@pytest.mark.parametrize("ref", ["main", "v0", "v01", "v1.2", "V1", "tags/v1"])
+def test_branch_and_malformed_release_references_fail_setup(ref):
+    github = GitHub()
+    path = ".github/workflows/dependency-audit.yml"
+    files = github.repos["owner/project"]
+    files[path] = files[path].replace(SHA.encode(), ref.encode())
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == "failed"
+    assert "same major release tag" in result["diagnostic"]
+
+
+def test_audit_and_publisher_cannot_mix_release_references():
+    github = GitHub()
+    path = ".github/workflows/dependency-audit.yml"
+    files = github.repos["owner/project"]
+    files[path] = files[path].replace(("@" + SHA).encode(), b"@v1", 1)
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == "failed"
+
+
+def test_unavailable_release_tag_is_unverified_without_branch_fallback():
+    github = GitHub()
+    path = ".github/workflows/dependency-audit.yml"
+    files = github.repos["owner/project"]
+    files[path] = files[path].replace(SHA.encode(), b"v1")
+    original = github.get
+
+    def get(path):
+        if path == "repos/owner/actions/commits/tags%2Fv1":
+            raise FLEET["Unverified"]("Release tag unavailable")
+        return original(path)
+
+    github.get = get
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == "unverified"
+    assert "Release tag unavailable" in result["diagnostic"]
+
+
 @pytest.mark.parametrize("failure", [None, "old-pin"])
 def test_fleet_verifies_compact_patch_assertions_and_pinned_support(
     monkeypatch, failure
@@ -671,7 +744,7 @@ def test_workflow_splits_read_access_and_host_issue_write_access():
         if "jobs:" in block
     )
     job = caller["jobs"]["setup"]
-    assert job["uses"].endswith("/node-fleet-check.yml@REVIEWED_FULL_COMMIT_SHA")
+    assert job["uses"].endswith("/node-fleet-check.yml@v1")
     assert set(job["with"]) <= set(workflow["on"]["workflow_call"]["inputs"])
     assert job["permissions"] == {
         "contents": "read",

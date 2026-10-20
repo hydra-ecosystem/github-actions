@@ -91,7 +91,7 @@ def test_setup_guide_uses_the_current_caller_and_standalone_schedule():
         (ROOT / "node/caller.yml")
         .read_text()
         .replace("__CENTRAL_REPOSITORY__", "hydra-ecosystem/github-actions")
-        .replace("__CENTRAL_REVISION__", "REVIEWED_FULL_COMMIT_SHA")
+        .replace("__CENTRAL_REVISION__", "v1")
     )
     schedule = yaml.safe_dump({"schedule": [{"cron": "0 2 * * 1"}]}, sort_keys=False)
     expected = expected.replace(

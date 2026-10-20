@@ -78,15 +78,16 @@ jobs:
       contents: read
       actions: read
       issues: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/node-fleet-check.yml@REVIEWED_FULL_COMMIT_SHA
+    uses: hydra-ecosystem/github-actions/.github/workflows/node-fleet-check.yml@v1
     with:
       inventory-repository: owner/settings
       inventory-path: defaults/node-repositories.json
       inventory-ref: main
 ```
 
-Replace `REVIEWED_FULL_COMMIT_SHA` with a reviewed full SHA that contains
-`node-fleet-check.yml`. Use your inventory location. Enable issues in the host
+Use `@v1` for automatic compatible checker updates, or replace it with a reviewed
+full commit SHA containing `node-fleet-check.yml` for immutable pinning. See
+[workflow releases](workflow-releases.md). Use your inventory location. Enable issues in the host
 repository. Only the host needs issue-write permission; listed repositories do
 not need a new workflow, extra write permission, or an issue opened in them.
 Reports have the host repository's visibility. Keep private-repository inventories
@@ -175,8 +176,8 @@ workflow without opening an issue.
   a compatible `engines.node` range, and an existing validation script.
 - Lockfile format, mixed-lockfile restrictions, and pnpm release cooldown satisfy
   the resolved configuration.
-- The maintenance caller pins audit and publisher workflows from one repository
-  at the same full SHA. That revision declares Node integration version 6 and
+- The maintenance caller uses audit and publisher workflows from one repository
+  at the same major release tag (such as `v1`) or full commit SHA. That revision declares Node integration version 6 and
   contains both reusable workflows and supports the resolved toolchain. It does
   not have to be the latest revision.
 - Caller schedules match resolved policy, including bounds for the supported
@@ -194,7 +195,9 @@ workflow without opening an issue.
 - The maintenance workflow is enabled in GitHub Actions.
 
 Each repository is read at one immutable default-branch commit. Shared defaults
-reads are cached for the scan. Remote files are never executed or imported, and
+reads are cached for the scan. Each workflow release tag is resolved once to an
+immutable commit and tree before its files are checked. A missing or unreadable
+tag cannot receive a passing verdict. Remote files are never executed or imported, and
 symlinks/submodules are rejected for checked files. Files are bounded: inventory
 and ordinary configuration files are at most 64 KiB, lockfiles at most 2 MB;
 truncated or oversized repository trees cannot receive a passing verdict.
