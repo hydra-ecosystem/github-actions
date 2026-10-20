@@ -69,6 +69,10 @@ versions are not downgraded just because they are younger than the cutoff.
 
 ## Reports and PRs
 
+This section describes the legacy two-job caller. The opt-in
+[coordinated caller](../docs/node-coordination.md) uses separate security and
+upgrade branches and can close obsolete proposals after successful refreshes.
+
 All audit kinds use the same `maintenance/dependency-audit` branch and open PR.
 Only the project manifest, lockfile, and required pnpm security exceptions enter
 that PR. Reports remain in the PR body, run summary, and artifacts; they are not
@@ -155,7 +159,8 @@ failures do not create configuration issues. No automatic repair PR is generated
 ## Publication and credentials
 
 The dependency-execution job has only `contents: read` and checkout credentials
-are not persisted. A separate serialized reporter has only `issues: write`,
+are not persisted. A separate serialized reporter has `issues: write` and
+`contents: read` to reject stale coordinated reports,
 reads the current run's configuration artifact, and never checks out project code.
 The publisher has Contents and Pull requests write access. Only it can push the
 maintenance branch and open the PR.

@@ -10,6 +10,10 @@ installations, use the separate [fleet setup checker](node-fleet-setup.md).
 Already using the earlier Docusaurus workflows? Follow the
 [migration checklist](node-migration.md) instead.
 
+For separate security and routine-upgrade proposals with dependency-file-triggered
+validation and refresh, use the [coordinated caller](node-coordination.md).
+The released two-job caller below retains one combined maintenance PR.
+
 ## Supported projects
 
 - One project directory, at the repository root (`"directory": "."`) or in a

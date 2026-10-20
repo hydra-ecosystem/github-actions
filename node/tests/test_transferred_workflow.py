@@ -317,7 +317,7 @@ def test_both_jobs_start_at_the_same_immutable_revision():
             for step in WORKFLOW["jobs"][job]["steps"]
             if step.get("uses", "").startswith("actions/checkout@")
         )
-        assert checkout["with"]["ref"] == "${{ github.sha }}"
+        assert checkout["with"]["ref"] == "${{ inputs.audit-ref || github.sha }}"
     assert (
         VERIFY["env"]["BASE_BRANCH"] == "${{ github.event.repository.default_branch }}"
     )
@@ -357,5 +357,5 @@ def test_dependency_state_check_precedes_artifact_download():
         if step.get("uses", "").startswith("actions/download-artifact@")
     )
     assert verify_index < download_index
-    assert VERIFY["env"]["AUDIT_SHA"] == "${{ github.sha }}"
+    assert VERIFY["env"]["AUDIT_SHA"] == "${{ inputs.audit-ref || github.sha }}"
     assert "git add" not in VERIFY["run"]

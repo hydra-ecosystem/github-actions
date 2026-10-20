@@ -1,0 +1,154 @@
+name: Coordinated Node dependency maintenance
+'on':
+  workflow_call:
+    inputs:
+      audit-kind:
+        type: string
+        default: auto
+      app-client-id:
+        type: string
+        default: ''
+    secrets:
+      app-private-key:
+        required: false
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+      security: ${{ steps.plan.outputs.security }}
+      upgrades: ${{ steps.plan.outputs.upgrades }}
+      security_pr: ${{ steps.plan.outputs.security_pr }}
+      upgrades_pr: ${{ steps.plan.outputs.upgrades_pr }}
+      refresh_only: ${{ steps.plan.outputs.refresh_only }}
+      validate_main: ${{ steps.plan.outputs.validate_main }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+        persist-credentials: false
+        fetch-depth: 0
+    - id: revision
+      run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+    - id: plan
+      uses: $/node/plan
+      with:
+        audit-kind: ${{ inputs.audit-kind }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+  main:
+    needs: plan
+    if: ${{ needs.plan.outputs.validate_main == 'true' }}
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/node-audit.yml
+    with:
+      audit-ref: ${{ needs.plan.outputs.sha }}
+      artifact-prefix: node-main
+      audit-kind: ${{ inputs.audit-kind }}
+      refresh: ${{ github.event_name == 'push' }}
+      operation: validate
+      proposal-kind: main
+  security:
+    needs: plan
+    if: ${{ needs.plan.outputs.security == 'true' }}
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/node-audit.yml
+    with:
+      audit-ref: ${{ needs.plan.outputs.sha }}
+      artifact-prefix: node-security
+      audit-kind: ${{ github.event_name == 'push' && 'security' || inputs.audit-kind }}
+      refresh: ${{ github.event_name == 'push' }}
+      operation: propose
+      proposal-kind: security
+  security-pr:
+    needs:
+    - plan
+    - security
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/node-publish.yml
+    with:
+      validation-passed: ${{ needs.security.outputs.validation_passed }}
+      proposal-complete: ${{ needs.security.outputs.proposal_complete }}
+      audit-ref: ${{ needs.plan.outputs.sha }}
+      artifact-prefix: node-security
+      proposal-kind: security
+      refresh-only: ${{ needs.plan.outputs.refresh_only == 'true' }}
+      expected-pr: ${{ needs.plan.outputs.security_pr }}
+      app-client-id: ${{ inputs.app-client-id }}
+    secrets:
+      app-private-key: ${{ secrets.app-private-key }}
+  upgrades:
+    needs: plan
+    if: ${{ needs.plan.outputs.upgrades == 'true' }}
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/node-audit.yml
+    with:
+      audit-ref: ${{ needs.plan.outputs.sha }}
+      artifact-prefix: node-upgrades
+      audit-kind: ${{ github.event_name == 'push' && 'upgrades' || inputs.audit-kind }}
+      refresh: ${{ github.event_name == 'push' }}
+      operation: propose
+      proposal-kind: upgrades
+  upgrades-pr:
+    needs:
+    - plan
+    - upgrades
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/node-publish.yml
+    with:
+      validation-passed: ${{ needs.upgrades.outputs.validation_passed }}
+      proposal-complete: ${{ needs.upgrades.outputs.proposal_complete }}
+      audit-ref: ${{ needs.plan.outputs.sha }}
+      artifact-prefix: node-upgrades
+      proposal-kind: upgrades
+      refresh-only: ${{ needs.plan.outputs.refresh_only == 'true' }}
+      expected-pr: ${{ needs.plan.outputs.upgrades_pr }}
+      app-client-id: ${{ inputs.app-client-id }}
+    secrets:
+      app-private-key: ${{ secrets.app-private-key }}
+  planning-issue:
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: node-audit-configuration-issue-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+    - name: Refuse stale configuration diagnostics
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        AUDIT_SHA: ${{ needs.plan.outputs.sha }}
+      run: |
+        set -euo pipefail
+        current=$(gh api "repos/$GH_REPO/commits/$BASE_BRANCH" --jq .sha)
+        test "$current" = "$AUDIT_SHA"
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: node-plan-configuration
+        path: ${{ runner.temp }}/node-audit-configuration
+    - uses: $/node/configuration-issue
+      env:
+        GH_TOKEN: ${{ github.token }}

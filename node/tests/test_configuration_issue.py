@@ -219,11 +219,12 @@ def test_reporting_job_is_serialized_and_has_no_consumer_checkout_or_app_key():
     audit = workflow["jobs"]["audit"]
     issue = workflow["jobs"]["configuration-issue"]
     assert audit["permissions"] == {"contents": "read"}
-    assert issue["permissions"] == {"issues": "write"}
+    assert issue["permissions"] == {"issues": "write", "contents": "read"}
     assert issue["needs"] == "audit" and "always()" in issue["if"]
     assert issue["concurrency"] == {
         "group": "node-audit-configuration-issue-${{ github.repository }}",
         "cancel-in-progress": False,
+        "queue": "max",
     }
     assert not any("checkout@" in step.get("uses", "") for step in issue["steps"])
     assert "secrets." not in json.dumps(issue)
@@ -233,7 +234,8 @@ def test_reporting_job_is_serialized_and_has_no_consumer_checkout_or_app_key():
     uploads = [
         step
         for step in steps
-        if step.get("with", {}).get("name") == "node-audit-configuration"
+        if step.get("with", {}).get("name")
+        == "${{ inputs.artifact-prefix || 'node-audit' }}-configuration"
     ]
     assert len(uploads) == 1 and "always()" in uploads[0]["if"]
     upload_index = steps.index(uploads[0])

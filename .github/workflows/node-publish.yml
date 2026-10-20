@@ -9,6 +9,24 @@ name: Publish Node dependency proposal
         required: false
         type: string
         default: ''
+      audit-ref:
+        type: string
+        default: ''
+      artifact-prefix:
+        type: string
+        default: ''
+      proposal-kind:
+        type: string
+        default: legacy
+      refresh-only:
+        type: boolean
+        default: false
+      expected-pr:
+        type: string
+        default: ''
+      proposal-complete:
+        type: string
+        default: 'false'
     secrets:
       app-private-key:
         required: false
@@ -38,46 +56,61 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         token: ${{ steps.app-token.outputs.token || github.token }}
-        ref: ${{ github.sha }}
+        ref: ${{ inputs.audit-ref || github.sha }}
         fetch-depth: 0
     - name: Verify audit dependency state
       env:
-        AUDIT_SHA: ${{ github.sha }}
+        AUDIT_SHA: ${{ inputs.audit-ref || github.sha }}
         BASE_BRANCH: ${{ github.event.repository.default_branch }}
-      run: "set -euo pipefail\ngit fetch --no-tags origin \"$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH\"\
-        \ngit checkout --detach \"refs/remotes/origin/$BASE_BRANCH\"\nif ! git cat-file\
-        \ -e \"${AUDIT_SHA}^{commit}\" 2>/dev/null; then\n  echo \"Triggering audit\
-        \ revision ${AUDIT_SHA} is not available locally; fetching it.\"\n  if ! git\
-        \ fetch --no-tags origin \"$AUDIT_SHA\"; then\n    echo \"::error::Unable\
-        \ to fetch the triggering audit revision; refusing stale publication.\"\n\
-        \    exit 1\n  fi\nfi\nif ! git cat-file -e \"${AUDIT_SHA}^{commit}\" 2>/dev/null;\
-        \ then\n  echo \"::error::The triggering audit revision could not be resolved;\
-        \ refusing publication.\"\n  exit 1\nfi\nif git diff --quiet \"$AUDIT_SHA\"\
-        \ HEAD -- .; then\n  :\nelse\n  comparison_status=$?\n  if [ \"$comparison_status\"\
-        \ -eq 1 ]; then\n    echo \"::error::The default branch repository inputs\
-        \ changed since ${AUDIT_SHA}; rerun the audit from the current default branch.\"\
-        \n  else\n    echo \"::error::Unable to compare default-branch repository\
-        \ inputs with ${AUDIT_SHA}; refusing publication.\"\n  fi\n  exit 1\nfi\n"
+      run: |
+        set -euo pipefail
+        git fetch --no-tags origin "$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+        git checkout --detach "refs/remotes/origin/$BASE_BRANCH"
+        if ! git cat-file -e "${AUDIT_SHA}^{commit}" 2>/dev/null; then
+          echo "Triggering audit revision ${AUDIT_SHA} is not available locally; fetching it."
+          if ! git fetch --no-tags origin "$AUDIT_SHA"; then
+            echo "::error::Unable to fetch the triggering audit revision; refusing stale publication."
+            exit 1
+          fi
+        fi
+        if ! git cat-file -e "${AUDIT_SHA}^{commit}" 2>/dev/null; then
+          echo "::error::The triggering audit revision could not be resolved; refusing publication."
+          exit 1
+        fi
+        if git diff --quiet "$AUDIT_SHA" HEAD -- .; then
+          :
+        else
+          comparison_status=$?
+          if [ "$comparison_status" -eq 1 ]; then
+            echo "::error::The default branch repository inputs changed since ${AUDIT_SHA}; rerun the audit from the current default branch."
+          else
+            echo "::error::Unable to compare default-branch repository inputs with ${AUDIT_SHA}; refusing publication."
+          fi
+          exit 1
+        fi
     - name: Read project configuration
       uses: $/node/project
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: dependency-audit-dependencies
+        name: ${{ inputs.artifact-prefix || 'dependency-audit' }}-dependencies
         path: ${{ env.NPM_PROJECT }}
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: dependency-audit-report
+        name: ${{ inputs.artifact-prefix || 'dependency-audit' }}-report
         path: ${{ runner.temp }}
-    - name: Open or update the umbrella PR
+    - name: Maintain the selected dependency PR
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         GH_REPO: ${{ github.repository }}
         BASE_BRANCH: ${{ github.event.repository.default_branch }}
         PR_BRANCH: maintenance/dependency-audit
         VALIDATION_PASSED: ${{ inputs.validation-passed }}
-        PR_FOOTER: '[Workflow run](${{ github.server_url }}/${{ github.repository
-          }}/actions/runs/${{ github.run_id }})
-
-          '
+        PR_FOOTER: |
+          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        PROPOSAL_KIND: ${{ inputs.proposal-kind }}
+        REFRESH_ONLY: ${{ inputs.refresh-only }}
+        EXPECTED_PR: ${{ inputs.expected-pr }}
+        PROPOSAL_COMPLETE: ${{ inputs.proposal-complete }}
+        AUDIT_SHA: ${{ inputs.audit-ref || github.sha }}
       uses: $/node/publish
     timeout-minutes: 15

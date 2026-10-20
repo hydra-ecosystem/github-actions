@@ -184,6 +184,16 @@ def check(node, manager, version):
         assert all(
             (project / name).read_bytes() == data for name, data in before.items()
         )
+        report = audit["prepare"](
+            directory,
+            validation=validation,
+            validation_script="check",
+            validate_only=True,
+        )
+        assert validation["passed"] and not validation["audit_errors"], report
+        assert all(
+            (project / name).read_bytes() == data for name, data in before.items()
+        ), report
         # A library with no build script also exercises the routine path, including
         # release-time lookup and the native npm publication cutoff.
         report = audit["prepare"](
@@ -206,6 +216,7 @@ def check(node, manager, version):
             "standalone_library": "passed",
             "security_and_upgrades": "passed",
             "frozen_install_and_tests": "passed",
+            "committed_state_validation": "passed without dependency changes",
         }
         if manager == "npm":
             result["inherited_npm_security_policy"] = check_npm_policy(version)

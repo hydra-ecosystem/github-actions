@@ -533,6 +533,7 @@ def main() -> None:
     parser.add_argument("--resolved-config", type=Path)
     parser.add_argument("--configuration-report", type=Path)
     parser.add_argument("--audit-kind", choices=("auto", "security", "upgrades"))
+    parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
     sources = []
     selected = None
@@ -563,6 +564,7 @@ def main() -> None:
                 args.audit_kind,
                 os.environ.get("GITHUB_EVENT_NAME", ""),
                 SCHEDULING["event_payload"](os.environ.get("GITHUB_EVENT_PATH")),
+                refresh=args.refresh,
             )
         if args.verify_runtime:
             verify_runtime(directory, selected)

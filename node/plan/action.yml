@@ -1,0 +1,47 @@
+name: Plan Node maintenance
+description: Select proposal channels and snapshot the default-branch revision without running project code.
+inputs:
+  audit-kind:
+    default: auto
+    description: Select the configured cadence or one manual channel.
+outputs:
+  validate_main:
+    value: ${{ steps.plan.outputs.validate_main }}
+    description: Whether to validate committed dependencies.
+  sha:
+    value: ${{ steps.plan.outputs.sha }}
+    description: Observed default-branch commit.
+  security:
+    value: ${{ steps.plan.outputs.security }}
+    description: Whether to audit the security channel.
+  upgrades:
+    value: ${{ steps.plan.outputs.upgrades }}
+    description: Whether to audit the upgrades channel.
+  security_pr:
+    value: ${{ steps.plan.outputs.security_pr }}
+    description: Original open security PR number, if any.
+  upgrades_pr:
+    value: ${{ steps.plan.outputs.upgrades_pr }}
+    description: Original open upgrades PR number, if any.
+  refresh_only:
+    value: ${{ steps.plan.outputs.refresh_only }}
+    description: Whether publication must only update existing proposals.
+runs:
+  using: composite
+  steps:
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+    with:
+      python-version: '3.13'
+  - run: python -m pip install PyYAML==6.0.3
+    shell: bash
+  - id: plan
+    env:
+      AUDIT_KIND: ${{ inputs.audit-kind }}
+    run: python "$GITHUB_ACTION_PATH/../runtime/coordination.py" --github-output "$GITHUB_OUTPUT" --configuration-report "$RUNNER_TEMP/node-audit-configuration.json"
+    shell: bash
+  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    if: ${{ always() && !cancelled() }}
+    with:
+      name: node-plan-configuration
+      if-no-files-found: ignore
+      path: ${{ runner.temp }}/node-audit-configuration.json

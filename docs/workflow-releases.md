@@ -12,6 +12,12 @@ configuration use a new major tag, such as `v2`, and require a local adoption PR
 Defaults files and local schedules are separate; a workflow release does not
 rewrite them.
 
+The [coordinated caller](node-coordination.md) adds an opt-in interface while
+retaining the existing audit/publisher calls. Its push triggers and separate
+proposal channels require a caller adoption PR; advancing `v1` alone does not
+install them. Release the additive interface before installing a caller that
+references it through `@v1`.
+
 For immutable code, replace both `@v1` references with the same reviewed full
 40-character commit SHA. This gives you control over each code update and
 requires an installation PR to adopt each fix. Read `node/contract.json` and
