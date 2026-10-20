@@ -165,15 +165,16 @@ so its caller needs both cron entries in step 3.
 
 ### 3. Add the caller workflow
 
-Choose a reviewed commit from `hydra-ecosystem/github-actions`. On GitHub, open
-that commit, confirm its [`node/contract.json`](../node/contract.json) declares
-integration version **6**, and copy its full 40-character SHA. Use the contract
-and caller from that same revision.
-
 Create `.github/workflows/dependency-audit.yml` using the following caller.
-Replace **both** `REVIEWED_FULL_COMMIT_SHA` placeholders with your chosen SHA.
-The placeholders avoid prescribing a revision that becomes stale; installed
-workflows must pin an immutable reviewed revision.
+Both workflow calls use `@v1`, a moving release tag. Compatible fixes reach your
+installation without a local workflow edit. Breaking changes use a new major
+release and require an explicit update.
+
+To review every workflow update yourself, replace **both** `v1` references with
+the same reviewed full 40-character commit SHA. That revision must declare Node
+integration version **6** in `node/contract.json`; use its caller template.
+See [workflow releases and immutable pins](workflow-releases.md) for the release
+policy and tradeoff.
 
 ```yaml
 name: Node dependency audit
@@ -203,7 +204,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/node-audit.yml@REVIEWED_FULL_COMMIT_SHA
+    uses: hydra-ecosystem/github-actions/.github/workflows/node-audit.yml@v1
     with:
       audit-kind: ${{ inputs.audit-kind || 'auto' }}
 
@@ -212,7 +213,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/node-publish.yml@REVIEWED_FULL_COMMIT_SHA
+    uses: hydra-ecosystem/github-actions/.github/workflows/node-publish.yml@v1
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}
       app-client-id: ${{ vars.NODE_AUDIT_APP_CLIENT_ID }}
@@ -345,7 +346,7 @@ evidence does not close it. The reporter uses the existing `issues: write`
 permission without checking out or executing project code.
 
 Use a workflow revision whose `node/contract.json` includes `local_patches`
-support. Update both caller pins together; older version-6 revisions do not
+support. Use `@v1` or update both immutable pins together; older version-6 revisions do not
 accept `localPatches`.
 
 ## Update or migrate an installation
@@ -353,10 +354,12 @@ accept `localPatches`.
 For an earlier Docusaurus installation, use the [migration checklist](node-migration.md).
 There are no aliases for its old configuration, script option, or workflow paths.
 
-For later updates, compare the installed and proposed contract and caller template.
-Update both workflow SHA references together, then run a manual security audit
-from the default branch. Shared-defaults refs are independent of workflow pins;
-review their changes separately. Verify toolchain changes locally first.
+With `@v1`, compatible workflow updates need no installation PR. When adopting a
+new major release, compare its contract and caller template, update both workflow
+references together, and run a manual security audit from the default branch.
+For immutable pins, follow those steps for each chosen commit. Shared-defaults
+refs are independent of workflow references; review their changes separately.
+Verify toolchain changes locally first.
 
 ## Troubleshooting
 

@@ -27,6 +27,8 @@ MAX_FILE_BYTES = 2_000_000
 CONFIG_PATH = ".github/node-maintenance.json"
 CALLER_PATH = ".github/workflows/dependency-audit.yml"
 SHA = r"[0-9a-f]{40}"
+MAJOR_RELEASE = r"v[1-9][0-9]*"
+WORKFLOW_REF = rf"(?:{SHA}|{MAJOR_RELEASE})"
 CRON_FIELDS = (
     (0, 59, {}),
     (0, 23, {}),
@@ -55,6 +57,10 @@ CRON_FIELDS = (
 
 class Unverified(ValueError):
     """A required observation could not be obtained; this is not a pass."""
+
+
+def workflow_snapshot_ref(ref):
+    return "tags/" + ref if re.fullmatch(MAJOR_RELEASE, ref) else ref
 
 
 class GitHub:
@@ -400,9 +406,7 @@ def check_caller(root, config, selected, github):
         raise ValueError(
             "Caller audit and publisher jobs must be unconditionally enabled"
         )
-    pattern = (
-        rf"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/node-audit\.yml@({SHA})"
-    )
+    pattern = rf"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/node-audit\.yml@({WORKFLOW_REF})"
     match = re.fullmatch(pattern, audit.get("uses", ""))
     if (
         not match
@@ -410,7 +414,7 @@ def check_caller(root, config, selected, github):
         != f"{match[1]}/.github/workflows/node-publish.yml@{match[2]}"
     ):
         raise ValueError(
-            "Audit and publisher must pin matching Node workflows at the same full commit SHA"
+            "Audit and publisher must use matching Node workflows at the same major release tag (such as v1) or full commit SHA"
         )
     needs = publisher.get("needs", [])
     if "needs" in audit or needs not in ("audit", ["audit"]):
@@ -444,7 +448,7 @@ def check_caller(root, config, selected, github):
         raise ValueError(
             "Caller must serialize runs with concurrency and cancel-in-progress: false"
         )
-    source = github.public_github.snapshot(match[1], match[2])
+    source = github.public_github.snapshot(match[1], workflow_snapshot_ref(match[2]))
     contract = CONFIGURATION["json_object"](
         source.read("node/contract.json"), "pinned Node contract"
     )
