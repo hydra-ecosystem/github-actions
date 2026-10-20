@@ -256,7 +256,7 @@ installation, validation, and the audit result:
 | Dependency changes with failed installation or checks | Retains a draft proposal when possible and fails the workflow. |
 | Incomplete or unavailable security audit | Fails the run and skips publication, even if project checks pass; retains the diagnostic summary and report artifact. |
 | No dependency changes | Creates no PR and leaves any existing proposal untouched; read the current run summary or report artifact. |
-| Invalid configuration | Stops before dependency changes and updates one reusable configuration issue. Successful preflight closes it. |
+| Invalid configuration | Stops before dependency changes and updates one reusable configuration issue. Successful preflight adds a verification comment and closes it, preserving the last failure description. |
 
 Choose **upgrades** for a separate manual run when you want routine updates.
 It also checks security and still obeys the cooldown and upgrade scope. It does
