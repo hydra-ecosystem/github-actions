@@ -75,7 +75,7 @@ def issue_body(report, run_url):
         lines.extend(
             [
                 "",
-                "Align the named project declarations, or explicitly override the inherited settings in `.github/node-maintenance.json`, then rerun **Node dependency audit**. No project files were rewritten.",
+                "Align the named project declarations, or explicitly override the inherited settings in `.github/node-maintenance.json`, then rerun your dependency maintenance workflow. No project files were rewritten.",
             ]
         )
     lines.extend(
@@ -170,6 +170,11 @@ def update_issue(repository, report, run_url, request=github_request):
         body=issue_body(report, run_url),
         failing=report["status"] == "error",
         request=request,
+        resolution_comment=(
+            "Configuration preflight now passes.\n\n"
+            "The original failure description is preserved above.\n\n"
+            f"[Verification run]({run_url})"
+        ),
     )
 
 

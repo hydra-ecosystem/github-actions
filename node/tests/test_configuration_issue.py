@@ -80,14 +80,31 @@ def test_one_issue_across_failure_updates_resolution_and_recurrence():
         "operation": "updated",
         "number": 77,
     }
+    failure_body = github.issues[0]["body"]
     assert update(github, "ok", 3) == {"operation": "closed", "number": 77}
     assert github.issues[0]["state"] == "closed"
+    assert github.issues[0]["body"] == failure_body
+    assert len(github.comments) == 1
+    assert "Configuration preflight now passes." in github.comments[0]["body"]
+    assert "https://github.com/owner/site/actions/runs/3" in github.comments[0]["body"]
     assert update(github, "ok", 4) == {"operation": "unchanged", "number": 77}
     assert update(github, run=5) == {"operation": "reopened", "number": 77}
     assert github.issues[0]["state"] == "open"
     assert len(github.issues) == 1
-    assert sum(method == "POST" for method, _, _ in github.calls) == 1
-    assert all("/comments" not in path for _, path, _ in github.calls)
+    assert (
+        sum(
+            method == "POST" and path == "repos/owner/site/issues"
+            for method, path, _ in github.calls
+        )
+        == 1
+    )
+    assert (
+        sum(
+            method == "POST" and path.endswith("/comments")
+            for method, path, _ in github.calls
+        )
+        == 1
+    )
 
 
 def test_healthy_installation_does_not_create_an_issue_and_pending_does_not_close_one():
@@ -243,3 +260,49 @@ def test_reporting_job_is_serialized_and_has_no_consumer_checkout_or_app_key():
         i for i, step in enumerate(steps) if step.get("id") == "proposal"
     )
     assert upload_index < proposal_index
+
+
+def test_configuration_recovery_keeps_failure_open_if_comment_cannot_be_written():
+    github = GitHub()
+    update(github)
+    before = copy.deepcopy(github.issues)
+
+    def request(method, path, payload=None):
+        if method == "POST" and path.endswith("/comments"):
+            raise ValueError("comment unavailable")
+        return github.request(method, path, payload)
+
+    with pytest.raises(ValueError, match="comment unavailable"):
+        module["update_issue"](
+            "owner/site",
+            report("ok"),
+            "https://github.com/owner/site/actions/runs/2",
+            request,
+        )
+    assert github.issues == before
+    assert not any(method == "PATCH" for method, _, _ in github.calls)
+
+
+def test_configuration_recovery_reuses_comment_after_close_request_failure():
+    github = GitHub()
+    update(github)
+    failure_body = github.issues[0]["body"]
+
+    def request(method, path, payload=None):
+        if method == "PATCH" and payload == {"state": "closed"}:
+            raise ValueError("close unavailable")
+        return github.request(method, path, payload)
+
+    with pytest.raises(ValueError, match="close unavailable"):
+        module["update_issue"](
+            "owner/site",
+            report("ok"),
+            "https://github.com/owner/site/actions/runs/2",
+            request,
+        )
+    assert github.issues[0]["state"] == "open"
+    assert github.issues[0]["body"] == failure_body
+    assert len(github.comments) == 1
+    assert update(github, "ok", 3) == {"operation": "closed", "number": 77}
+    assert github.issues[0]["body"] == failure_body
+    assert len(github.comments) == 1
