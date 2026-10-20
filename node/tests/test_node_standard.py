@@ -862,14 +862,13 @@ def test_summary_precedes_collapsed_full_audit(npm_project, monkeypatch):
     assert "**Maintenance:** 0 additional package updates (0 total)." in details
     assert "0 security fixes · 0 affected package entries remain" in summary
     assert "🟢 **No security findings**" in details
-    assert "| Package |" not in summary
+    assert "| Package | Current | Proposed | Release notes |" in summary
+    assert "## Security fixes" not in summary
     assert "- Project checks: passed." in summary
-    assert "renderer: `1.0.0` → `2.0.0`" in summary
-    assert (
-        summary.index("## Proposed dependency changes")
-        < summary.index("## Validation")
-        < summary.index("## Security status")
-    )
+    assert "renderer: `1.0.0` → `2.0.0`" not in summary
+    assert "renderer: `1.0.0` → `2.0.0`" in details
+    assert details.startswith("\n<summary>All dependency changes</summary>")
+    assert summary.index("## Validation") < summary.index("## Security status")
     assert "Validation script:" not in summary
     assert "Run configuration and audit evidence" in details
     assert "No upgrades to affected dependencies" not in report
@@ -992,7 +991,7 @@ def test_new_npm_advisory_in_existing_package_stays_visible(
         assert "routine dependency" not in visible
         assert "0 security fixes · 1 affected package entry remains" in visible
         assert (
-            "🔴 **New security findings in 1 affected package entry; review before merging.**"
+            "🔴 **Newly reported security findings in 1 affected package entry; review the advisory details before merging.**"
             in visible
         )
         assert "unchanged by this PR" not in visible
@@ -2093,6 +2092,52 @@ def test_fully_resolved_findings_still_produce_one_table(security_findings):
     assert "remaining" not in result
 
 
+def test_visible_security_fixes_exclude_unrelated_and_unconfirmed_findings(
+    security_findings,
+):
+    before = security_findings(
+        [
+            ("leaf", "fixed", "high", ""),
+            ("leaf", "pending", "high", "No patched version declared by the registry."),
+            ("withdrawn", "unconfirmed", "high", ""),
+            (
+                "unrelated",
+                "blocked",
+                "high",
+                "No patched version declared by the registry.",
+            ),
+        ]
+    )
+    after = security_findings(
+        [
+            ("leaf", "pending", "high", "No patched version declared by the registry."),
+            (
+                "unrelated",
+                "blocked",
+                "high",
+                "No patched version declared by the registry.",
+            ),
+        ]
+    )
+    fixed_ids = {"https://github.com/advisories/fixed"}
+    table = audit_module["format_audit_summary"](
+        before, after, "pnpm", fixed_ids=fixed_ids, fixes_only=True
+    )
+    assert "| `leaf` | 1 fixed · 1 pending |" in table
+    assert "The registry supplies no patched version." in table
+    assert "unrelated" not in table and "withdrawn" not in table
+    report = audit_module["format_change_report"]("- leaf: `1.0.0` → `1.1.0`", table)
+    visible, collapsed = report.split("<details>", 1)
+    assert table in visible
+    assert "- leaf:" not in visible and "- leaf:" in collapsed
+    assert (
+        audit_module["format_audit_summary"](
+            before, after, "pnpm", fixed_ids=set(), fixes_only=True
+        )
+        == ""
+    )
+
+
 def test_new_advisories_for_existing_package_stay_visible(security_findings):
     old = [(f"package-{i}", str(i), "high", "") for i in range(7)]
     result = audit_module["format_audit_summary"](
@@ -2102,6 +2147,399 @@ def test_new_advisories_for_existing_package_stay_visible(security_findings):
     )
     assert "| 🔴\u00a0`package-6` | 2 pending | 1 new advisory." in result
     assert all(result.count(f"`package-{i}`") == 1 for i in range(7))
+
+
+@pytest.fixture
+def propagated_npm_finding():
+    advisory = {
+        "url": "https://github.com/advisories/GHSA-test-leaf",
+        "title": "Leaf advisory",
+        "severity": "low",
+        "range": "<2.0.0",
+    }
+    before = {
+        "metadata": {"vulnerabilities": {"low": 1}},
+        "vulnerabilities": {
+            "leaf": {
+                "via": [advisory],
+                "severity": "low",
+                "nodes": ["node_modules/leaf"],
+            }
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["vulnerabilities"]["parent"] = {
+        "via": ["middle"],
+        "severity": "low",
+        "fixAvailable": False,
+    }
+    # The intermediate finding is already present; npm newly marks its parent.
+    for data in (before, after):
+        data["vulnerabilities"]["middle"] = {
+            "via": ["leaf"],
+            "severity": "low",
+            "nodes": ["node_modules/middle"],
+        }
+    lock = {
+        "packages": {
+            "node_modules/parent": {
+                "version": "1.0.0",
+                "dependencies": {"middle": "1.0.0"},
+            },
+            "node_modules/middle": {
+                "version": "1.0.0",
+                "dependencies": {"leaf": "1.0.0"},
+            },
+            "node_modules/leaf": {"version": "1.0.0"},
+        }
+    }
+    return before, after, lock
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "new-advisory",
+        "new-root-path",
+        "root-version",
+        "parent-version",
+        "missing-evidence",
+        "missing-parent",
+        "direct-advisory",
+        "parent-edge",
+        "middle-edge",
+        "middle-version",
+        "new-via",
+    ],
+)
+def test_new_parent_is_background_only_with_unchanged_advisory_and_paths(
+    propagated_npm_finding, change
+):
+    before, after, before_lock = propagated_npm_finding
+    after_lock = json.loads(json.dumps(before_lock))
+    if change == "new-advisory":
+        after["vulnerabilities"]["leaf"]["via"][0]["url"] += "-new"
+    elif change == "new-root-path":
+        after_lock["packages"]["node_modules/parent/node_modules/leaf"] = {
+            "version": "1.0.0"
+        }
+    elif change == "root-version":
+        after_lock["packages"]["node_modules/leaf"]["version"] = "1.1.0"
+    elif change == "parent-version":
+        after_lock["packages"]["node_modules/parent"]["version"] = "1.1.0"
+    elif change == "missing-evidence":
+        after["vulnerabilities"]["parent"]["via"].append("unknown")
+    elif change == "missing-parent":
+        del before_lock["packages"]["node_modules/parent"]
+    elif change == "direct-advisory":
+        after["vulnerabilities"]["parent"]["via"].append(
+            dict(after["vulnerabilities"]["leaf"]["via"][0])
+        )
+    elif change == "parent-edge":
+        after_lock["packages"]["node_modules/parent"]["dependencies"] = {
+            "middle": "1.0.0",
+            "other": "1.0.0",
+        }
+    elif change == "middle-edge":
+        after_lock["packages"]["node_modules/middle"]["dependencies"] = {}
+    elif change == "middle-version":
+        after_lock["packages"]["node_modules/middle"]["version"] = "1.1.0"
+    elif change == "new-via":
+        del before["vulnerabilities"]["middle"]
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    expected = {"parent": ["leaf"]} if change == "none" else {}
+    if change == "middle-version":
+        expected = {"parent": ["leaf"]}
+    if change == "new-via":
+        expected = {"middle": ["leaf"]}
+    assert parents == expected
+    report = audit_module["format_audit_summary"](
+        before, after, "npm", fixed_ids=set(), reported_parents=parents
+    )
+    if change in ("none", "middle-version"):
+        assert "🔴" not in report
+        assert "Newly reported parent of an existing finding in `leaf`" in report
+        assert "affected versions and installed paths are unchanged" in report
+    else:
+        assert "New findings" in report
+
+
+def test_security_fix_links_follow_indirect_advisories(propagated_npm_finding):
+    _, before, _ = propagated_npm_finding
+    after = {"metadata": {"vulnerabilities": {}}, "vulnerabilities": {}}
+    table = audit_module["format_audit_summary"](
+        before, after, "npm", fixed_ids={"parent"}, fixes_only=True
+    )
+    assert (
+        "| 🟢\u00a0`parent` | 1 fixed | Resolved. | [GHSA-test-leaf](https://github.com/advisories/GHSA-test-leaf) |"
+        in table
+    )
+    # A cycle must terminate and retain any reachable direct advisory links.
+    before["vulnerabilities"]["leaf"]["via"].append("parent")
+    assert (
+        audit_module["advisory_links"](before, "parent", "npm", set()).count(
+            "https://github.com/advisories/GHSA-test-leaf"
+        )
+        == 1
+    )
+
+
+def test_new_parent_warning_survives_new_intermediate_reachability(
+    propagated_npm_finding,
+):
+    before, after, before_lock = propagated_npm_finding
+    before_lock["packages"]["node_modules/middle"]["dependencies"] = {}
+    before_lock["packages"]["node_modules/elsewhere/node_modules/middle"] = {
+        "version": "1.1.0",
+        "dependencies": {"leaf": "1.0.0"},
+    }
+    before["vulnerabilities"]["middle"]["nodes"] = [
+        "node_modules/elsewhere/node_modules/middle"
+    ]
+    after_lock = json.loads(json.dumps(before_lock))
+    after_lock["packages"]["node_modules/middle"]["version"] = "1.1.0"
+    after_lock["packages"]["node_modules/middle"]["dependencies"] = {"leaf": "1.0.0"}
+    after["vulnerabilities"]["middle"]["nodes"] = ["node_modules/middle"]
+
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    assert parents == {}
+    report = audit_module["format_audit_summary"](
+        before, after, "npm", fixed_ids=set(), reported_parents=parents
+    )
+    assert "New findings in 1 package" in report
+    assert "`parent`" in report
+
+
+def test_new_parent_warning_survives_new_route_in_one_parent_copy():
+    advisory = {
+        "url": "https://github.com/advisories/GHSA-probe-leaf",
+        "title": "Existing leaf advisory",
+        "severity": "high",
+        "range": "<2.0.0",
+    }
+    before = {
+        "metadata": {"vulnerabilities": {"high": 2, "total": 2}},
+        "vulnerabilities": {
+            "leaf": {
+                "fixAvailable": False,
+                "nodes": ["node_modules/leaf"],
+                "range": "*",
+                "severity": "high",
+                "via": [advisory],
+            },
+            "middle": {
+                "fixAvailable": False,
+                "nodes": ["node_modules/a/node_modules/middle"],
+                "range": "*",
+                "severity": "high",
+                "via": ["leaf"],
+            },
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["metadata"]["vulnerabilities"] = {"high": 3, "total": 3}
+    after["vulnerabilities"]["middle"]["nodes"] = [
+        "node_modules/a/node_modules/middle",
+        "node_modules/b/node_modules/middle",
+    ]
+    after["vulnerabilities"]["parent"] = {
+        "fixAvailable": False,
+        "nodes": [
+            "node_modules/a/node_modules/parent",
+            "node_modules/b/node_modules/parent",
+        ],
+        "range": "*",
+        "severity": "high",
+        "via": ["middle"],
+    }
+    before_lock = {
+        "packages": {
+            "node_modules/a/node_modules/middle": {
+                "dependencies": {"leaf": "*"},
+                "version": "1.0.0",
+            },
+            "node_modules/a/node_modules/parent": {
+                "dependencies": {"middle": "*"},
+                "version": "1.0.0",
+            },
+            "node_modules/b/node_modules/middle": {
+                "dependencies": {},
+                "version": "1.0.0",
+            },
+            "node_modules/b/node_modules/parent": {
+                "dependencies": {"middle": "*"},
+                "version": "1.0.0",
+            },
+            "node_modules/leaf": {"version": "1.0.0"},
+        }
+    }
+    after_lock = json.loads(json.dumps(before_lock))
+    after_lock["packages"]["node_modules/b/node_modules/middle"] = {
+        "dependencies": {"leaf": "*"},
+        "version": "1.1.0",
+    }
+
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    assert parents == {}
+    assert audit_module["newly_reported_findings"](
+        before, after, "npm"
+    ) - parents.keys() == {"parent"}
+    report = audit_module["format_audit_summary"](
+        before, after, "npm", fixed_ids=set(), reported_parents=parents
+    )
+    assert "New findings in 1 package" in report
+    assert "Newly reported parent of an existing finding" not in report
+    assert "affected versions and installed paths are unchanged" not in report
+
+
+def test_new_parent_warning_survives_unproved_empty_reachability(
+    propagated_npm_finding,
+):
+    before, _, before_lock = propagated_npm_finding
+    before_lock["packages"]["node_modules/middle"]["dependencies"] = {}
+    after = json.loads(json.dumps(before))
+    after["metadata"]["vulnerabilities"] = {"low": 3, "total": 3}
+    after["vulnerabilities"]["parent"] = {
+        "fixAvailable": False,
+        "nodes": ["node_modules/parent"],
+        "range": "*",
+        "severity": "low",
+        "via": ["middle"],
+    }
+    after_lock = json.loads(json.dumps(before_lock))
+
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    assert parents == {}
+    assert audit_module["newly_reported_findings"](
+        before, after, "npm"
+    ) - parents.keys() == {"parent"}
+    report = audit_module["format_audit_summary"](
+        before, after, "npm", fixed_ids=set(), reported_parents=parents
+    )
+    assert "New findings in 1 package" in report
+    assert "Newly reported parent of an existing finding" not in report
+
+
+def test_new_parent_background_allows_intermediate_version_change_with_same_path(
+    propagated_npm_finding,
+):
+    before, after, before_lock = propagated_npm_finding
+    after_lock = json.loads(json.dumps(before_lock))
+    after_lock["packages"]["node_modules/middle"]["version"] = "1.1.0"
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    assert parents == {"parent": ["leaf"]}
+
+
+def test_new_parent_background_follows_peer_intermediate_version_change():
+    advisory = {
+        "url": "https://github.com/advisories/GHSA-test-katex",
+        "title": "KaTeX advisory",
+        "severity": "low",
+        "range": "<2.0.0",
+    }
+    before = {
+        "metadata": {"vulnerabilities": {"low": 1}},
+        "vulnerabilities": {
+            "katex": {
+                "via": [advisory],
+                "severity": "low",
+                "nodes": ["node_modules/katex"],
+            },
+            "mermaid": {
+                "via": ["katex"],
+                "severity": "low",
+                "nodes": ["node_modules/mermaid"],
+            },
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["vulnerabilities"]["layout-elk"] = {
+        "via": ["mermaid"],
+        "severity": "low",
+    }
+    before_lock = {
+        "packages": {
+            "node_modules/layout-elk": {
+                "version": "1.0.0",
+                "peerDependencies": {"mermaid": "^1.0.0"},
+            },
+            "node_modules/mermaid": {
+                "version": "1.0.0",
+                "dependencies": {"katex": "1.0.0"},
+            },
+            "node_modules/katex": {"version": "1.0.0"},
+        }
+    }
+    after_lock = json.loads(json.dumps(before_lock))
+    after_lock["packages"]["node_modules/mermaid"]["version"] = "1.1.0"
+    parents = audit_module["reported_parent_findings"](
+        before, after, "npm", before_lock, after_lock
+    )
+    assert parents == {"layout-elk": ["katex"]}
+
+
+def test_security_fix_links_only_include_confirmed_pnpm_advisories(security_findings):
+    before = security_findings(
+        [("leaf", "fixed", "high", ""), ("leaf", "pending", "high", "")]
+    )
+    after = security_findings([("leaf", "pending", "high", "")])
+    table = audit_module["format_audit_summary"](
+        before,
+        after,
+        "pnpm",
+        fixed_ids={"https://github.com/advisories/fixed"},
+        fixes_only=True,
+    )
+    assert "[Advisory](https://github.com/advisories/fixed)" in table
+    assert "https://github.com/advisories/pending" not in table
+    assert "1 fixed · 1 pending" in table
+
+
+def test_visible_security_fix_uses_one_primary_link_and_counts_additional_advisories():
+    urls = [
+        f"https://github.com/advisories/GHSA-test-{name}"
+        for name in ("one", "two", "three")
+    ]
+    before = {
+        "metadata": {"vulnerabilities": {"high": 3, "total": 3}},
+        "package_manager": "pnpm",
+        "vulnerabilities": {
+            "leaf": {
+                "severity": "high",
+                "range": "<2.0.0",
+                "fixAvailable": True,
+                "via": [
+                    {
+                        "title": f"Advisory {index}",
+                        "url": url,
+                        "severity": "high",
+                        "range": "<2.0.0",
+                    }
+                    for index, url in enumerate(urls, start=1)
+                ],
+            }
+        },
+    }
+    after = {"metadata": {"vulnerabilities": {}}, "vulnerabilities": {}}
+    table = audit_module["format_audit_summary"](
+        before, after, "pnpm", fixed_ids=set(urls), fixes_only=True
+    )
+    assert urls[0] in table
+    assert urls[1] not in table and urls[2] not in table
+    assert "+2 additional advisories; see full audit details" in table
+    full_audit = audit_module["format_audit"](before, {"packages": {}})
+    assert all(url in full_audit for url in urls)
 
 
 def test_npm_outcomes_keep_package_entry_semantics():
@@ -2245,8 +2683,8 @@ def test_maintenance_subtotal_excludes_security_updates_without_guessing(
     else:
         assert "**Maintenance:** 1 additional package update (2 total)." in details
         assert "1 security fix" in visible
-        assert "| 🟢\u00a0`security` |" not in visible
-        assert "| 🟢\u00a0`security` |" in report.split("<details>", 1)[1]
+        assert "## Security fixes" in visible
+        assert "| 🟢\u00a0`security` | 1 fixed | Resolved. |" in visible
 
 
 def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(

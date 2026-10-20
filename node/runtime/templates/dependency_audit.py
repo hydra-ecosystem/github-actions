@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import quote
 
 import yaml
 
@@ -1546,7 +1547,13 @@ def _npm_dependency_node(packages, parent, dependency):
 
 
 def _npm_dependency_reaches(
-    lock, root_name, target_name, target_nodes, *, root_nodes=None
+    lock,
+    root_name,
+    target_name,
+    target_nodes,
+    *,
+    root_nodes=None,
+    include_peer_dependencies=False,
 ):
     """Follow npm edges from a direct package or exact installed nodes."""
     packages = lock.get("packages", {})
@@ -1573,7 +1580,10 @@ def _npm_dependency_reaches(
             continue
         if node in target_nodes and node.rsplit("node_modules/", 1)[-1] == target_name:
             return True
-        for section in ("dependencies", "optionalDependencies"):
+        sections = ("dependencies", "optionalDependencies")
+        if include_peer_dependencies:
+            sections += ("peerDependencies",)
+        for section in sections:
             dependencies = package.get(section, {})
             if not isinstance(dependencies, dict):
                 continue
@@ -2191,6 +2201,188 @@ def newly_reported_findings(before, after, source):
     return added
 
 
+def npm_advisory_sources(data, name):
+    """Follow propagated npm findings to their direct advisory records."""
+    if not isinstance(data, dict):
+        return {}, False
+    findings = data.get("vulnerabilities", {})
+    pending, visited, sources = [name], set(), {}
+    complete = True
+    while pending:
+        package = pending.pop()
+        if package in visited:
+            continue
+        visited.add(package)
+        via = findings.get(package, {}).get("via", [])
+        if not via:
+            complete = False
+        for detail in via:
+            if isinstance(detail, str):
+                pending.append(detail)
+            elif (
+                isinstance(detail, dict)
+                and isinstance(detail.get("url"), str)
+                and detail["url"]
+            ):
+                sources.setdefault(package, {})[detail["url"]] = detail
+            else:
+                complete = False
+    return sources, complete and bool(sources)
+
+
+def _npm_vulnerable_nodes(data, lock, name):
+    vulnerability = data.get("vulnerabilities", {}).get(name, {})
+    nodes = vulnerability.get("nodes")
+    if isinstance(nodes, list):
+        recorded = {node for node in nodes if isinstance(node, str) and node}
+        if recorded:
+            return recorded
+    return set(package_paths(lock, name, "npm"))
+
+
+def _npm_reachable_nodes(lock, root, target_name, target_nodes):
+    return {
+        node
+        for node in target_nodes
+        if _npm_dependency_reaches(
+            lock,
+            None,
+            target_name,
+            {node},
+            root_nodes=[root],
+            include_peer_dependencies=True,
+        )
+    }
+
+
+def reported_parent_findings(before, after, source, before_lock, after_lock):
+    """Identify new parent entries backed only by unchanged existing findings."""
+    if source != "npm" or not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+    parents = {}
+    for name in newly_reported_findings(before, after, source):
+        if name in before.get("vulnerabilities", {}):
+            continue
+        via = after["vulnerabilities"][name].get("via", [])
+        if not via or not all(isinstance(detail, str) for detail in via):
+            continue
+        old_paths = package_paths(before_lock, name, source)
+        if not old_paths or old_paths != package_paths(after_lock, name, source):
+            continue
+        if any(
+            before_lock["packages"][node] != after_lock["packages"][node]
+            for node in old_paths
+        ):
+            continue
+        parent_after = set(package_paths(after_lock, name, source))
+        recorded_parent_nodes = after["vulnerabilities"][name].get("nodes")
+        if isinstance(recorded_parent_nodes, list):
+            parent_roots = {
+                node for node in recorded_parent_nodes if isinstance(node, str) and node
+            }
+            if not parent_roots or not parent_roots <= parent_after:
+                continue
+        else:
+            parent_roots = parent_after
+        # A previously unrelated dependency can become vulnerable through an
+        # already installed advisory source. Retain the warning for that case.
+        existing_chain = True
+        for dependency in via:
+            previous_sources, previous_complete = npm_advisory_sources(
+                before, dependency
+            )
+            current_sources, current_complete = npm_advisory_sources(after, dependency)
+            if (
+                not previous_complete
+                or not current_complete
+                or any(
+                    not details.keys() <= previous_sources.get(package, {}).keys()
+                    for package, details in current_sources.items()
+                )
+            ):
+                existing_chain = False
+                break
+        if not existing_chain:
+            continue
+        sources, complete = npm_advisory_sources(after, name)
+        if not complete:
+            continue
+        for package, advisories in sources.items():
+            previous, previous_complete = npm_advisory_sources(before, package)
+            existing = previous.get(package, {})
+            paths = package_paths(before_lock, package, source)
+            if (
+                not previous_complete
+                or not advisories.keys() <= existing.keys()
+                or not paths
+                or paths != package_paths(after_lock, package, source)
+                or before["vulnerabilities"][package].get("nodes")
+                != after["vulnerabilities"][package].get("nodes")
+            ):
+                break
+            before_nodes = _npm_vulnerable_nodes(before, before_lock, package)
+            after_nodes = _npm_vulnerable_nodes(after, after_lock, package)
+            if not before_nodes or not after_nodes:
+                break
+            for root in parent_roots:
+                before_reachable = _npm_reachable_nodes(
+                    before_lock, root, package, before_nodes
+                )
+                after_reachable = _npm_reachable_nodes(
+                    after_lock, root, package, after_nodes
+                )
+                if (
+                    not before_reachable
+                    or not after_reachable
+                    or before_reachable != after_reachable
+                ):
+                    break
+            else:
+                continue
+            break
+        else:
+            parents[name] = sorted(sources)
+    return parents
+
+
+def _advisory_link_items(data, name, source, fixed_ids):
+    if source == "npm":
+        sources, _ = npm_advisory_sources(data, name)
+        urls = {url for details in sources.values() for url in details}
+    else:
+        urls = {
+            identity
+            for identity, package, _ in audit_entries(data, source)
+            if package == name and identity in fixed_ids
+        }
+    links = []
+    for url in sorted(urls):
+        # Keep registry-supplied URLs inside one Markdown table cell and link.
+        if not re.fullmatch(r"https?://[^\s<>()\[\]|`]+", url):
+            continue
+        label = url.rstrip("/").rsplit("/", 1)[-1]
+        if not re.fullmatch(r"GHSA-[a-z0-9-]+", label):
+            label = "Advisory"
+        links.append(f"[{label}]({url})")
+    return links
+
+
+def advisory_links(data, name, source, fixed_ids):
+    links = _advisory_link_items(data, name, source, fixed_ids)
+    return ", ".join(links) or f"Advisory URL not supplied by {source}."
+
+
+def compact_advisory_links(data, name, source, fixed_ids):
+    links = _advisory_link_items(data, name, source, fixed_ids)
+    if not links:
+        return f"Advisory URL not supplied by {source}."
+    additional = len(links) - 1
+    if additional:
+        unit = "advisory" if additional == 1 else "advisories"
+        return f"{links[0]} (+{additional} additional {unit}; see full audit details)"
+    return links[0]
+
+
 def audit_fix_reason(detail, source):
     status = detail.get("fixStatus", "")
     if "Blocked by retained override" in status:
@@ -2259,10 +2451,16 @@ def format_blocked_findings(data, source):
 
 
 def format_audit_summary(
-    before: dict | str, after: dict | str, source: str, *, fixed_ids=None
+    before: dict | str,
+    after: dict | str,
+    source: str,
+    *,
+    fixed_ids=None,
+    fixes_only=False,
+    reported_parents=None,
 ) -> str:
     if isinstance(after, str):
-        return f"⚪ **Security:** {after}"
+        return "" if fixes_only else f"⚪ **Security:** {after}"
 
     def complete(data, rows):
         return isinstance(data, dict) and (
@@ -2282,7 +2480,12 @@ def format_audit_summary(
     unconfirmed_ids = (
         (old_ids - current_ids) - resolved_ids if fixed_ids is not None else set()
     )
-    new_ids = newly_reported_findings(before, after, source) if comparable else set()
+    reported_parents = reported_parents or {}
+    new_ids = (
+        newly_reported_findings(before, after, source) - reported_parents.keys()
+        if comparable
+        else set()
+    )
     old_groups: dict = {}
     groups: dict = {}
     for rows, target in ((old, old_groups), (current, groups)):
@@ -2295,6 +2498,8 @@ def format_audit_summary(
     for name in old_groups.keys() | groups.keys():
         previous, pending = old_groups.get(name, {}), groups.get(name, {})
         fixed = len(resolved_ids.intersection(previous))
+        if fixes_only and not fixed:
+            continue
         unconfirmed_disappeared = set(previous).intersection(unconfirmed_ids)
         unconfirmed_details = [
             previous[identity] for identity in unconfirmed_disappeared
@@ -2399,6 +2604,14 @@ def format_audit_summary(
                 if source == "npm" and name in old_groups
                 else f"{new_count} new {unit}. "
             ) + action
+        if name in reported_parents:
+            source_packages = ", ".join(
+                f"`{package}`" for package in reported_parents[name]
+            )
+            action = (
+                f"Newly reported parent of an existing finding in {source_packages}; "
+                "affected versions and installed paths are unchanged. "
+            ) + action
         counts = []
         if fixed:
             counts.append(f"{fixed} fixed")
@@ -2429,13 +2642,20 @@ def format_audit_summary(
         rows.append(
             (
                 (rank, severity, name),
-                f"| {label}`{name}` | {' · '.join(counts)} | {action.strip()} |",
+                f"| {label}`{name}` | {' · '.join(counts)} | {action.strip()} |"
+                + (
+                    f" {compact_advisory_links(before, name, source, resolved_ids)} |"
+                    if fixes_only
+                    else ""
+                ),
             )
         )
 
     def packages(number):
         return f"{number} package" + ("" if number == 1 else "s")
 
+    if fixes_only and not fixed_packages:
+        return ""
     if not comparable:
         headline = "⚪ **Fixes unconfirmed**"
     elif fixed_packages:
@@ -2461,10 +2681,90 @@ def format_audit_summary(
     if rows:
         unit = "Advisories" if source == "pnpm" else "Affected package entries"
         headline += (
-            f"\n\n| Package | {unit} | Action / blocker |\n| --- | --- | --- |\n"
+            f"\n\n| Package | {unit} | Action / blocker |"
+            + (" Advisories |" if fixes_only else "")
+            + "\n| --- | --- | --- |"
+            + (" --- |" if fixes_only else "")
+            + "\n"
         )
         headline += "\n".join(row for _, row in sorted(rows))
     return headline
+
+
+def format_change_report(
+    proposed_changes: str, security_fixes: str, routine_upgrades: str = ""
+) -> str:
+    """Keep confirmed fixes visible and the complete version list expandable."""
+    return (
+        (f"## Security fixes\n\n{security_fixes}\n\n" if security_fixes else "")
+        + (
+            f"## Direct dependency upgrades\n\n{routine_upgrades}\n\n"
+            if routine_upgrades
+            else ""
+        )
+        + "<details>\n<summary>All dependency changes</summary>\n\n"
+        + f"{proposed_changes}\n\n</details>\n\n"
+    )
+
+
+def routine_upgrade_rows(initial, security, final, targets):
+    """List intentionally selected direct upgrades retained in the final proposal."""
+    rows = []
+    for section, name in sorted(targets, key=lambda item: (item[1], item[0])):
+        current = initial[2].get(section, {}).get(name)
+        baseline = security[2].get(section, {}).get(name)
+        proposed = final[2].get(section, {}).get(name)
+        if proposed is not None and proposed != baseline and proposed != current:
+            rows.append((section, name, current, proposed))
+    return rows
+
+
+def release_notes_link(directory, name, version, snapshot, notes, deadline):
+    fallback = f"[Package details](https://www.npmjs.com/package/{quote(name, safe='@/')}/v/{quote(version, safe='.')})"
+    if stable_version(version) is None or time.monotonic() >= deadline:
+        return fallback
+    result = run(
+        directory,
+        "view",
+        f"{name}@{version}",
+        "repository.url",
+        "--json",
+        deadline=min(deadline, time.monotonic() + 10),
+    )
+    if restore_invalid_state(
+        directory, snapshot, notes, f"Release notes lookup for {name}", frozen=True
+    ):
+        return fallback
+    try:
+        repository = json.loads(result.stdout)
+    except ValueError:
+        return fallback
+    if result.returncode or not isinstance(repository, str):
+        return fallback
+    match = re.fullmatch(
+        r"(?:git\+)?(?:https?|git)://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?",
+        repository,
+    )
+    if match and all(part not in {".", ".."} for part in match.groups()):
+        return f"[Releases](https://github.com/{match[1]}/{match[2]}/releases)"
+    return fallback
+
+
+def format_routine_upgrades(rows, links):
+    if not rows:
+        return ""
+    labels = {
+        "dependencies": "",
+        "devDependencies": " (dev)",
+        "optionalDependencies": " (optional)",
+    }
+    return (
+        "| Package | Current | Proposed | Release notes |\n| --- | --- | --- | --- |\n"
+        + "\n".join(
+            f"| `{name}`{labels[section]} | `{current}` | `{proposed}` | {links[(name, proposed)]} |"
+            for section, name, current, proposed in rows
+        )
+    )
 
 
 def within_upgrade_scope(before, after, scope):
@@ -2683,6 +2983,7 @@ def prepare(
         set(before.get("vulnerabilities", {})) if isinstance(before, dict) else set()
     )
     changes = []
+    routine_targets = set()
     cache: dict = {}
 
     # Give compatible security fixes the first use of the shared time budget.
@@ -2836,6 +3137,7 @@ def prepare(
                 if tuple(map(int, latest.split("."))) > floor:
                     manifest[section][name] = latest
                     changes.append((name, f"- {name}: `{current}` → `{latest}`"))
+                    routine_targets.add((section, name))
 
         if changes:
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -2877,6 +3179,7 @@ def prepare(
                 "the manifest and lockfile from the initial security fix attempt."
             )
             changes = []
+            routine_targets.clear()
         else:
             stable_snapshot = valid_snapshot(directory) or security_snapshot
             last_valid_snapshot = stable_snapshot
@@ -3080,6 +3383,15 @@ def prepare(
         validation["passed"] = check_status == "Passed."
         validation["audit_errors"] = audit_errors
         validation["local_patches"] = patch_report
+    routine_rows = routine_upgrade_rows(
+        initial_snapshot, security_snapshot, after_snapshot, routine_targets
+    )
+    release_links = {}
+    for _, name, _, proposed in routine_rows:
+        if (name, proposed) not in release_links:
+            release_links[(name, proposed)] = release_notes_link(
+                directory, name, proposed, after_snapshot, notes, deadline
+            )
     fingerprints = "\n".join(
         f"- `{name}`: `{hashlib.sha256(content).hexdigest()}`"
         for name, content in {
@@ -3190,7 +3502,13 @@ def prepare(
     fixed_count = len(fixed_ids)
     initial_ids = finding_ids(before, package_manager)
     remaining_ids = finding_ids(after, package_manager)
-    new_ids = newly_reported_findings(before, after, package_manager)
+    reported_parents = reported_parent_findings(
+        before, after, package_manager, before_lock, after_lock
+    )
+    new_ids = (
+        newly_reported_findings(before, after, package_manager)
+        - reported_parents.keys()
+    )
     remaining_count = len(remaining_ids or ())
     remaining_unit = (
         ("advisory" if remaining_count == 1 else "advisories")
@@ -3260,8 +3578,6 @@ def prepare(
             else ""
         )
         + (
-            f"## Proposed dependency changes\n\n"
-            f"{proposed_changes}\n\n"
             f"## Validation\n\n"
             f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
             f"- Project checks: {check_status[0].lower() + check_status[1:]}\n\n"
@@ -3288,15 +3604,27 @@ def prepare(
                 )
             )
             report += (
-                f"🔴 **New security findings in {new_count} {unit}; review before merging.**\n\n"
+                f"🔴 **Newly reported security findings in {new_count} {unit}; review the advisory details before merging.**\n\n"
                 if package_manager == "npm"
                 else f"🔴 **{new_count} newly reported {unit}; review before merging.**\n\n"
             )
     if not initial_audit_available:
         report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
+    report += format_change_report(
+        proposed_changes,
+        format_audit_summary(
+            before,
+            after,
+            package_manager,
+            fixed_ids=fixed_ids,
+            fixes_only=True,
+            reported_parents=reported_parents,
+        ),
+        format_routine_upgrades(routine_rows, release_links),
+    )
     report += (
         f"<details>\n<summary>{'Blocked findings and constraints' if blocked_findings else 'Security findings and blockers'}</summary>\n\n"
-        f"{blocked_findings or format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids)}\n\n"
+        f"{blocked_findings or format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids, reported_parents=reported_parents)}\n\n"
         "</details>\n\n"
     )
     if change_sections:
