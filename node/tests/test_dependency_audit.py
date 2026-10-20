@@ -306,9 +306,11 @@ def test_security_report_lists_affected_direct_upgrade_once(npm_project, monkeyp
 
     monkeypatch.setattr(subprocess, "run", upgrade)
     report = prepare(npm_project)
-    visible = report.split("<details>", 1)[0]
-    assert visible.count("- renderer:") == 1
-    assert "- renderer: `1.0.0` → `2.0.0`" in visible
+    visible, changes = report.split("<details>", 1)
+    changes = changes.split("</details>", 1)[0]
+    assert "- renderer:" not in visible
+    assert changes.count("- renderer:") == 1
+    assert "- renderer: `1.0.0` → `2.0.0`" in changes
     details = report.split("## Security findings and fixes", 1)[1].split(
         "</details>", 1
     )[0]
