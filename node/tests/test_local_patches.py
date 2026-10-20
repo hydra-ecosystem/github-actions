@@ -690,5 +690,5 @@ def test_declarations_are_local_and_reporter_has_no_project_execution_authority(
     assert PROJECT["CONFIGURATION"]["merge_shared"]({}, {"localPatches": [ID]}) == {}
     workflow = yaml.safe_load((ROOT / ".github/workflows/node-audit.yml").read_text())
     job = workflow["jobs"]["configuration-issue"]
-    assert job["permissions"] == {"issues": "write"}
+    assert job["permissions"] == {"issues": "write", "contents": "read"}
     assert not any("checkout@" in step.get("uses", "") for step in job["steps"])

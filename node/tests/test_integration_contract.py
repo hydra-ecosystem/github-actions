@@ -15,7 +15,10 @@ def test_caller_separates_audit_and_publisher_authority():
     assert audit["permissions"] == {"contents": "read", "issues": "write"}
     shared = yaml.safe_load((ROOT / ".github/workflows/node-audit.yml").read_text())
     assert shared["jobs"]["audit"]["permissions"] == {"contents": "read"}
-    assert shared["jobs"]["configuration-issue"]["permissions"] == {"issues": "write"}
+    assert shared["jobs"]["configuration-issue"]["permissions"] == {
+        "issues": "write",
+        "contents": "read",
+    }
     assert "secrets" not in audit
     assert publisher["permissions"] == {"contents": "write", "pull-requests": "write"}
     assert set(publisher["secrets"]) == {"app-private-key"}

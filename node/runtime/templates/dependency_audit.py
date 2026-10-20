@@ -2926,6 +2926,7 @@ def prepare(
     maintenance_mode="security-and-maintenance",
     upgrade_scope="major",
     local_patches=None,
+    validate_only=False,
 ) -> str:
     # Leave time in the 60-minute job to write and upload a partial report.
     deadline = time.monotonic() + 45 * 60
@@ -2985,11 +2986,13 @@ def prepare(
     changes = []
     routine_targets = set()
     cache: dict = {}
+    proposal_complete = True
 
     # Give compatible security fixes the first use of the shared time budget.
     fixed = (
         subprocess.CompletedProcess([], 0, "", "")
-        if maintenance_mode == "security-only"
+        if validate_only
+        or maintenance_mode == "security-only"
         and isinstance(before, dict)
         and not affected
         else fix_security(
@@ -3001,10 +3004,12 @@ def prepare(
             release_before=release_before,
         )
     )
-    restore_invalid_state(
+    if restore_invalid_state(
         directory, last_valid_snapshot, notes, "Initial security fix", security_fix=True
-    )
+    ):
+        proposal_complete = False
     if fixed.returncode:
+        proposal_complete = False
         notes.append(
             f"Initial security fix returned exit {fixed.returncode}; remaining findings "
             "or a tool error require manual review."
@@ -3033,6 +3038,7 @@ def prepare(
             source=package_manager,
         )
         if not confirmation or direct_violation:
+            proposal_complete = False
             restore_snapshot(directory, initial_snapshot)
             security_snapshot = initial_snapshot
             notes.append(
@@ -3045,7 +3051,7 @@ def prepare(
                 + " Routine upgrades require an upgrades run."
             )
     last_valid_snapshot = security_snapshot
-    if maintenance_mode == "security-and-maintenance":
+    if maintenance_mode == "security-and-maintenance" and not validate_only:
         manifest = json.loads(security_snapshot[0])
 
         # Preserve overrides and peer constraints for a maintainer to review.
@@ -3109,6 +3115,7 @@ def prepare(
                     or not isinstance(latest, str)
                     or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
                 ):
+                    proposal_complete = False
                     notes.append(f"Could not look up {name}; retained `{current}`.")
                     continue
                 if latest != current.lstrip("~^") and (
@@ -3130,6 +3137,7 @@ def prepare(
                         ),
                     )
                     if latest is None:
+                        proposal_complete = False
                         notes.append(
                             f"No eligible stable release verified for {name}; retained `{current}`."
                         )
@@ -3173,6 +3181,7 @@ def prepare(
                 f"Rejected routine proposal: maintenance.upgradeScope={upgrade_scope}; {violation}. Restored accepted security fixes."
             )
         if lock.returncode or invalid_stable_state:
+            proposal_complete = False
             restore_snapshot(directory, security_snapshot)
             notes.append(
                 f"Stable upgrade resolution failed (exit {lock.returncode}); restored "
@@ -3205,14 +3214,16 @@ def prepare(
                 before=stable_audit,
                 release_before=release_before,
             )
-            restore_invalid_state(
+            if restore_invalid_state(
                 directory,
                 stable_snapshot,
                 notes,
                 "Follow-up security fix",
                 security_fix=True,
-            )
+            ):
+                proposal_complete = False
             if fixed.returncode:
+                proposal_complete = False
                 notes.append(
                     f"Automatic audit fix returned exit {fixed.returncode}; remaining findings "
                     "or a tool error require manual review."
@@ -3287,6 +3298,7 @@ def prepare(
         )
     ):
         restore_snapshot(directory, initial_snapshot)
+        proposal_complete = False
         after_snapshot = initial_snapshot
         after = audit(directory, deadline=deadline)
         if restore_invalid_state(
@@ -3382,6 +3394,7 @@ def prepare(
     if validation is not None:
         validation["passed"] = check_status == "Passed."
         validation["audit_errors"] = audit_errors
+        validation["proposal_complete"] = proposal_complete and not audit_errors
         validation["local_patches"] = patch_report
     routine_rows = routine_upgrade_rows(
         initial_snapshot, security_snapshot, after_snapshot, routine_targets
@@ -3666,6 +3679,12 @@ def prepare(
         )
         + f"### Candidate dependency files (SHA-256)\n\n{fingerprints}\n\n</details>\n"
     )
+    if validate_only:
+        report = (
+            f"**Committed dependency validation · {'Passed' if check_status == 'Passed.' else 'Failed'}**\n\n"
+            "Checked committed dependencies without attempting repairs or routine upgrades.\n\n"
+            + report.partition("\n")[2]
+        )
     return report
 
 
@@ -3692,6 +3711,7 @@ def main() -> None:
     )
     parser.add_argument("--resolved-config", type=Path)
     parser.add_argument("--local-patches-report", type=Path)
+    parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     directory = Path(args.directory)
     if (
@@ -3726,6 +3746,7 @@ def main() -> None:
             maintenance_mode=args.maintenance_mode,
             upgrade_scope=args.upgrade_scope,
             local_patches=patches,
+            validate_only=args.validate_only,
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))
@@ -3744,6 +3765,9 @@ def main() -> None:
     if args.github_output is not None:
         with args.github_output.open("a") as output:
             output.write(f"validation_passed={str(validation['passed']).lower()}\n")
+            output.write(
+                f"proposal_complete={str(validation['proposal_complete']).lower()}\n"
+            )
     print(report)
     if validation["audit_errors"]:
         print(

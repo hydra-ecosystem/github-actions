@@ -325,7 +325,7 @@ def test_publisher_uses_the_audited_revision_and_default_branch_base():
             for step in workflow["jobs"][job]["steps"]
             if step.get("uses", "").startswith("actions/checkout@")
         )
-        assert checkout["with"]["ref"] == "${{ github.sha }}"
+        assert checkout["with"]["ref"] == "${{ inputs.audit-ref || github.sha }}"
     publisher = workflow["jobs"]["pull-request"]["steps"][-1]
     assert (
         publisher["env"]["BASE_BRANCH"]

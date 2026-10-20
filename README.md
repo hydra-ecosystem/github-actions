@@ -8,7 +8,7 @@ workflow updates. Full commit SHA pinning remains available. Supports GitHub.com
 
 | Workflow | Use it to | Get started |
 | --- | --- | --- |
-| Node dependency maintenance | Attempt compatible security fixes, optionally propose routine upgrades, validate the project, and maintain one dependency PR. | [Setup guide](docs/node-maintenance.md) |
+| Node dependency maintenance | Attempt compatible security fixes, optionally propose routine upgrades, validate the project, and maintain grouped dependency PRs. | [Setup guide](docs/node-maintenance.md) |
 | Node maintenance setup check | Check a list of maintenance installations for broken setup or configuration drift, and maintain one central issue per list. | [Fleet setup guide](docs/node-fleet-setup.md) |
 
 The workflows are independent. Install maintenance in each Node repository you
@@ -20,9 +20,16 @@ project scripts. Nothing merges or repairs configuration automatically.
 
 Supports standalone Node applications, libraries, and websites using npm or pnpm.
 A maintenance run validates its proposal with a frozen install and your project's
-checks. All audit kinds maintain **one open dependency PR per repository**;
+checks. With the released two-job caller, all audit kinds maintain
+**one open dependency PR per repository**;
 reruns update that PR rather than opening one PR per dependency. Reports show
 proposed versions, validation, and blocked findings.
+
+For separate security and routine-upgrade PRs, see the opt-in
+[coordinated caller](docs/node-coordination.md). It validates dependency-file
+pushes and refreshes existing proposals after either PR merges. This new caller
+requires a workflow revision containing that interface; existing callers keep
+their combined-PR behavior.
 
 | Maintenance setup | Automatic security checks | Automatic routine upgrades |
 | --- | --- | --- |
@@ -56,6 +63,7 @@ repositories at a time in one runner, with one combined report and issue.
 - [Node maintenance: setup, first run, updates, and troubleshooting](docs/node-maintenance.md)
 - [Fleet setup checks: inventory, caller, results, and limits](docs/node-fleet-setup.md)
 - [Maintenance schedules and manual audits](docs/audit-schedules.md)
+- [Separate proposal channels and automatic refresh](docs/node-coordination.md)
 - [Shared defaults for multiple installations](docs/shared-defaults.md)
 - [Maintenance behavior, reports, and permissions](node/maintenance.md)
 - [Migrate an earlier Docusaurus installation](docs/node-migration.md)
