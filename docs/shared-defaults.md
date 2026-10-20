@@ -79,8 +79,8 @@ schedule:
 - cron: '0 2 1 */3 *'
 ```
 
-Place this under `on` in the caller. Keep both reusable workflow calls pinned
-to the same reviewed version-6 SHA. Enable repository issues and publication as
+Place this under `on` in the caller. Keep both reusable workflow calls at `@v1`, or use the same reviewed full
+version-6 SHA for immutable pinning. Enable repository issues and publication as
 shown in [step 4](node-maintenance.md#4-enable-publication-and-run-the-first-audit),
 then run a manual security audit. Preflight checks the resolved tools, cooldown,
 and schedules before dependency changes.

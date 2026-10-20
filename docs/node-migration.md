@@ -23,7 +23,7 @@ are manual steps; the shared repository does not rewrite consumer installations.
 
 ## Consumer checklist
 
-1. Choose a reviewed version-6 commit. Read `node/contract.json` and use
+1. Choose `v1` for compatible updates, or a reviewed version-6 commit for immutable pinning. Read `node/contract.json` and use
    `node/caller.yml` from that same revision.
 2. Rename `.github/docusaurus.json` to `.github/node-maintenance.json`.
 3. Rename `buildScript` to `validationScript` if present. Keep `"build"` for an
@@ -34,7 +34,7 @@ are manual steps; the shared repository does not rewrite consumer installations.
    inherited values and local overrides; following the recommended defaults
    enables quarterly routine upgrades as well as weekly security checks.
 5. Replace both caller workflow references with `node-audit.yml` and
-   `node-publish.yml` at the same reviewed SHA. Use
+   `node-publish.yml` at the same `v1` tag or reviewed full SHA. Use
    `.github/workflows/dependency-audit.yml` as the caller filename. Match its cron
    entries to the resolved [schedule](audit-schedules.md), and include the current
    caller's permissions and manual `audit-kind` input forwarding.

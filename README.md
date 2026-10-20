@@ -1,8 +1,8 @@
 # Shared GitHub Actions
 
 Reusable workflows for organization-owned and personal repositories. Each
-installation keeps its configuration and pins shared workflow code to a reviewed
-commit. Supports GitHub.com.
+installation keeps its configuration and uses `@v1` for automatic compatible
+workflow updates. Full commit SHA pinning remains available. Supports GitHub.com.
 
 ## Available workflows
 
@@ -59,6 +59,7 @@ repositories at a time in one runner, with one combined report and issue.
 - [Shared defaults for multiple installations](docs/shared-defaults.md)
 - [Maintenance behavior, reports, and permissions](node/maintenance.md)
 - [Migrate an earlier Docusaurus installation](docs/node-migration.md)
+- [Workflow releases and immutable pins](docs/workflow-releases.md)
 - [Maintenance caller template](node/caller.yml) and [integration contract](node/contract.json)
 
 The Node implementation retains its BSD 3-Clause license.
