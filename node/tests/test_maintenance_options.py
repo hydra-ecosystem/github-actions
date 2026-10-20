@@ -352,6 +352,173 @@ def test_clear_headline_reports_optional_updates_and_unfixed_security(
     assert report.startswith("**1 routine dependency update · Validation passed**")
 
 
+def test_routine_report_shows_selected_direct_upgrades_and_release_notes(
+    site, monkeypatch
+):
+    commands = fake_commands(monkeypatch)
+    invoke = helper["prepare"].__globals__["run"]
+
+    def metadata(directory, *args, **kwargs):
+        if args[:3] == ("view", "renderer@2.0.0", "repository.url"):
+            commands.append(args)
+            return subprocess.CompletedProcess(
+                args, 0, '"git+https://github.com/example/renderer.git"', ""
+            )
+        return invoke(directory, *args, **kwargs)
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "run", metadata)
+    report = helper["prepare"](site)
+    visible, collapsed = report.split("<details>", 1)
+    assert visible.index("## Validation") < visible.index(
+        "## Direct dependency upgrades"
+    )
+    assert (
+        "| `renderer` | `^1.2.3` | `2.0.0` | [Releases](https://github.com/example/renderer/releases) |"
+        in visible
+    )
+    assert "All dependency changes" in collapsed
+    assert (
+        sum(
+            args[:3] == ("view", "renderer@2.0.0", "repository.url")
+            for args in commands
+        )
+        == 1
+    )
+
+
+def test_security_only_report_has_no_routine_table_or_release_lookup(site, monkeypatch):
+    commands = fake_commands(monkeypatch)
+    report = helper["prepare"](site, maintenance_mode="security-only")
+    assert "## Direct dependency upgrades" not in report
+    assert not any("repository.url" in args for args in commands)
+
+
+def test_failed_routine_resolution_has_no_direct_upgrade_table(site, monkeypatch):
+    fake_commands(monkeypatch)
+    invoke = helper["prepare"].__globals__["run"]
+
+    def fail(directory, *args, **kwargs):
+        result = invoke(directory, *args, **kwargs)
+        if args[0] == "install" and "--lockfile-only" in args:
+            result.returncode = 1
+        return result
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "run", fail)
+    report = helper["prepare"](site)
+    assert "## Direct dependency upgrades" not in report
+    assert "Stable upgrade resolution failed" in report
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        '"git+https://github.com/example/project.git"',
+        '"https://github.com/example/project"',
+        '"https://gitlab.com/example/project.git"',
+        "null",
+        "not-json",
+    ],
+)
+def test_release_note_lookup_uses_metadata_or_explicit_package_fallback(
+    site, monkeypatch, repository
+):
+    snapshot = helper["valid_snapshot"](site)
+    monkeypatch.setitem(
+        helper["release_notes_link"].__globals__,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, repository, ""),
+    )
+    link = helper["release_notes_link"](
+        site, "@scope/renderer", "2.0.0", snapshot, [], float("inf")
+    )
+    if "github.com" in repository:
+        assert link == "[Releases](https://github.com/example/project/releases)"
+    else:
+        assert (
+            link
+            == "[Package details](https://www.npmjs.com/package/@scope/renderer/v/2.0.0)"
+        )
+
+
+def test_direct_upgrade_rows_exclude_transitive_security_and_rolled_back_changes():
+    initial = (
+        b"",
+        {},
+        {
+            "dependencies": {
+                "routine": "1.0.0",
+                "security": "1.0.0",
+                "unchanged": "1.0.0",
+            },
+            "devDependencies": {"dev": "1.0.0"},
+        },
+        {},
+    )
+    security = (
+        b"",
+        {},
+        {
+            "dependencies": {
+                "routine": "1.0.0",
+                "security": "1.1.0",
+                "unchanged": "1.0.0",
+            },
+            "devDependencies": {"dev": "1.0.0"},
+        },
+        {},
+    )
+    final = (
+        b"",
+        {},
+        {
+            "dependencies": {
+                "routine": "2.0.0",
+                "security": "1.1.0",
+                "unchanged": "1.0.0",
+            },
+            "devDependencies": {"dev": "2.0.0"},
+        },
+        {},
+    )
+    targets = {
+        ("dependencies", "routine"),
+        ("dependencies", "security"),
+        ("dependencies", "unchanged"),
+        ("devDependencies", "dev"),
+    }
+    rows = helper["routine_upgrade_rows"](initial, security, final, targets)
+    assert rows == [
+        ("devDependencies", "dev", "1.0.0", "2.0.0"),
+        ("dependencies", "routine", "1.0.0", "2.0.0"),
+    ]
+    assert helper["routine_upgrade_rows"](initial, security, security, targets) == []
+    assert helper["routine_upgrade_rows"](initial, security, final, set()) == []
+    table = helper["format_routine_upgrades"](
+        rows, {("dev", "2.0.0"): "details", ("routine", "2.0.0"): "details"}
+    )
+    assert "`dev` (dev)" in table
+    assert "security" not in table and "unchanged" not in table
+
+
+def test_release_notes_metadata_cannot_change_the_retained_proposal(site, monkeypatch):
+    snapshot = helper["valid_snapshot"](site)
+    notes = []
+
+    def mutate(directory, *args, **kwargs):
+        (directory / "package.json").write_text('{"scripts":{"build":"changed"}}')
+        return subprocess.CompletedProcess(
+            [], 0, '"https://github.com/example/project"', ""
+        )
+
+    monkeypatch.setitem(helper["release_notes_link"].__globals__, "run", mutate)
+    link = helper["release_notes_link"](
+        site, "renderer", "2.0.0", snapshot, notes, float("inf")
+    )
+    assert helper["valid_snapshot"](site) == snapshot
+    assert "Package details" in link and "Releases" not in link
+    assert any("Release notes lookup" in note for note in notes)
+
+
 def test_registry_finding_removal_does_not_turn_unrelated_churn_into_a_security_fix(
     site, monkeypatch
 ):
@@ -2017,14 +2184,12 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
     report = helper["prepare"](site)
     assert report.startswith("**1 routine dependency update · Validation passed**")
     visible, details = report.split("<details>", 1)
-    assert (
-        visible.index("## Proposed dependency changes")
-        < visible.index("- renderer:")
-        < visible.index("## Validation")
-        < visible.index(
-            "## Existing security findings" if blocked else "## Security status"
-        )
+    assert visible.index("## Validation") < visible.index(
+        "## Existing security findings" if blocked else "## Security status"
     )
+    assert "- renderer:" not in visible
+    assert details.startswith("\n<summary>All dependency changes</summary>")
+    assert "- renderer:" in details
     assert "- Frozen install: passed." in visible
     assert "- Project checks: passed." in visible
     assert "**Maintenance:**" not in visible

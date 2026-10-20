@@ -81,10 +81,30 @@ If initial or final audit evidence is unavailable or incomplete, the run fails
 and skips publication. The report identifies the cause and retains the separate
 frozen-install and project-check results. Its summary and report artifact remain
 available after failure; passing project checks do not make the audit complete.
-The report leads with proposed versions and validation results. Routine-only
+The report leads with a summary and validation results. Confirmed security fixes
+appear in a table; the full dependency version list is expandable. Routine-only
 headlines omit unrelated security counts. Existing blocked findings with unchanged
 audit evidence appear as neutral background, with severity and constraints in
 expandable details. New findings and evidence that needs review remain visible.
+Security-fix rows link to one primary reported advisory, and count additional
+advisories with a pointer to the full audit details. The full audit details
+retain every advisory link, including the underlying advisory for an indirectly
+affected package. When npm newly lists an unchanged
+parent package through an existing advisory, and the affected package versions
+and installed paths are unchanged, the report explains this in the details.
+This also requires unchanged parent lock records and previously reported
+advisory sources through its immediate dependencies.
+It does not flag that entry as a newly introduced vulnerability. Other newly
+reported findings remain visible for review; an audit difference alone does not
+prove that the proposal introduced a vulnerability.
+
+Routine-upgrade proposals also show a table of selected direct upgrades that
+remain in the final proposal. Current and proposed values are the declared
+`package.json` requirements. Development and optional dependencies are marked.
+Transitive changes stay in the expandable full version list. Release-note links
+open the GitHub releases page identified by published package metadata. If that
+metadata is unavailable or names another host, the row links to the proposed
+version's npm package details instead.
 
 Reports retain unresolved findings, pin decisions, validation failures, changed
 locked version sets, and candidate dependency-file SHA-256 hashes. Grouped logs
