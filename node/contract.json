@@ -91,7 +91,9 @@
     "push_paths": [
       "**/pnpm-lock.yaml",
       "**/package-lock.json",
-      ".github/node-maintenance.json"
+      ".github/node-maintenance.json",
+      "**/.nvmrc",
+      "**/.node-version"
     ],
     "default_branch_placeholder": "__DEFAULT_BRANCH__",
     "refresh_creates_prs": false,

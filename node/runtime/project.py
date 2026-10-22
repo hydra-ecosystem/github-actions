@@ -13,6 +13,7 @@ DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
 CONFIGURATION = runpy.run_path(str(Path(__file__).with_name("configuration.py")))
 SCHEDULING = CONFIGURATION["SCHEDULING"]
 NODE_SECURITY = runpy.run_path(str(Path(__file__).with_name("node_security.py")))
+NODE_PROPOSAL = runpy.run_path(str(Path(__file__).with_name("node_proposal.py")))
 
 
 def node_version(value, location):
@@ -441,7 +442,9 @@ def configuration_inputs(root, directory):
     return result
 
 
-def resolve_for_run(root, snapshot_path, sources):
+def resolve_for_run(
+    root, snapshot_path, sources, *, node_update_path=None, propose_node=False
+):
     if snapshot_path is not None and snapshot_path.exists():
         # The snapshot includes provenance from several bounded source files.
         with snapshot_path.open("rb") as stream:
@@ -488,6 +491,18 @@ def resolve_for_run(root, snapshot_path, sources):
         return directory, selected
     config = CONFIGURATION["load_configuration"](root, sources)
     directory, selected = project(root, config=config)
+    if node_update_path is not None:
+        plan = NODE_PROPOSAL["prepare"](root, directory, selected, enabled=propose_node)
+        try:
+            NODE_PROPOSAL["write_changes"](root, plan)
+            config = CONFIGURATION["merge_shared"](
+                config, CONFIGURATION["local_configuration"](root)
+            )
+            directory, selected = project(root, config=config)
+        except (OSError, ValueError):
+            NODE_PROPOSAL["write_changes"](root, plan, restore=True)
+            raise
+        write_json(node_update_path, plan)
     if snapshot_path is not None:
         write_json(
             snapshot_path,
@@ -533,6 +548,8 @@ def main() -> None:
     parser.add_argument("--verify-runtime", action="store_true")
     parser.add_argument("--directory-only", action="store_true")
     parser.add_argument("--resolved-config", type=Path)
+    parser.add_argument("--node-update", type=Path)
+    parser.add_argument("--propose-node-update", action="store_true")
     parser.add_argument("--configuration-report", type=Path)
     parser.add_argument("--audit-kind", choices=("auto", "security", "upgrades"))
     parser.add_argument("--refresh", action="store_true")
@@ -552,7 +569,13 @@ def main() -> None:
             else:
                 print(values, end="")
             return
-        directory, selected = resolve_for_run(root, args.resolved_config, sources)
+        directory, selected = resolve_for_run(
+            root,
+            args.resolved_config,
+            sources,
+            node_update_path=args.node_update,
+            propose_node=args.propose_node_update,
+        )
         if args.audit_kind is not None:
             if args.resolved_config is None:
                 raise ValueError(

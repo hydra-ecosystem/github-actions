@@ -39,6 +39,10 @@ report_content() {
   sed -E '/^Run: [0-9]{4}-[0-9]{2}-[0-9]{2}T/d; /^\[Workflow run\]\(/d; /^[[:space:]]*$/d' "$1"
 }
 proposal_title() {
+  if [ -n "${NODE_UPDATE_VERSION:-}" ]; then
+    printf 'Node: runtime security update to %s\n' "$NODE_UPDATE_VERSION"
+    return
+  fi
   local summary updates update_word fixes fix_word
   local routine_pattern='^\*\*([0-9]+) routine dependency (update|updates) · Validation '
   local update_pattern='^\*\*([0-9]+) dependency (update|updates) · '

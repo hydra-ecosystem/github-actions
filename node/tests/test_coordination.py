@@ -70,6 +70,29 @@ def test_manual_requests_create_only_their_own_channel(tmp_path, kind):
     assert not result["refresh_only"] and not result["validate_main"]
 
 
+@pytest.mark.parametrize("path", ["app/.nvmrc", "app/.node-version", ".nvmrc"])
+def test_node_declaration_push_refreshes_the_open_security_proposal(tmp_path, path):
+    config = setup(tmp_path, {"security": [], "upgrades": []}, "security-only")
+    result = COORDINATION["plan"](
+        tmp_path,
+        config,
+        {"maintenance": {"mode": "security-only"}},
+        "push",
+        {"repository": {"default_branch": "main"}, "ref": "refs/heads/main"},
+        "auto",
+        [
+            {
+                "number": 42,
+                "headRefName": BRANCHES["security"],
+                "isCrossRepository": False,
+            }
+        ],
+        changed_paths=[path],
+        directory="app",
+    )
+    assert result["validate_main"] and result["security"] and result["refresh_only"]
+
+
 def test_adoption_rejects_an_unresolved_legacy_proposal(tmp_path):
     config = setup(tmp_path, {"security": [], "upgrades": []})
     with pytest.raises(ValueError, match="Merge or close the legacy"):

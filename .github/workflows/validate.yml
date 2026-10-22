@@ -53,9 +53,22 @@ jobs:
     - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.13'
+    - name: Select the security proposal runtime
+      id: security-node
+      env:
+        TEST_NODE: ${{ matrix.node }}
+      run: |
+        python - <<'PY'
+        import os
+        import runpy
+        security = runpy.run_path('node/runtime/node_security.py')
+        version = security['latest_security_release'](os.environ['TEST_NODE'])
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'version={version}\n')
+        PY
     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
       with:
-        node-version: ${{ matrix.node }}
+        node-version: ${{ steps.security-node.outputs.version }}
         check-latest: true
     - run: 'corepack enable
 

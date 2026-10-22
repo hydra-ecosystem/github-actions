@@ -10,7 +10,10 @@ script, build prerequisites, deployment, and package-manager policy.
 Preflight checks the selected standalone project, declared tools, supported
 lockfile, validation script, and release cooldown before dependency changes.
 Explicit or inherited toolchain constraints must agree with project declarations.
-A mismatch fails the run; it does not rewrite files or migrate the project.
+A mismatch fails the run. Security proposals can update local Node declarations
+within their existing major and validate the candidate with that runtime. They
+do not migrate the Node major or package manager, rewrite shared defaults, or
+merge changes automatically.
 See [supported projects](../docs/node-maintenance.md#supported-projects) and
 [toolchain selection](../docs/node-maintenance.md#toolchain-selection).
 
@@ -25,6 +28,20 @@ Security audits attempt compatible fixes at all severities. Security-only runs
 retain changes only when before/after audit evidence confirms a security fix;
 unrelated changes are discarded. The engine does not force incompatible upgrades
 or remove project overrides automatically.
+
+Node runtime updates use Node's official release index, independently of package
+advisory counts. A Node-only security update can therefore open a PR when no npm
+or pnpm dependency fix is available. Reports show the original declaration, the
+proposed exact security release, and validation. Failed project validation leaves
+a draft proposal. The publisher accepts only verified same-major Node declaration
+edits against the audited base, and rejects arbitrary or stale artifact edits.
+The coordinated security channel owns Node updates; the routine-upgrades channel
+does not duplicate them. Legacy combined callers also include Node updates.
+
+New coordinated callers watch `.nvmrc` and `.node-version` changes so merging a
+Node update validates main and refreshes open proposals. Existing callers with
+only the older dependency path filters remain supported; adopt the current
+caller template to enable automatic refresh after a Node-only merge.
 
 For npm, audits include production, development, optional, and peer dependencies,
 even when `.npmrc`, user configuration, or the environment omits a dependency
