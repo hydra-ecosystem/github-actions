@@ -15,6 +15,15 @@ SHA = "a" * 40
 SOURCE = {"repository": "owner/settings", "path": "defaults.json", "ref": "main"}
 
 
+@pytest.fixture(autouse=True)
+def node_release_index(monkeypatch):
+    monkeypatch.setitem(
+        module["NODE_SECURITY"]["verify_node_security"].__globals__,
+        "read_release_index",
+        lambda: '[{"version":"v24.22.1","security":true}]',
+    )
+
+
 @pytest.fixture
 def site(tmp_path):
     (tmp_path / ".github").mkdir()
@@ -651,7 +660,7 @@ def test_actual_preflight_report_only_becomes_healthy_after_runtime_validation(
     assert json.loads(report.read_text())["status"] == "pending"
 
     def runtime(command, **kwargs):
-        value = "v24.14.0" if command[0] == "node" else "11.21.0"
+        value = "v24.22.1" if command[0] == "node" else "11.21.0"
         return subprocess.CompletedProcess(command, 0, value, "")
 
     monkeypatch.setattr(subprocess, "run", runtime)
@@ -697,7 +706,7 @@ def test_malformed_lockfile_changes_pending_to_error_with_provenance(
     (website / "pnpm-lock.yaml").write_text("lockfileVersion: [\n")
 
     def runtime(command, **kwargs):
-        value = "v24.14.0" if command[0] == "node" else "11.21.0"
+        value = "v24.22.1" if command[0] == "node" else "11.21.0"
         return subprocess.CompletedProcess(command, 0, value, "")
 
     monkeypatch.setattr(subprocess, "run", runtime)
