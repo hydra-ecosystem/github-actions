@@ -2204,7 +2204,7 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
         assert "4 advisories are blocked, unchanged by this PR." in visible
         assert "critical" not in visible
         assert "Blocked findings and constraints" in details
-        assert "| `worker` | 2 critical |" in details
+        assert "| 🔴 `worker` | 2 critical |" in details
         assert "The registry supplies no patched version." in details
     else:
         assert "unchanged by this PR" not in report
@@ -2222,7 +2222,7 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
         assert "worker" in visible
     assert "Validation script:" not in visible
     assert "Validation script:" in details
-    assert "🔴" not in report
+    assert "🔴 **New findings" not in report
 
 
 def test_new_security_findings_stay_visible_above_collapsed_details(site, monkeypatch):

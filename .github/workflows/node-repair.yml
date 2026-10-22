@@ -1,0 +1,140 @@
+name: Repair selected Node pins
+'on':
+  workflow_call:
+    inputs:
+      request-id:
+        required: true
+        type: string
+      pull-request:
+        required: true
+        type: string
+      expected-head:
+        required: true
+        type: string
+      expected-base:
+        required: true
+        type: string
+      selections:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+    - uses: $/node/repair
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        operation: guard
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
+  prepare:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      npm_config_ignore_pnpmfile: 'true'
+      pnpm_config_ignore_pnpmfile: 'true'
+    outputs:
+      candidate-artifact-id: ${{ steps.candidate.outputs.artifact-id }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        persist-credentials: false
+        fetch-depth: 0
+    - uses: $/node/repair
+      with:
+        operation: prepare
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
+    - name: Seal candidate before validation
+      id: candidate
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: node-repair-candidate-${{ inputs.request-id }}
+        path: ${{ runner.temp }}/node-repair/candidate/
+        if-no-files-found: error
+  validate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        persist-credentials: false
+        fetch-depth: 0
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: ${{ needs.prepare.outputs.candidate-artifact-id }}
+        path: ${{ runner.temp }}/node-repair/candidate
+        merge-multiple: true
+    - uses: $/node/repair
+      with:
+        operation: validate
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
+    - name: Retain repair evidence
+      if: ${{ always() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: node-repair-${{ inputs.request-id }}
+        path: ${{ runner.temp }}/node-repair/evidence/
+        if-no-files-found: warn
+    - name: Show repair evidence
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        for file in "$RUNNER_TEMP/node-repair/evidence/"*.md; do
+          if [ -f "$file" ]; then cat "$file" >> "$GITHUB_STEP_SUMMARY"; fi
+        done
+  publish:
+    needs: [prepare, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: node-dependency-proposal-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        fetch-depth: 0
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: ${{ needs.prepare.outputs.candidate-artifact-id }}
+        path: ${{ runner.temp }}/node-repair/candidate
+        merge-multiple: true
+    - uses: $/node/repair
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        operation: publish
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}

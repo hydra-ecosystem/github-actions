@@ -38,7 +38,7 @@ Do not point this caller at an older revision that lacks the workflow.
 
    For manual-only routine upgrades, omit the quarterly entry. For no scheduled
    work, remove `schedule`. Keep the manual input and push trigger in all cases.
-4. Keep the existing PR-creation permission or optional App configuration.
+4. Keep the existing PR-creation permission or optional publisher App configuration.
    Replace the previous caller rather than installing a second scheduled file.
    Keep the `dependency-audit` concurrency group with `cancel-in-progress: false`
    and `queue: max` so a new request does not cancel a pending push check.

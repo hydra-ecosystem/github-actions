@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "node-dependency-repair",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-22",
+  "workers_dev": true,
+  "vars": { "APP_ID": "REPLACE_WITH_GITHUB_APP_ID", "APP_SLUG": "REPLACE_WITH_GITHUB_APP_SLUG" },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "node-dependency-repair",
+    "database_id": "REPLACE_WITH_CREATED_DATABASE_ID"
+  }],
+  "triggers": { "crons": ["0 3 * * *"] }
+}
