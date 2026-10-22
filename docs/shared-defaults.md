@@ -70,7 +70,7 @@ Keep explicit local values only when you intend to override shared policy.
 
 ## 3. Match the caller and run an audit
 
-Continue with [step 3 of the setup guide](node-maintenance.md#3-add-the-caller-workflow).
+Continue with [App installation and workflow setup](node-maintenance.md#3-install-the-maintenance-app).
 For the recommended defaults, the caller must contain both cron entries:
 
 ```yaml
@@ -79,9 +79,10 @@ schedule:
 - cron: '0 2 1 */3 *'
 ```
 
-Place this under `on` in the caller. Keep both reusable workflow calls at `@v1`, or use the same reviewed full
-version-6 SHA for immutable pinning. Enable repository issues and publication as
-shown in [step 4](node-maintenance.md#4-enable-publication-and-run-the-first-audit),
+Place this under `on` in the caller. Use the same reviewed integration revision
+for the maintenance and follow-up workflow files, as described in that guide.
+Enable repository issues and publication as
+shown in [step 5](node-maintenance.md#5-enable-publication-and-run-the-first-audit),
 then run a manual security audit. Preflight checks the resolved tools, cooldown,
 and schedules before dependency changes.
 

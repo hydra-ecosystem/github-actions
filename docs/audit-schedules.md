@@ -40,7 +40,7 @@ routine upgrades at 02:00 UTC on the first day of January, April, July, and
 October. Both kinds obey the release cooldown and project constraints. Routine
 upgrades also obey `maintenance.upgradeScope`.
 
-In the [setup guide's caller](node-maintenance.md#3-add-the-caller-workflow), use:
+In the [setup guide's caller](node-maintenance.md#4-add-the-workflow-files), use:
 
 ```yaml
 'on':

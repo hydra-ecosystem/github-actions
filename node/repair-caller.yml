@@ -1,0 +1,42 @@
+name: Node dependency repair
+run-name: 'Node repair #${{ inputs.pull-request }} · ${{ inputs.request-id }}'
+'on':
+  workflow_dispatch:
+    inputs:
+      request-id:
+        description: Request identifier supplied by the repair App.
+        required: true
+        type: string
+      pull-request:
+        description: Managed security PR number.
+        required: true
+        type: string
+      expected-head:
+        description: Approved PR head SHA.
+        required: true
+        type: string
+      expected-base:
+        description: Default branch SHA at approval.
+        required: true
+        type: string
+      selections:
+        description: Exact package and version selections supplied by the App.
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: node-repair-${{ inputs.pull-request }}
+  cancel-in-progress: false
+jobs:
+  repair:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: __CENTRAL_REPOSITORY__/.github/workflows/node-repair.yml@__CENTRAL_REVISION__
+    with:
+      request-id: ${{ inputs.request-id }}
+      pull-request: ${{ inputs.pull-request }}
+      expected-head: ${{ inputs.expected-head }}
+      expected-base: ${{ inputs.expected-base }}
+      selections: ${{ inputs.selections }}
