@@ -98,7 +98,7 @@ def test_package_severity_is_independent_from_review_status_and_versions():
         in text
     )
     assert (
-        "| `package-b` | `2.0.0` (unchanged) | High | 1 pending | 🟠 Needs review."
+        "| `package-b` | `2.0.0` (unchanged) | High | 1 pending | 🟡 Needs review."
         in text
     )
     assert summary == {"fixed_packages": 1, "review_count": 1}

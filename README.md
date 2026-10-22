@@ -25,11 +25,16 @@ checks. With the released two-job caller, all audit kinds maintain
 reruns update that PR rather than opening one PR per dependency. Reports show
 proposed versions, validation, and blocked findings.
 
-For separate security and routine-upgrade PRs, see the opt-in
-[coordinated caller](docs/node-coordination.md). It validates dependency-file
+The [App-based setup](docs/node-maintenance.md#set-it-up) includes App installation
+and coordinated workflows for separate security and routine-upgrade PRs. The
+[coordinated caller](docs/node-coordination.md) validates dependency-file
 pushes and refreshes existing proposals after either PR merges. This new caller
 requires a workflow revision containing that interface; existing callers keep
 their combined-PR behavior.
+
+The shared maintenance App supplies GitHub controls. Maintainer-selected
+follow-up repairs are one use of that integration; tests and changes run in the
+repository's Actions. See [reviewing findings and requesting repairs](docs/node-maintenance.md#review-findings-and-request-follow-up-repairs).
 
 | Maintenance setup | Automatic security checks | Automatic routine upgrades |
 | --- | --- | --- |
@@ -64,6 +69,7 @@ repositories at a time in one runner, with one combined report and issue.
 - [Fleet setup checks: inventory, caller, results, and limits](docs/node-fleet-setup.md)
 - [Maintenance schedules and manual audits](docs/audit-schedules.md)
 - [Separate proposal channels and automatic refresh](docs/node-coordination.md)
+- [Maintenance App operators: host the App and Cloudflare service](docs/node-maintenance-operator.md)
 - [Shared defaults for multiple installations](docs/shared-defaults.md)
 - [Maintenance behavior, reports, and permissions](node/maintenance.md)
 - [Migrate an earlier Docusaurus installation](docs/node-migration.md)
