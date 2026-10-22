@@ -10,7 +10,65 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 ROOT = Path(__file__).parents[1]
+
+
+def check_pnpm_repair_hooks(project, command):
+    """Exercise the production candidate command against an executable pnpmfile."""
+    repair = runpy.run_path(str(ROOT / "runtime/repair.py"))
+    marker = project / "hook-executed"
+    hook = project / ".pnpmfile.cjs"
+    hook.write_text(
+        "require('node:fs').writeFileSync('hook-executed', 'executed');\n"
+        "module.exports = {};\n"
+    )
+    global_hook = project / "global-pnpmfile.cjs"
+    global_hook.write_text(hook.read_text())
+    workspace = project / "pnpm-workspace.yaml"
+    original_workspace = workspace.read_text()
+    workspace.write_text(
+        original_workspace + f"\nglobalPnpmfile: {json.dumps(str(global_hook))}\n"
+    )
+    subprocess.run(
+        [*command, "install", "--lockfile-only", "--ignore-scripts"],
+        cwd=project,
+        check=True,
+        timeout=180,
+    )
+    assert marker.exists(), "The unsafe command must reproduce pnpmfile execution"
+    marker.unlink()
+    subprocess.run(
+        [*command, *repair["CANDIDATE_INSTALL"]],
+        cwd=project,
+        check=True,
+        timeout=180,
+    )
+    assert not marker.exists(), "Candidate preparation executed a pnpmfile"
+    workflow = yaml.safe_load(
+        (ROOT.parent / ".github/workflows/node-repair.yml").read_text()
+    )
+    environment = os.environ | workflow["jobs"]["prepare"]["env"]
+    for arguments in (
+        ("audit", "--json"),
+        ("view", "is-number@6.0.0", "version", "--json"),
+    ):
+        result = subprocess.run(
+            [*command, *arguments],
+            cwd=project,
+            env=environment,
+            capture_output=True,
+            timeout=180,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        if arguments[0] == "view":
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) == "6.0.0"
+        assert not marker.exists(), "Preparation metadata reads executed a pnpmfile"
+    hook.unlink()
+    global_hook.unlink()
+    workspace.write_text(original_workspace)
 
 
 def check_npm_policy(version):
@@ -166,6 +224,8 @@ def check(node, manager, version):
             check=True,
             timeout=180,
         )
+        if manager == "pnpm":
+            check_pnpm_repair_hooks(project, command)
         preflight = runpy.run_path(str(ROOT / "runtime/project.py"))
         plan_path = root / "node-update.json"
         directory, selected = preflight["resolve_for_run"](

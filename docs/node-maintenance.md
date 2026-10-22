@@ -2,7 +2,7 @@
 
 Use these workflows for a standalone Node application, library, or website.
 They attempt compatible security fixes, optionally propose routine upgrades,
-and validate the result before opening or updating one maintenance PR.
+and validate the result before opening or updating a proposal for that channel.
 
 This guide installs maintenance in one repository. To monitor setup across several
 installations, use the separate [fleet setup checker](node-fleet-setup.md).
@@ -10,9 +10,14 @@ installations, use the separate [fleet setup checker](node-fleet-setup.md).
 Already using the earlier Docusaurus workflows? Follow the
 [migration checklist](node-migration.md) instead.
 
-For separate security and routine-upgrade proposals with dependency-file-triggered
-validation and refresh, use the [coordinated caller](node-coordination.md).
-The released two-job caller below retains one combined maintenance PR.
+**App integration availability: preview.** The installation link and released
+workflow reference are pending. For the pilot setup below, obtain the App
+installation link and reviewed workflow reference from the service operator.
+Existing installations keep their current behavior until they adopt this setup.
+
+The setup uses [coordinated maintenance](node-coordination.md) for separate
+security and routine-upgrade proposals. App installation is part of the overall
+maintenance setup; it is not specific to an individual repair.
 
 ## Supported projects
 
@@ -183,23 +188,35 @@ To inherit policy for several installations, use the configuration in the
 [shared-defaults guide](shared-defaults.md#2-point-each-installation-at-the-source)
 instead. Do not keep explicit local fields for policy you want to inherit.
 The recommended shared file selects weekly security **and quarterly upgrades**,
-so its caller needs both cron entries in step 3.
+so its caller needs both cron entries in step 4.
 
-### 3. Add the caller workflow
+### 3. Install the maintenance App
 
-Create `.github/workflows/dependency-audit.yml` using the following caller.
-Both workflow calls use `@v1`, a moving release tag. Compatible fixes reach your
-installation without a local workflow edit. Breaking changes use a new major
-release and require an explicit update.
+Install the shared GitHub App on your organization or personal account using the
+operator's installation link. Choose **Only select repositories**, then select
+this repository. One installation can serve several selected repositories in
+that account. Each other organization or personal account installs it separately;
+an organization may require owner approval.
 
-To review every workflow update yourself, replace **both** `v1` references with
-the same reviewed full 40-character commit SHA. That revision must declare Node
-integration version **6** in `node/contract.json`; use its caller template.
-See [workflow releases and immutable pins](workflow-releases.md) for the release
-policy and tradeoff.
+The App supplies the maintenance controls in GitHub. It does not install workflow
+files. Repository maintainers do not need a Cloudflare account, server, App
+private key, or callback secret. The service operator handles hosting and
+credentials; see the separate [operator guide](node-maintenance-operator.md).
+
+### 4. Add the workflow files
+
+Use the same reviewed workflow revision for both files below. Replace
+`REVIEWED_REVISION` with the reference supplied for the pilot; the selected
+revision must contain the App integration and repair workflow. Use a released
+reference once this integration is published. See [workflow releases and
+immutable pins](workflow-releases.md) for the release policy.
+
+Create `.github/workflows/dependency-audit.yml` from the
+[coordinated caller](../node/coordinated-caller.yml). For the basic configuration
+in step 2, with `main` as the default branch, it is:
 
 ```yaml
-name: Node dependency audit
+name: Node dependency maintenance
 
 'on':
   schedule:
@@ -213,6 +230,15 @@ name: Node dependency audit
         options:
         - security
         - upgrades
+  push:
+    branches:
+    - main
+    paths:
+    - '**/pnpm-lock.yaml'
+    - '**/package-lock.json'
+    - '.github/node-maintenance.json'
+    - '**/.nvmrc'
+    - '**/.node-version'
 
 permissions:
   contents: read
@@ -220,66 +246,113 @@ permissions:
 concurrency:
   group: dependency-audit
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  audit:
-    permissions:
-      contents: read
-      issues: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/node-audit.yml@v1
-    with:
-      audit-kind: ${{ inputs.audit-kind || 'auto' }}
-
-  pull-request:
-    needs: audit
+  maintenance:
     permissions:
       contents: write
       pull-requests: write
-    uses: hydra-ecosystem/github-actions/.github/workflows/node-publish.yml@v1
+      issues: write
+    uses: hydra-ecosystem/github-actions/.github/workflows/node-maintenance.yml@REVIEWED_REVISION
     with:
-      validation-passed: ${{ needs.audit.outputs.validation_passed }}
+      audit-kind: ${{ inputs.audit-kind || 'auto' }}
       app-client-id: ${{ vars.NODE_AUDIT_APP_CLIENT_ID }}
     secrets:
       app-private-key: ${{ secrets.NODE_AUDIT_APP_PRIVATE_KEY }}
 ```
 
-This caller matches the basic configuration in step 2. If you chose the
-recommended shared defaults, add `- cron: '0 2 1 */3 *'` under `on.schedule`.
-For other policies, use the unique cron entries from the resolved security and
-upgrades lists. Omit `on.schedule` when both lists are empty. See
+Replace `main` under `push.branches` if your default branch has another name.
+If adopting this caller from an earlier combined installation, first review and
+merge or close the old `maintenance/dependency-audit` PR. Replace the previous
+audit caller rather than adding a second scheduled file.
+
+If you chose the recommended shared defaults, add `- cron: '0 2 1 */3 *'` under
+`on.schedule`. For other policies, use the unique cron entries from the resolved
+security and upgrades lists. Omit `on.schedule` when both lists are empty. See
 [schedules and manual runs](audit-schedules.md) for complete examples.
 
-The dependency job is read-only. A separate reporter can update one configuration
-issue; the publisher can write the maintenance branch and PR. Leave the optional
-App variable and secret unset to use `GITHUB_TOKEN`.
+Also copy [node/repair-caller.yml](../node/repair-caller.yml) to
+`.github/workflows/dependency-repair.yml`. Keep this filename so the App can find
+it. Replace `__CENTRAL_REPOSITORY__` with `hydra-ecosystem/github-actions` and
+`__CENTRAL_REVISION__` with the same reviewed reference as the audit caller.
+This workflow runs only when dispatched; installing it does not apply repairs.
 
-### 4. Enable publication and run the first audit
+Dependency validation runs with read-only permissions. A separate publisher can
+update the maintenance branch and PR, and configuration reporting can update one
+issue. The `NODE_AUDIT_APP_CLIENT_ID` and `NODE_AUDIT_APP_PRIVATE_KEY` values in
+the audit caller are for a separate, optional publisher App described below.
+Leave them unset to publish with `GITHUB_TOKEN`. Installing the shared maintenance
+App does not require putting its private key in repository secrets.
+
+### 5. Enable publication and run the first audit
 
 In **Settings → Actions → General → Workflow permissions**, enable **Allow
 GitHub Actions to create and approve pull requests**, or configure the optional
-GitHub App below. Default token permissions can stay read-only. Enable repository
-issues for configuration diagnostics. Organization restrictions still apply.
+publisher App below. The shared maintenance App installed in step 3 does not
+replace this repository publication permission. Default token permissions can
+stay read-only. Enable repository issues for configuration diagnostics.
+Organization restrictions still apply.
 
 Merge the setup into your repository's default branch. Open **Actions → Node
-dependency audit → Run workflow**, select the default branch, and choose
+dependency maintenance → Run workflow**, select the default branch, and choose
 **security**. Manual dispatch from other branches is rejected.
 
-Check the preflight logs or `node-audit-configuration` artifact for resolved
+Check the preflight logs or configuration report artifact for resolved
 tool requirements and defaults sources. Read the run summary for frozen
 installation, validation, and the audit result:
 
 | Result | What happens |
 | --- | --- |
-| Validated dependency changes | Opens or updates the single maintenance PR. |
+| Validated dependency changes | Opens or updates the selected security or upgrades PR. |
 | Dependency changes with failed installation or checks | Retains a draft proposal when possible and fails the workflow. |
 | Incomplete or unavailable security audit | Fails the run and skips publication, even if project checks pass; retains the diagnostic summary and report artifact. |
-| No dependency changes | Creates no PR and leaves any existing proposal untouched; read the current run summary or report artifact. |
+| No dependency changes | Creates no new PR. A completed refresh can close an existing proposal when no changes remain; read the current run summary or report artifact. |
 | Invalid configuration | Stops before dependency changes and updates one reusable configuration issue. Successful preflight adds a verification comment and closes it, preserving the last failure description. |
 
 Choose **upgrades** for a separate manual run when you want routine updates.
 It also checks security and still obeys the cooldown and upgrade scope. It does
 not enable automatic upgrades. Nothing merges automatically. See
 [reports and PR behavior](../node/maintenance.md#reports-and-prs) for details.
+
+## Review findings and request follow-up repairs
+
+The security PR shows proposed fixes and remaining findings. Yellow **Needs
+review** means a maintainer decision is needed; red **Blocked** means the checked
+constraints do not permit a fix. Open a package's folded assessment for its
+evidence. **Fix proposed** describes a change in the PR, subject to your review.
+
+For an eligible finding, select the exact changes you allow in **Choose fixes to
+try** in the PR description. Open **Checks → Dependency repair**, confirm the
+selected versions, and click **Run selected fixes**. Checkboxes alone do not
+start a run. A stale selection refreshes the check before another confirmation.
+Merging remains a separate decision.
+
+The first supported follow-up repairs are exact, unqualified pnpm override pins
+with same-minor patch upgrades on the security PR. npm overrides, ranges,
+qualified selectors, major or minor changes, forks, and issues are not supported.
+The initial assessment identifies a compatible published patch; it explicitly
+states when repair validation has not run. Historical pin rationale is not
+collected automatically.
+
+A repair rechecks publication, parent and manifest constraints, release age,
+frozen installation, configured project and local patch checks, and the audit.
+Every selected fix must be confirmed and no new findings may appear. A successful
+batch adds one commit to the same PR and refreshes its report. Other findings can
+remain, and passing checks do not establish compatibility on untested platforms.
+
+Failed validation leaves the PR files unchanged. Read the linked Actions run and
+its retained evidence, resolve the cause or change the selection, then request
+another attempt explicitly. A changed PR head, base, open state, or selection
+stops publication. A publication or report-refresh failure can occur after the
+commit was pushed, so inspect the PR before retrying. If dispatch could not be
+confirmed, inspect Actions and contact the operator before requesting another run.
+
+Normal audits retain a selected repair batch while its security PR awaits review.
+Merge or close that PR before requesting a replacement proposal. If its base
+changes first, reconcile the PR explicitly. Repair publication uses `GITHUB_TOKEN`
+and does not automatically start ordinary push or PR workflows; run any additional
+checks required by your merge rules before merging.
 
 ## Toolchain selection
 
@@ -311,9 +384,9 @@ See the [tested versions](../node/runtime/toolchain.json).
 The [maintenance policy](../node/maintenance.md) explains security-fix evidence,
 package-manager cooldown behavior, proposal rollback, and permissions.
 
-## Optional: publish with a GitHub App
+## Optional: use a separate App for PR publication
 
-An App can publish without enabling the repository-wide built-in-token PR setting.
+A separate publisher App can publish without enabling the repository-wide built-in-token PR setting.
 Create an App with repository **Contents: read/write** and **Pull requests:
 read/write**, then install it on each repository you maintain. Set these in each
 repository's Actions configuration:
