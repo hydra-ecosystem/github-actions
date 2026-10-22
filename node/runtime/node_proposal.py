@@ -148,32 +148,6 @@ def verify_candidate(root, plan):
             raise ValueError("Project validation changed a proposed Node declaration")
 
 
-def render(report, plan, passed):
-    if not plan["changes"]:
-        return report + (
-            "\n## Node runtime security update\n\n" + plan["message"] + "\n"
-            if plan["message"]
-            else ""
-        )
-    rows = []
-    for change in plan["changes"]:
-        before = (
-            json.loads(change["before"])["toolchain"]["node"]
-            if change["path"] == ".github/node-maintenance.json"
-            else change["before"].strip()
-        )
-        rows.append(f"| `{change['path']}` | `{before}` | `{plan['version']}` |")
-    status = "passed" if passed else "failed"
-    return (
-        f"**Node runtime security update to {plan['version']} · Validation {status}**\n\n"
-        + report
-        + "\n## Node runtime security update\n\n"
-        + "| Declaration | Before | Proposed |\n| --- | --- | --- |\n"
-        + "\n".join(rows)
-        + f"\n\nSecurity release source: {SECURITY['RELEASE_INDEX']}. Same-major security updates bypass the package release cooldown.\n"
-    )
-
-
 def publish(root, plan):
     directory, _ = local_project(root)
     if plan["directory"] != directory.relative_to(root).as_posix():

@@ -14,23 +14,27 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def read_release_index():
+def read_public(url, *, max_bytes=MAX_BYTES, timeout=15):
     request = urllib.request.Request(
-        RELEASE_INDEX,
-        headers={"Accept": "application/json", "User-Agent": "node-audit-security"},
+        url,
+        headers={"User-Agent": "node-audit-security"},
     )
     try:
         with urllib.request.build_opener(NoRedirect()).open(
-            request, timeout=15
+            request, timeout=timeout
         ) as response:
-            data = response.read(MAX_BYTES + 1)
+            data = response.read(max_bytes + 1)
     except (OSError, urllib.error.URLError) as error:
         raise ValueError(
-            f"Cannot verify Node runtime security: {RELEASE_INDEX}: {error}"
+            f"Cannot verify Node runtime security: {url}: {error}"
         ) from error
-    if len(data) > MAX_BYTES:
-        raise ValueError("Node release index exceeds the security check size limit")
+    if len(data) > max_bytes:
+        raise ValueError("Node security evidence exceeds the security check size limit")
     return data
+
+
+def read_release_index():
+    return read_public(RELEASE_INDEX)
 
 
 def version_tuple(value):
@@ -41,7 +45,7 @@ def version_tuple(value):
     return tuple(map(int, value.removeprefix("v").split(".")))
 
 
-def latest_security_release(major, *, read=None):
+def security_releases(major, *, read=None):
     data = (read_release_index if read is None else read)()
     try:
         releases = json.loads(data)
@@ -72,8 +76,11 @@ def latest_security_release(major, *, read=None):
         raise ValueError(
             f"Cannot verify Node runtime security: no security release for Node {major}"
         )
-    minimum = max(security_releases)
-    return ".".join(map(str, minimum))
+    return [".".join(map(str, version)) for version in sorted(set(security_releases))]
+
+
+def latest_security_release(major, *, read=None):
+    return security_releases(major, read=read)[-1]
 
 
 def verify_node_security(installed, *, read=None):

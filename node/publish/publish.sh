@@ -47,7 +47,33 @@ proposal_title() {
   local routine_pattern='^\*\*([0-9]+) routine dependency (update|updates) · Validation '
   local update_pattern='^\*\*([0-9]+) dependency (update|updates) · '
   local fix_pattern=' · ([0-9]+) security (fix|fixes) · '
+  local package_fix_pattern=' · ([0-9]+) package security (fix|fixes) · '
+  local dependency_pattern='([0-9]+) (routine )?dependency (update|updates)'
   summary=$(head -n 1 "$1")
+  if [[ "$summary" == *"platform security update"* ]]; then
+    updates=0
+    update_word=updates
+    if [[ "$summary" =~ $dependency_pattern ]]; then
+      updates=${BASH_REMATCH[1]}
+      update_word=${BASH_REMATCH[3]}
+      if [ -n "${BASH_REMATCH[2]}" ]; then
+        printf 'Node: %s routine dependency %s, no security fixes\n' "$updates" "$update_word"
+        return
+      fi
+    fi
+    if [[ "$summary" =~ $package_fix_pattern ]]; then
+      fixes=${BASH_REMATCH[1]}
+      fix_word=${BASH_REMATCH[2]}
+      if [ "$fixes" = 0 ]; then
+        printf 'Node: %s dependency %s, no security fixes\n' "$updates" "$update_word"
+      else
+        printf 'Node: %s dependency %s, %s security %s\n' "$updates" "$update_word" "$fixes" "$fix_word"
+      fi
+    else
+      printf 'Node: %s dependency %s, security fixes unconfirmed\n' "$updates" "$update_word"
+    fi
+    return
+  fi
   if [[ "$summary" =~ $routine_pattern ]]; then
     printf 'Node: %s routine dependency %s, no security fixes\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
   elif [[ "$summary" =~ $update_pattern ]]; then

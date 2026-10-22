@@ -341,7 +341,7 @@ def test_security_only_rejects_lockfile_churn_without_confirmed_fixes(
     report = helper["prepare"](site, maintenance_mode="security-only")
     assert helper["valid_snapshot"](site) == original
     assert "Discarded dependency changes" in report
-    assert report.startswith("**0 dependency updates")
+    assert report.startswith("**0 platform security updates ·")
 
 
 def test_clear_headline_reports_optional_updates_and_unfixed_security(
@@ -349,7 +349,9 @@ def test_clear_headline_reports_optional_updates_and_unfixed_security(
 ):
     fake_commands(monkeypatch)
     report = helper["prepare"](site)
-    assert report.startswith("**1 routine dependency update · Validation passed**")
+    assert report.startswith(
+        "**0 platform security updates · 1 routine dependency update · 0 package security fixes"
+    )
 
 
 def test_routine_report_shows_selected_direct_upgrades_and_release_notes(
@@ -577,7 +579,7 @@ def test_registry_finding_removal_does_not_turn_unrelated_churn_into_a_security_
     monkeypatch.setitem(helper["prepare"].__globals__, "fix_security", churn)
     report = helper["prepare"](site, maintenance_mode="security-only")
     assert helper["valid_snapshot"](site) == original
-    assert report.startswith("**0 dependency updates · 0 security fixes")
+    assert report.startswith("**0 platform security updates ·")
     assert "**Fixes in" not in report
 
 
@@ -896,7 +898,10 @@ def test_security_summary_keeps_disappeared_unconfirmed_advisory_visible():
     summary = helper["format_audit_summary"](
         before, _clear_finding(), "pnpm", fixed_ids=set()
     )
-    assert "| ⚪\u00a0`renderer` | 1 unconfirmed |" in summary
+    assert (
+        "| `renderer` | Not recorded | High | 1 unconfirmed | ⚪ Needs verification."
+        in summary
+    )
     assert "No longer reported; fix could not be confirmed." in summary
     assert "Original affected range: `<1.3.0`." in summary
     assert "Resolved." not in summary
@@ -2182,10 +2187,12 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
 
     monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
     report = helper["prepare"](site)
-    assert report.startswith("**1 routine dependency update · Validation passed**")
+    assert report.startswith(
+        "**0 platform security updates · 1 routine dependency update · 0 package security fixes"
+    )
     visible, details = report.split("<details>", 1)
     assert visible.index("## Validation") < visible.index(
-        "## Existing security findings" if blocked else "## Security status"
+        "## Existing security findings" if blocked else "### Package advisory counts"
     )
     assert "- renderer:" not in visible
     assert details.startswith("\n<summary>All dependency changes</summary>")
@@ -2202,14 +2209,17 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
     else:
         assert "unchanged by this PR" not in report
         assert "4 advisories remain (2 critical)" in visible
-        assert "Security findings and blockers" in details
+        assert "| Package | Update | Severity |" in visible
         if not changed_evidence:
             assert (
-                "your review" in details
+                "your review" in visible
                 if "Published patch:" in status
-                else "verification" in details
+                else "verification" in visible
             )
-    assert "worker" not in visible and "Fixes blocked" not in visible
+    if blocked:
+        assert "worker" not in visible and "Fixes blocked" not in visible
+    else:
+        assert "worker" in visible
     assert "Validation script:" not in visible
     assert "Validation script:" in details
     assert "🔴" not in report

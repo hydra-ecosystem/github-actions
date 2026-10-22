@@ -25,6 +25,13 @@ def release_index(monkeypatch):
         "read_release_index",
         lambda: '[{"version":"v24.22.1","security":true}]',
     )
+    monkeypatch.setitem(
+        ENGINE["NODE_RELEASES"]["SECURITY"],
+        "read_public",
+        lambda *args, **kwargs: (
+            "## 2026-10-21, Version 24.22.1\n### Notable Changes\n- (CVE-2026-111497) fix – High\n### Commits\n"
+        ),
+    )
 
 
 def site(root, declaration="24\n"):
@@ -242,7 +249,8 @@ def test_node_only_update_reaches_a_real_publisher_branch(
             ],
         )
         ENGINE["main"]()
-    assert "Node runtime security update to 24.22.1" in report.read_text()
+    assert "1 platform security update" in report.read_text()
+    assert "24.22.1" in report.read_text()
     assert "0 security fixes" in report.read_text()
     git("clone", "--branch", "main", str(remote), str(publisher), cwd=tmp_path)
     target = PROPOSAL["publish"](publisher, PROPOSAL["read_plan"](plan_path))

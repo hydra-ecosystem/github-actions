@@ -16,6 +16,7 @@ from urllib.parse import quote
 import yaml
 
 LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
+NODE_RELEASES = runpy.run_path(str(Path(__file__).parents[1] / "node_releases.py"))
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
@@ -2383,6 +2384,23 @@ def compact_advisory_links(data, name, source, fixed_ids):
     return links[0]
 
 
+def package_advisory_links(before, after, name, source, resolved, pending):
+    links = sorted(
+        set(
+            (_advisory_link_items(before, name, source, resolved) if resolved else [])
+            + (_advisory_link_items(after, name, source, pending) if pending else [])
+        )
+    )
+    if not links:
+        return f"Not supplied by {source}."
+    count = len(links) - 1
+    return links[0] + (
+        f" (+{count} additional {'advisory' if count == 1 else 'advisories'}; see full audit details)"
+        if count
+        else ""
+    )
+
+
 def audit_fix_reason(detail, source):
     status = detail.get("fixStatus", "")
     if "Blocked by retained override" in status:
@@ -2458,6 +2476,8 @@ def format_audit_summary(
     fixed_ids=None,
     fixes_only=False,
     reported_parents=None,
+    locks=None,
+    summary=None,
 ) -> str:
     if isinstance(after, str):
         return "" if fixes_only else f"⚪ **Security:** {after}"
@@ -2493,6 +2513,9 @@ def format_audit_summary(
             target.setdefault(name, {})[identity] = detail
 
     rows = []
+    old_versions, new_versions = (
+        (locked_version_sets(lock) for lock in locks) if locks else ({}, {})
+    )
     fixed_packages, review_packages, blocked_packages = set(), set(), set()
     new_packages, unconfirmed_packages = set(), set()
     for name in old_groups.keys() | groups.keys():
@@ -2631,23 +2654,40 @@ def format_audit_summary(
             badge, rank = "", 2
         else:
             badge, rank = "⚪", 3
+        severity_details = details + unconfirmed_details + list(previous.values())
         severity = min(
-            (
-                SEVERITY_ORDER.get(detail["severity"], 5)
-                for detail in details + unconfirmed_details
-            ),
+            (SEVERITY_ORDER.get(detail["severity"], 5) for detail in severity_details),
             default=5,
         )
-        label = f"{badge}\u00a0" if badge else ""
+        severity_label = next(
+            (
+                level.title()
+                for level, order in SEVERITY_ORDER.items()
+                if order == severity
+            ),
+            "Unknown",
+        )
+        old_version = ", ".join(sorted(old_versions.get(name, set())))
+        new_version = ", ".join(sorted(new_versions.get(name, set())))
+        version_change = (
+            f"`{old_version or 'not installed'}` → `{new_version or 'not installed'}`"
+            if old_version != new_version
+            else f"`{new_version}` (unchanged)"
+            if new_version
+            else "Not recorded"
+        )
+        label = {
+            "🟢": "✅ Fix proposed. ",
+            "🟠": "🟠 Needs review. ",
+            "🔴": "🔴 New findings. ",
+            "⚪": "⚪ Needs verification. ",
+            "": "Blocked. ",
+        }[badge]
         rows.append(
             (
                 (rank, severity, name),
-                f"| {label}`{name}` | {' · '.join(counts)} | {action.strip()} |"
-                + (
-                    f" {compact_advisory_links(before, name, source, resolved_ids)} |"
-                    if fixes_only
-                    else ""
-                ),
+                f"| `{name}` | {version_change} | {severity_label} | {' · '.join(counts)} | {label}{action.strip()} | "
+                f"{package_advisory_links(before, after, name, source, resolved_ids.intersection(previous) if fixes_only else set(previous), set() if fixes_only else set(pending))} |",
             )
         )
 
@@ -2678,17 +2718,108 @@ def format_audit_summary(
         )
     if not comparable:
         headline += "\n\nResolution unconfirmed; initial or detailed audit evidence unavailable."
+    if summary is not None:
+        summary.update(
+            review_count=len(review_packages), fixed_packages=len(fixed_packages)
+        )
     if rows:
         unit = "Advisories" if source == "pnpm" else "Affected package entries"
         headline += (
-            f"\n\n| Package | {unit} | Action / blocker |"
-            + (" Advisories |" if fixes_only else "")
-            + "\n| --- | --- | --- |"
-            + (" --- |" if fixes_only else "")
+            f"\n\n| Package | Update | Severity | {unit} | Action / blocker | Security evidence |"
+            + "\n| --- | --- | --- | --- | --- | --- |"
             + "\n"
         )
         headline += "\n".join(row for _, row in sorted(rows))
     return headline
+
+
+def format_platform_security(platform, passed):
+    if not platform:
+        return "No platform upgrade is proposed.\n\n"
+    if not platform["target"]:
+        return "⚪ " + platform["message"] + "\n\n"
+    previous = platform["previous"] or "previous patch not pinned"
+    status = (
+        "✅ Upgrade validated"
+        if passed
+        else "⚪ Upgrade validation failed or unavailable"
+    )
+    text = f"{status}: **Node.js** `{previous} → {platform['target']}`.\n\n"
+    if platform["message"]:
+        text += platform["message"] + "\n\n"
+    text += (
+        "| Security release | Highest severity | CVE summary | Details |\n"
+        "| --- | --- | --- | --- |\n"
+    )
+    for release in platform["releases"]:
+        version = release["version"]
+        severity = (release["severity"] or "unavailable").title()
+        cves = release["cves"]
+        count = len(cves) if cves is not None else None
+        description = (
+            f"{count} named CVE" + ("" if count == 1 else "s")
+            if count is not None
+            else release["message"]
+        )
+        url = f"https://nodejs.org/en/blog/release/v{version}/"
+        text += f"| `{version}` | {severity} | {description} | [CVE list]({url}#notable-changes) · [Release notes]({url}) |\n"
+    return text + (
+        "\nCVE counts describe each release's notes, not confirmed vulnerabilities in "
+        "the starting runtime. They are not added together as a unique-CVE total. "
+        "Bundled dependency fixes may address additional vulnerabilities.\n\n"
+    )
+
+
+def format_security_overview(
+    *,
+    platform,
+    package_report,
+    package_fixes,
+    package_updates,
+    review_count,
+    passed,
+    routine_only=False,
+):
+    platform_count = int(bool(platform and platform["target"]))
+    parts = [
+        f"{platform_count} platform security update"
+        + ("" if platform_count == 1 else "s")
+    ]
+    if package_updates:
+        parts.append(
+            f"{package_updates} {'routine ' if routine_only else ''}dependency update"
+            + ("" if package_updates == 1 else "s")
+        )
+    parts.append(
+        f"{package_fixes} package security fix" + ("" if package_fixes == 1 else "es")
+        if package_fixes is not None
+        else "Package security fixes unconfirmed"
+    )
+    if review_count:
+        parts.append(
+            f"🟠 {review_count} package"
+            + (" needs" if review_count == 1 else "s need")
+            + " your review"
+        )
+    parts.append("Validation " + ("passed" if passed else "failed or unavailable"))
+    return (
+        "**"
+        + " · ".join(parts)
+        + "**\n\n"
+        + "## Platform security\n\n"
+        + format_platform_security(platform, passed)
+        + "## Package security\n\n"
+        + package_report
+        + "\n\n"
+    )
+
+
+def format_validation(install_status, check_status):
+    return (
+        "## Validation\n\n"
+        f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
+        f"- Project checks: {check_status[0].lower() + check_status[1:]}\n\n"
+    )
 
 
 def format_change_report(
@@ -2894,21 +3025,22 @@ def eligible_version(
         return None
 
 
+def locked_version_sets(lock: dict) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for path, package in lock.get("packages", {}).items():
+        version = package.get("version")
+        name = package.get("name") or (
+            path.rsplit("node_modules/", 1)[-1] if "node_modules/" in path else None
+        )
+        if name and version:
+            result.setdefault(name, set()).add(version)
+    return result
+
+
 def locked_changes(before: dict, after: dict) -> list[str]:
     """Compare all locked version sets, independent of advisory attribution."""
 
-    def version_sets(lock: dict) -> dict[str, set[str]]:
-        result: dict[str, set[str]] = {}
-        for path, package in lock.get("packages", {}).items():
-            version = package.get("version")
-            name = package.get("name") or (
-                path.rsplit("node_modules/", 1)[-1] if "node_modules/" in path else None
-            )
-            if name and version:
-                result.setdefault(name, set()).add(version)
-        return result
-
-    old, new = version_sets(before), version_sets(after)
+    old, new = locked_version_sets(before), locked_version_sets(after)
     return [
         f"- {name}: `{', '.join(sorted(old.get(name, set()))) or 'not installed'}` → "
         f"`{', '.join(sorted(new.get(name, set()))) or 'not installed'}`"
@@ -2927,6 +3059,7 @@ def prepare(
     upgrade_scope="major",
     local_patches=None,
     validate_only=False,
+    platform=None,
 ) -> str:
     # Leave time in the 60-minute job to write and upload a partial report.
     deadline = time.monotonic() + 45 * 60
@@ -3561,14 +3694,6 @@ def prepare(
         and not new_ids
         and not security_changes
     )
-    update_label = "update" if len(locked_updates) == 1 else "updates"
-    proposal_summary = f"{len(locked_updates)} {'routine ' if routine_only else ''}dependency {update_label}"
-    if not routine_only:
-        proposal_summary += (
-            f" · {fixed_count} security {'fix' if fixed_count == 1 else 'fixes'}"
-            if initial_ids is not None and remaining_ids is not None
-            else " · Security fixes unconfirmed"
-        )
     before_audit = format_audit(before, before_lock)
     after_audit = format_audit(after, after_lock)
     blocked_findings = (
@@ -3579,8 +3704,31 @@ def prepare(
         and not security_changes
         else None
     )
+    package_metrics = {}
+    package_report = format_audit_summary(
+        before,
+        after,
+        package_manager,
+        fixed_ids=fixed_ids,
+        reported_parents=reported_parents,
+        locks=(before_lock, after_lock),
+        summary=package_metrics,
+    )
+    background_blockers = bool(routine_only and blocked_findings)
+    if background_blockers:
+        package_report = f"{remaining_count} {remaining_unit} {'is' if remaining_count == 1 else 'are'} blocked, unchanged by this PR."
     report = (
-        f"**{proposal_summary} · Validation {'passed' if check_status == 'Passed.' else 'failed or unavailable'}**\n\n"
+        format_security_overview(
+            platform=platform,
+            package_report=package_report,
+            package_fixes=fixed_count
+            if initial_ids is not None and remaining_ids is not None
+            else None,
+            package_updates=len(locked_updates),
+            review_count=package_metrics.get("review_count", 0),
+            passed=check_status == "Passed.",
+            routine_only=routine_only,
+        )
         + (
             "## Security audit incomplete\n\n"
             "This run fails because complete before/after security evidence is unavailable. "
@@ -3590,15 +3738,11 @@ def prepare(
             if audit_errors
             else ""
         )
-        + (
-            f"## Validation\n\n"
-            f"- Frozen install: {install_status[0].lower() + install_status[1:]}\n"
-            f"- Project checks: {check_status[0].lower() + check_status[1:]}\n\n"
-        )
+        + format_validation(install_status, check_status)
         + (
             f"## Existing security findings\n\n{remaining_count} {remaining_unit} {'is' if remaining_count == 1 else 'are'} blocked, unchanged by this PR.\n\n"
             if blocked_findings
-            else f"## Security status\n\n{security_counts}.\n\n"
+            else f"### Package advisory counts\n\n{security_counts}.\n\n"
         )
     )
     if isinstance(after, str):
@@ -3625,21 +3769,15 @@ def prepare(
         report += "Initial audit evidence was unavailable; retained security-fix changes are unconfirmed.\n\n"
     report += format_change_report(
         proposed_changes,
-        format_audit_summary(
-            before,
-            after,
-            package_manager,
-            fixed_ids=fixed_ids,
-            fixes_only=True,
-            reported_parents=reported_parents,
-        ),
+        "",
         format_routine_upgrades(routine_rows, release_links),
     )
-    report += (
-        f"<details>\n<summary>{'Blocked findings and constraints' if blocked_findings else 'Security findings and blockers'}</summary>\n\n"
-        f"{blocked_findings or format_audit_summary(before, after, package_manager, fixed_ids=fixed_ids, reported_parents=reported_parents)}\n\n"
-        "</details>\n\n"
-    )
+    if background_blockers:
+        report += (
+            "<details>\n<summary>Blocked findings and constraints</summary>\n\n"
+            + blocked_findings
+            + "\n\n</details>\n\n"
+        )
     if change_sections:
         report += (
             "<details>\n<summary>Additional dependency change details</summary>\n\n"
@@ -3728,6 +3866,12 @@ def main() -> None:
     validation: dict = {}
     try:
         patches = []
+        node_plan = None
+        if args.node_update is not None:
+            node_proposal = runpy.run_path(
+                str(Path(__file__).parents[1] / "node_proposal.py")
+            )
+            node_plan = node_proposal["read_plan"](args.node_update)
         if args.resolved_config is not None:
             if not args.resolved_config.is_file():
                 raise ValueError("Resolved configuration snapshot is missing")
@@ -3748,14 +3892,13 @@ def main() -> None:
             upgrade_scope=args.upgrade_scope,
             local_patches=patches,
             validate_only=args.validate_only,
+            platform=NODE_RELEASES["collect"](node_plan),
         )
         if args.node_update is not None:
             node_proposal = runpy.run_path(
                 str(Path(__file__).parents[1] / "node_proposal.py")
             )
-            node_plan = node_proposal["read_plan"](args.node_update)
             node_proposal["verify_candidate"](Path.cwd().resolve(), node_plan)
-            report = node_proposal["render"](report, node_plan, validation["passed"])
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.local_patches_report is not None:
