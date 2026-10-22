@@ -180,6 +180,20 @@ def test_partially_missing_severity_does_not_understate_the_highest_severity():
     assert len(report["cves"]) == 8
 
 
+def test_node22_parenthesized_release_severities_are_available():
+    # Node22.13.1 uses this format, including a bundled dependency advisory.
+    notes = (
+        "## 2025-01-21, Version 22.13.1 'Jod' (LTS)\n\n### Notable Changes\n"
+        "- CVE-2025-23083: security fix (High)\n"
+        "- CVE-2025-23085: security fix (Medium)\n"
+        "- CVE-2025-23084: security fix (Medium)\n\nDependency update:\n"
+        "- CVE-2025-22150: dependency fix (Medium)\n### Commits\n"
+    )
+    report = RELEASES["parse_notes"]("22.13.1", notes)
+    assert report["severity"] == "high"
+    assert len(report["cves"]) == 4
+
+
 @pytest.mark.parametrize(
     "updates,fixes,routine,expected",
     [

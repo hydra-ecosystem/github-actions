@@ -30,11 +30,11 @@ def parse_notes(version, data):
         if not ids:
             continue
         cves.update(ids)
-        match = re.search(
-            r"[–—-]\s*(Critical|High|Medium|Moderate|Low|Info)\s*$", line, re.I
-        )
+        level = r"Critical|High|Medium|Moderate|Low|Info"
+        match = re.search(rf"(?:[–—-]\s*({level})|\(({level})\))\s*$", line, re.I)
         if match:
-            severities.add(match[1].lower().replace("moderate", "medium"))
+            severity = match[1] or match[2]
+            severities.add(severity.lower().replace("moderate", "medium"))
         else:
             severity_complete = False
     if not cves:
