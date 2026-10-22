@@ -391,16 +391,21 @@ def test_unsupported_engine_syntax_is_not_silently_ignored(expression):
     "node, pnpm, lock, engine, error",
     [
         ("v24.14.0", "11.20.0", "9.0", ">=22.13", "Installed Node"),
-        ("v22.14.0", "11.21.0", "9.0", ">=22.13", "Installed pnpm"),
-        ("v22.14.0", "11.20.0", "6.0", ">=22.13", "lockfileVersion"),
-        ("v22.14.0", "11.20.0", "9.0", ">=24", "engines.node"),
-        ("v22.14.0", "11.20.0", "9.0", ">=22.13", None),
+        ("v22.23.4", "11.21.0", "9.0", ">=22.13", "Installed pnpm"),
+        ("v22.23.4", "11.20.0", "6.0", ">=22.13", "lockfileVersion"),
+        ("v22.23.4", "11.20.0", "9.0", ">=24", "engines.node"),
+        ("v22.23.4", "11.20.0", "9.0", ">=22.13", None),
     ],
 )
 def test_runtime_verified_before_dependency_changes(
     website, monkeypatch, node, pnpm, lock, engine, error
 ):
     root, site = website
+    monkeypatch.setitem(
+        module["NODE_SECURITY"]["verify_node_security"].__globals__,
+        "read_release_index",
+        lambda: '[{"version":"v22.23.4","security":true}]',
+    )
     path = site / "package.json"
     data = json.loads(path.read_text())
     data["engines"]["node"] = engine
@@ -428,3 +433,51 @@ def test_runtime_verified_before_dependency_changes(
         for command in commands
     )
     assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+@pytest.mark.parametrize("installed", ["22.23.3", "24.21.0"])
+def test_stale_exact_node_pin_fails_preflight_without_running_package_tools(
+    website, monkeypatch, tmp_path, installed
+):
+    root, directory = website
+    declaration = directory / ".nvmrc"
+    declaration.write_text(installed + "\n")
+    report = tmp_path / "configuration-report.json"
+    commands = []
+
+    def invoke(command, **kwargs):
+        commands.append(command)
+        assert command == ["node", "--version"]
+        return subprocess.CompletedProcess(command, 0, "v" + installed, "")
+
+    monkeypatch.setattr(subprocess, "run", invoke)
+    monkeypatch.setitem(
+        module["NODE_SECURITY"]["verify_node_security"].__globals__,
+        "read_release_index",
+        lambda: json.dumps(
+            [
+                {"version": "v22.23.4", "security": True},
+                {"version": "v24.22.1", "security": True},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "project.py",
+            "--root",
+            str(root),
+            "--verify-runtime",
+            "--configuration-report",
+            str(report),
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        module["main"]()
+    assert error.value.code == 2
+    status = json.loads(report.read_text())
+    assert status["status"] == "error"
+    assert "older than the latest" in status["message"]
+    assert commands == [["node", "--version"]]
+    assert declaration.read_text() == installed + "\n"

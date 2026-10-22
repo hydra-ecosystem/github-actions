@@ -58,6 +58,9 @@ class GitHub(FLEET["GitHub"]):
                 ".github/workflows/node-publish.yml": (
                     ROOT / ".github/workflows/node-publish.yml"
                 ).read_bytes(),
+                ".github/workflows/node-maintenance.yml": (
+                    ROOT / ".github/workflows/node-maintenance.yml"
+                ).read_bytes(),
             },
         )
         self.add("owner/project", project(manager))
@@ -155,6 +158,38 @@ def project(manager):
             {"lockfileVersion": 3, "packages": {"": manifest}}
         )
     return files
+
+
+@pytest.mark.parametrize(
+    "problem", [None, "branch", "paths", "permissions", "condition", "unsupported"]
+)
+def test_fleet_accepts_coordinated_installation_and_checks_trigger_contract(problem):
+    github = GitHub()
+    caller = yaml.safe_load(
+        (ROOT / "node/coordinated-caller.yml")
+        .read_text()
+        .replace("__CENTRAL_REPOSITORY__", "owner/actions")
+        .replace("__CENTRAL_REVISION__", SHA)
+        .replace("__DEFAULT_BRANCH__", "main")
+    )
+    caller["on"]["schedule"] = [{"cron": cron} for cron in ["0 2 * * 1", "0 2 1 */3 *"]]
+    if problem == "branch":
+        caller["on"]["push"]["branches"] = ["wrong"]
+    if problem == "paths":
+        caller["on"]["push"]["paths"] = ["**"]
+    if problem == "permissions":
+        caller["jobs"]["maintenance"]["permissions"].pop("issues")
+    if problem == "condition":
+        caller["jobs"]["maintenance"]["if"] = "false"
+    if problem == "unsupported":
+        contract = json.loads(github.repos["owner/actions"]["node/contract.json"])
+        del contract["coordinated_maintenance"]
+        github.repos["owner/actions"]["node/contract.json"] = data(contract)
+    github.repos["owner/project"][".github/workflows/dependency-audit.yml"] = (
+        yaml.safe_dump(caller).encode()
+    )
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == ("ok" if problem is None else "failed"), result
 
 
 @pytest.mark.parametrize("manager", ["npm", "pnpm"])

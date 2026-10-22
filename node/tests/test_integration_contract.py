@@ -15,7 +15,10 @@ def test_caller_separates_audit_and_publisher_authority():
     assert audit["permissions"] == {"contents": "read", "issues": "write"}
     shared = yaml.safe_load((ROOT / ".github/workflows/node-audit.yml").read_text())
     assert shared["jobs"]["audit"]["permissions"] == {"contents": "read"}
-    assert shared["jobs"]["configuration-issue"]["permissions"] == {"issues": "write"}
+    assert shared["jobs"]["configuration-issue"]["permissions"] == {
+        "issues": "write",
+        "contents": "read",
+    }
     assert "secrets" not in audit
     assert publisher["permissions"] == {"contents": "write", "pull-requests": "write"}
     assert set(publisher["secrets"]) == {"app-private-key"}
@@ -88,10 +91,11 @@ def test_setup_guide_uses_the_current_caller_and_standalone_schedule():
         if "jobs:" in block
     )
     expected = (
-        (ROOT / "node/caller.yml")
+        (ROOT / "node/coordinated-caller.yml")
         .read_text()
         .replace("__CENTRAL_REPOSITORY__", "hydra-ecosystem/github-actions")
-        .replace("__CENTRAL_REVISION__", "v1")
+        .replace("__CENTRAL_REVISION__", "REVIEWED_REVISION")
+        .replace("__DEFAULT_BRANCH__", "main")
     )
     schedule = yaml.safe_dump({"schedule": [{"cron": "0 2 * * 1"}]}, sort_keys=False)
     expected = expected.replace(

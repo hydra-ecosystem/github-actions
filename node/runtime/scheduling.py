@@ -44,7 +44,9 @@ def cron_entries(schedule):
     )
 
 
-def select_mode(root, config, configured_mode, requested, event_name, event):
+def select_mode(
+    root, config, configured_mode, requested, event_name, event, *, refresh=False
+):
     if requested not in ("auto", "security", "upgrades"):
         raise ValueError("audit-kind must be auto, security or upgrades")
     schedule = config.get("schedule")
@@ -83,7 +85,9 @@ def select_mode(root, config, configured_mode, requested, event_name, event):
             raise ValueError(
                 "schedule.upgrades requires maintenance.mode=security-and-maintenance; use an empty upgrades list for manual-only upgrades"
             )
-    if event_name == "workflow_dispatch" and requested != "auto":
+    if refresh and event_name != "push":
+        raise ValueError("Proposal refresh is supported only for default-branch pushes")
+    if (event_name == "workflow_dispatch" or refresh) and requested != "auto":
         return (
             "security-only" if requested == "security" else "security-and-maintenance"
         )

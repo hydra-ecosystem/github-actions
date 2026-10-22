@@ -167,9 +167,22 @@ def check(node, manager, version):
             timeout=180,
         )
         preflight = runpy.run_path(str(ROOT / "runtime/project.py"))
-        directory, selected = preflight["project"](root)
+        plan_path = root / "node-update.json"
+        directory, selected = preflight["resolve_for_run"](
+            root,
+            root / "resolved.json",
+            [],
+            node_update_path=plan_path,
+            propose_node=True,
+        )
+        node_plan = preflight["NODE_PROPOSAL"]["read_plan"](plan_path)
+        assert node_plan["changes"]
+        assert (project / ".nvmrc").read_text().strip() == selected["node"]
         preflight["verify_runtime"](directory, selected)
         audit = runpy.run_path(str(ROOT / "runtime/templates/dependency_audit.py"))
+        platform = audit["NODE_RELEASES"]["collect"](node_plan)
+        assert all(release["cves"] for release in platform["releases"]), platform
+        assert selected["node"] in audit["format_platform_security"](platform, True)
         before = {p.name: p.read_bytes() for p in project.glob("*") if p.is_file()}
         validation = {}
         report = audit["prepare"](
@@ -184,6 +197,16 @@ def check(node, manager, version):
         assert all(
             (project / name).read_bytes() == data for name, data in before.items()
         )
+        report = audit["prepare"](
+            directory,
+            validation=validation,
+            validation_script="check",
+            validate_only=True,
+        )
+        assert validation["passed"] and not validation["audit_errors"], report
+        assert all(
+            (project / name).read_bytes() == data for name, data in before.items()
+        ), report
         # A library with no build script also exercises the routine path, including
         # release-time lookup and the native npm publication cutoff.
         report = audit["prepare"](
@@ -204,8 +227,10 @@ def check(node, manager, version):
             "manager": manager,
             "version": selected[manager],
             "standalone_library": "passed",
+            "node_security_proposal": "passed (persistent pin and real runtime validation)",
             "security_and_upgrades": "passed",
             "frozen_install_and_tests": "passed",
+            "committed_state_validation": "passed without dependency changes",
         }
         if manager == "npm":
             result["inherited_npm_security_policy"] = check_npm_policy(version)

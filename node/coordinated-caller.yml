@@ -1,0 +1,43 @@
+name: Node dependency maintenance
+
+'on':
+  schedule: []  # Rendered from the consumer project configuration.
+  workflow_dispatch:
+    inputs:
+      audit-kind:
+        description: Security fixes only, or security plus routine upgrades for this run.
+        type: choice
+        default: security
+        options:
+        - security
+        - upgrades
+  push:
+    branches:
+    - __DEFAULT_BRANCH__
+    paths:
+    - '**/pnpm-lock.yaml'
+    - '**/package-lock.json'
+    - '.github/node-maintenance.json'
+    - '**/.nvmrc'
+    - '**/.node-version'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  maintenance:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: __CENTRAL_REPOSITORY__/.github/workflows/node-maintenance.yml@__CENTRAL_REVISION__
+    with:
+      audit-kind: ${{ inputs.audit-kind || 'auto' }}
+      app-client-id: ${{ vars.NODE_AUDIT_APP_CLIENT_ID }}
+    secrets:
+      app-private-key: ${{ secrets.NODE_AUDIT_APP_PRIVATE_KEY }}

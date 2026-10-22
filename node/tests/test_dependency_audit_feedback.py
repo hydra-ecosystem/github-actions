@@ -66,6 +66,7 @@ def test_cli_exports_validation_status_without_preventing_report_publication(
     assert report.exists()
     assert output.read_text() == (
         f"existing=value\nvalidation_passed={'true' if build == 0 else 'false'}\n"
+        "proposal_complete=true\n"
     )
 
 
@@ -110,7 +111,7 @@ def test_cli_fails_incomplete_audit_but_retains_successful_project_checks(
     assert calls == 2
     assert "- Project checks: passed." in report.read_text()
     assert "Security audit incomplete" in report.read_text()
-    assert output.read_text() == "validation_passed=true\n"
+    assert output.read_text() == "validation_passed=true\nproposal_complete=false\n"
     assert "registry response is incomplete" in capsys.readouterr().err
 
 
@@ -168,7 +169,8 @@ def test_action_retains_incomplete_audit_summary_and_artifact(tmp_path, report_e
     artifact = next(
         step
         for step in steps
-        if step.get("with", {}).get("name") == "dependency-audit-report"
+        if step.get("with", {}).get("name")
+        == "${{ inputs.artifact-prefix || 'dependency-audit' }}-report"
     )
     for step in (summary, artifact):
         assert step["if"] == "${{ always() && !cancelled() }}"

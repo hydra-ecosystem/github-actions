@@ -375,7 +375,7 @@ def _validate_call_interface(job, call, path):
             )
 
 
-def check_caller(root, config, selected, github):
+def check_caller(root, config, selected, github, default_branch="main"):
     workflow = yaml.safe_load((root / CALLER_PATH).read_bytes())
     if not isinstance(workflow, dict):
         raise ValueError("Caller must be a workflow mapping")
@@ -399,46 +399,100 @@ def check_caller(root, config, selected, github):
     jobs = workflow.get("jobs", {})
     if not isinstance(jobs, dict) or not jobs:
         raise ValueError("Caller requires a nonempty jobs mapping")
-    audit, publisher = jobs.get("audit", {}), jobs.get("pull-request", {})
-    if not isinstance(audit, dict) or not isinstance(publisher, dict):
-        raise ValueError("Caller requires audit and pull-request job mappings")
-    if "if" in audit or "if" in publisher:
-        raise ValueError(
-            "Caller audit and publisher jobs must be unconditionally enabled"
-        )
-    pattern = rf"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/node-audit\.yml@({WORKFLOW_REF})"
-    match = re.fullmatch(pattern, audit.get("uses", ""))
-    if (
-        not match
-        or publisher.get("uses")
-        != f"{match[1]}/.github/workflows/node-publish.yml@{match[2]}"
-    ):
-        raise ValueError(
-            "Audit and publisher must use matching Node workflows at the same major release tag (such as v1) or full commit SHA"
-        )
-    needs = publisher.get("needs", [])
-    if "needs" in audit or needs not in ("audit", ["audit"]):
-        raise ValueError(
-            "Audit must have no prerequisites; publisher must depend only on audit"
-        )
-    if audit.get("permissions") != {
-        "contents": "read",
-        "issues": "write",
-    } or publisher.get("permissions") != {
-        "contents": "write",
-        "pull-requests": "write",
-    }:
-        raise ValueError(
-            "Caller audit/publisher permissions differ from the supported caller contract"
-        )
-    if (
-        audit.get("with", {}).get("audit-kind") != "${{ inputs.audit-kind || 'auto' }}"
-        or publisher.get("with", {}).get("validation-passed")
-        != "${{ needs.audit.outputs.validation_passed }}"
-    ):
-        raise ValueError(
-            "Caller must forward audit-kind and the audit validation result"
-        )
+    coordinated = "maintenance" in jobs
+    if coordinated:
+        job = jobs["maintenance"]
+        pattern = rf"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/node-maintenance\.yml@({WORKFLOW_REF})"
+        match = re.fullmatch(pattern, job.get("uses", ""))
+        if set(jobs) != {"maintenance"} or not match or "if" in job or "needs" in job:
+            raise ValueError(
+                "Coordinated caller requires one unconditional maintenance job"
+            )
+        if job.get("permissions") != {
+            "contents": "write",
+            "pull-requests": "write",
+            "issues": "write",
+        }:
+            raise ValueError(
+                "Coordinated caller permissions differ from the supported contract"
+            )
+        if (
+            job.get("with", {}).get("audit-kind")
+            != "${{ inputs.audit-kind || 'auto' }}"
+        ):
+            raise ValueError("Coordinated caller must forward audit-kind")
+        expected_push = {
+            "branches": [default_branch],
+            "paths": [
+                "**/pnpm-lock.yaml",
+                "**/package-lock.json",
+                ".github/node-maintenance.json",
+            ],
+        }
+        node_push = {
+            **expected_push,
+            "paths": [*expected_push["paths"], "**/.nvmrc", "**/.node-version"],
+        }
+        # Released callers remain valid; new callers also refresh after Node pins merge.
+        if events.get("push") not in (expected_push, node_push):
+            raise ValueError(
+                "Coordinated caller requires the default-branch dependency path filters"
+            )
+        calls = [(job, ".github/workflows/node-maintenance.yml")]
+        if workflow.get("concurrency") != {
+            "group": "dependency-audit",
+            "cancel-in-progress": False,
+            "queue": "max",
+        }:
+            raise ValueError(
+                "Coordinated caller must retain pending runs with queue: max"
+            )
+    else:
+        audit, publisher = jobs.get("audit", {}), jobs.get("pull-request", {})
+        if not isinstance(audit, dict) or not isinstance(publisher, dict):
+            raise ValueError("Caller requires audit and pull-request job mappings")
+        if "if" in audit or "if" in publisher:
+            raise ValueError(
+                "Caller audit and publisher jobs must be unconditionally enabled"
+            )
+        pattern = rf"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/node-audit\.yml@({WORKFLOW_REF})"
+        match = re.fullmatch(pattern, audit.get("uses", ""))
+        if (
+            not match
+            or publisher.get("uses")
+            != f"{match[1]}/.github/workflows/node-publish.yml@{match[2]}"
+        ):
+            raise ValueError(
+                "Audit and publisher must use matching Node workflows at the same major release tag (such as v1) or full commit SHA"
+            )
+        needs = publisher.get("needs", [])
+        if "needs" in audit or needs not in ("audit", ["audit"]):
+            raise ValueError(
+                "Audit must have no prerequisites; publisher must depend only on audit"
+            )
+        if audit.get("permissions") != {
+            "contents": "read",
+            "issues": "write",
+        } or publisher.get("permissions") != {
+            "contents": "write",
+            "pull-requests": "write",
+        }:
+            raise ValueError(
+                "Caller audit/publisher permissions differ from the supported caller contract"
+            )
+        if (
+            audit.get("with", {}).get("audit-kind")
+            != "${{ inputs.audit-kind || 'auto' }}"
+            or publisher.get("with", {}).get("validation-passed")
+            != "${{ needs.audit.outputs.validation_passed }}"
+        ):
+            raise ValueError(
+                "Caller must forward audit-kind and the audit validation result"
+            )
+        calls = [
+            (audit, ".github/workflows/node-audit.yml"),
+            (publisher, ".github/workflows/node-publish.yml"),
+        ]
     concurrency = workflow.get("concurrency", {})
     if (
         not isinstance(concurrency, dict)
@@ -473,10 +527,13 @@ def check_caller(root, config, selected, github):
         raise ValueError(
             "Pinned workflows do not support the resolved toolchain; update both workflow pins or align project policy"
         )
-    for job, path in (
-        (audit, ".github/workflows/node-audit.yml"),
-        (publisher, ".github/workflows/node-publish.yml"),
+    if (
+        coordinated
+        and contract.get("coordinated_maintenance", {}).get("workflow")
+        != ".github/workflows/node-maintenance.yml"
     ):
+        raise ValueError("Pinned workflows do not support coordinated maintenance")
+    for job, path in calls:
         reusable = yaml.safe_load(source.read(path))
         triggers = (
             reusable.get("on", reusable.get(True, {}))
@@ -550,7 +607,7 @@ def check_repository(github, name, expected):
             directory, selected = PROJECT["project"](root, config=config)
             PROJECT["verify_package_files"](directory, selected)
             check_engines(directory, selected)
-            check_caller(root, config, selected, github)
+            check_caller(root, config, selected, github, repository.ref)
         state = github.get(
             f"repos/{name}/actions/workflows/{PurePosixPath(CALLER_PATH).name}"
         )

@@ -214,6 +214,8 @@ def test_publication_preserves_reports_and_signals_failed_validation(
         env={
             **os.environ,
             **PUBLISH["env"],
+            "PROPOSAL_KIND": "legacy",
+            "REFRESH_ONLY": "false",
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "NPM_PROJECT": "website",
             "BASE_BRANCH": "main",

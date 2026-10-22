@@ -1,5 +1,9 @@
 # Migrate from Docusaurus maintenance
 
+Already using Node maintenance and want separate security and upgrades PRs?
+Use the [coordinated-caller adoption steps](node-coordination.md#install-or-adopt-the-coordinated-caller).
+The checklist below covers the earlier Docusaurus interface change.
+
 Integration version 6 replaces the Docusaurus-specific interface with standalone
 Node maintenance. Use this checklist for an installation pinned to the earlier
 workflows. New installations should use the [setup guide](node-maintenance.md).

@@ -211,7 +211,7 @@ def test_real_project_cli_applies_selection_on_both_preflight_steps(
     )
     binary = tmp_path / "bin"
     binary.mkdir()
-    for name, version in (("node", "v24.14.0"), ("corepack", "11.21.0")):
+    for name, version in (("node", "v24.22.1"), ("corepack", "11.21.0")):
         executable = binary / name
         executable.write_text(f"#!/bin/sh\necho '{version}'\n")
         executable.chmod(0o755)
@@ -225,7 +225,10 @@ def test_real_project_cli_applies_selection_on_both_preflight_steps(
     }
     args = [
         sys.executable,
-        str(runtime / "project.py"),
+        "-c",
+        f"import runpy; module = runpy.run_path({str(runtime / 'project.py')!r}); "
+        "module['NODE_SECURITY']['verify_node_security'].__globals__['read_release_index'] = "
+        'lambda: \'[{"version":"v24.22.1","security":true}]\'; module[\'main\']()',
         "--root",
         str(tmp_path),
         "--resolved-config",

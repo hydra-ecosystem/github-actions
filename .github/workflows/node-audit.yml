@@ -6,10 +6,28 @@ name: Node dependency audit
         description: auto selects the configured cadence; security or upgrades overrides one manual run.
         type: string
         default: auto
+      audit-ref:
+        type: string
+        default: ''
+      artifact-prefix:
+        type: string
+        default: ''
+      refresh:
+        type: boolean
+        default: false
+      operation:
+        type: string
+        default: propose
+      proposal-kind:
+        type: string
+        default: legacy
     outputs:
       validation_passed:
         description: Whether candidate validation passed.
         value: ${{ jobs.audit.outputs.validation_passed }}
+      proposal_complete:
+        description: Whether proposal resolution and audit evidence completed.
+        value: ${{ jobs.audit.outputs.proposal_complete }}
 permissions:
   contents: read
 jobs:
@@ -20,24 +38,31 @@ jobs:
     timeout-minutes: 60
     outputs:
       validation_passed: ${{ steps.proposal.outputs.validation_passed }}
+      proposal_complete: ${{ steps.proposal.outputs.proposal_complete }}
     steps:
     - name: Validate manual dispatch ref
       env:
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      run: "set -euo pipefail\nexpected_ref=\"refs/heads/$DEFAULT_BRANCH\"\nif [ \"\
-        $GITHUB_EVENT_NAME\" = \"workflow_dispatch\" ] && [ \"$GITHUB_REF\" != \"\
-        $expected_ref\" ]; then\n  echo \"::error::Manual dispatch must target the\
-        \ repository default branch ($expected_ref); got $GITHUB_REF.\" >&2\n  exit\
-        \ 1\nfi\n"
+      run: |
+        set -euo pipefail
+        expected_ref="refs/heads/$DEFAULT_BRANCH"
+        if { [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_EVENT_NAME" = "push" ]; } && [ "$GITHUB_REF" != "$expected_ref" ]; then
+          echo "::error::Manual dispatch must target the repository default branch ($expected_ref); got $GITHUB_REF." >&2
+          exit 1
+        fi
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        ref: ${{ github.sha }}
+        ref: ${{ inputs.audit-ref || github.sha }}
         persist-credentials: false
     - name: Audit, propose upgrades, and validate
       id: proposal
       uses: $/node/audit
       with:
         audit-kind: ${{ inputs.audit-kind }}
+        artifact-prefix: ${{ inputs.artifact-prefix }}
+        refresh: ${{ inputs.refresh }}
+        operation: ${{ inputs.operation }}
+        proposal-kind: ${{ inputs.proposal-kind }}
   configuration-issue:
     needs: audit
     if: ${{ always() && !cancelled() }}
@@ -45,32 +70,50 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      contents: read
     concurrency:
       group: node-audit-configuration-issue-${{ github.repository }}
       cancel-in-progress: false
+      queue: max
     steps:
+    - name: Reject stale coordinated issue reports
+      if: ${{ inputs.audit-ref != '' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        AUDIT_SHA: ${{ inputs.audit-ref }}
+        BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        current=$(gh api "repos/$GH_REPO/commits/$BASE_BRANCH" --jq .sha)
+        if [ "$current" != "$AUDIT_SHA" ]; then
+          echo "::error::Default branch advanced; stale issue reports discarded."
+          exit 1
+        fi
+      id: freshness
     - name: Read configuration status from this run
       id: report
       continue-on-error: true
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: node-audit-configuration
+        name: ${{ inputs.artifact-prefix || 'node-audit' }}-configuration
         path: ${{ runner.temp }}/node-audit-configuration
+      if: ${{ success() && steps.freshness.outcome != 'failure' }}
     - name: Maintain the configuration issue
-      if: ${{ steps.report.outcome == 'success' }}
+      if: ${{ steps.report.outcome == 'success' && steps.freshness.outcome != 'failure' }}
       uses: $/node/configuration-issue
       env:
         GH_TOKEN: ${{ github.token }}
     - name: Read local patch status from this run
-      if: ${{ always() && !cancelled() }}
+      if: ${{ always() && !cancelled() && steps.freshness.outcome != 'failure' }}
       id: local-patches
       continue-on-error: true
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: node-audit-local-patches
+        name: ${{ inputs.artifact-prefix || 'node-audit' }}-local-patches
         path: ${{ runner.temp }}/node-audit-local-patches
     - name: Maintain the local patch notification issue
-      if: ${{ always() && !cancelled() && steps.local-patches.outcome == 'success' }}
+      if: ${{ always() && !cancelled() && steps.local-patches.outcome == 'success' && steps.freshness.outcome != 'failure' }}
       uses: $/node/local-patch-issue
       env:
         GH_TOKEN: ${{ github.token }}

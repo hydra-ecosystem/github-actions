@@ -6,8 +6,13 @@ you change cadence.** Shared defaults do not rewrite workflow files.
 
 The [basic setup](node-maintenance.md#set-it-up) checks security weekly and leaves
 routine upgrades manual. The [recommended shared defaults](../defaults/node-maintenance.json)
-check security weekly and propose routine upgrades every three months. Both use
-integration version 6 and maintain the same dependency PR.
+check security weekly and propose routine upgrades every three months. With the
+released two-job caller, both kinds maintain the same dependency PR.
+
+The opt-in [coordinated caller](node-coordination.md) uses these same schedules,
+but keeps a separate PR for each channel. Its dependency-file push trigger
+validates the default branch and refreshes only existing proposals; it does not
+enable extra automatic upgrades.
 
 ## Weekly security, quarterly upgrades
 
@@ -35,7 +40,7 @@ routine upgrades at 02:00 UTC on the first day of January, April, July, and
 October. Both kinds obey the release cooldown and project constraints. Routine
 upgrades also obey `maintenance.upgradeScope`.
 
-In the [setup guide's caller](node-maintenance.md#3-add-the-caller-workflow), use:
+In the [setup guide's caller](node-maintenance.md#4-add-the-workflow-files), use:
 
 ```yaml
 'on':

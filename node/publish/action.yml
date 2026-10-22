@@ -3,5 +3,8 @@ description: Open or update the calling repository's dependency proposal.
 runs:
   using: composite
   steps:
+  - name: Verify and stage the Node security update
+    shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/node_proposal.py" --plan "$RUNNER_TEMP/node-audit-node-update.json" --github-env "$GITHUB_ENV"
   - shell: bash
     run: bash "$GITHUB_ACTION_PATH/publish.sh"

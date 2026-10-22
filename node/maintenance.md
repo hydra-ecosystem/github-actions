@@ -10,7 +10,10 @@ script, build prerequisites, deployment, and package-manager policy.
 Preflight checks the selected standalone project, declared tools, supported
 lockfile, validation script, and release cooldown before dependency changes.
 Explicit or inherited toolchain constraints must agree with project declarations.
-A mismatch fails the run; it does not rewrite files or migrate the project.
+A mismatch fails the run. Security proposals can update local Node declarations
+within their existing major and validate the candidate with that runtime. They
+do not migrate the Node major or package manager, rewrite shared defaults, or
+merge changes automatically.
 See [supported projects](../docs/node-maintenance.md#supported-projects) and
 [toolchain selection](../docs/node-maintenance.md#toolchain-selection).
 
@@ -25,6 +28,20 @@ Security audits attempt compatible fixes at all severities. Security-only runs
 retain changes only when before/after audit evidence confirms a security fix;
 unrelated changes are discarded. The engine does not force incompatible upgrades
 or remove project overrides automatically.
+
+Node runtime updates use Node's official release index, independently of package
+advisory counts. A Node-only security update can therefore open a PR when no npm
+or pnpm dependency fix is available. Reports show the original declaration, the
+proposed exact security release, and validation. Failed project validation leaves
+a draft proposal. The publisher accepts only verified same-major Node declaration
+edits against the audited base, and rejects arbitrary or stale artifact edits.
+The coordinated security channel owns Node updates; the routine-upgrades channel
+does not duplicate them. Legacy combined callers also include Node updates.
+
+New coordinated callers watch `.nvmrc` and `.node-version` changes so merging a
+Node update validates main and refreshes open proposals. Existing callers with
+only the older dependency path filters remain supported; adopt the current
+caller template to enable automatic refresh after a Node-only merge.
 
 For npm, audits include production, development, optional, and peer dependencies,
 even when `.npmrc`, user configuration, or the environment omits a dependency
@@ -69,6 +86,10 @@ versions are not downgraded just because they are younger than the cutoff.
 
 ## Reports and PRs
 
+This section describes the legacy two-job caller. The opt-in
+[coordinated caller](../docs/node-coordination.md) uses separate security and
+upgrade branches and can close obsolete proposals after successful refreshes.
+
 All audit kinds use the same `maintenance/dependency-audit` branch and open PR.
 Only the project manifest, lockfile, and required pnpm security exceptions enter
 that PR. Reports remain in the PR body, run summary, and artifacts; they are not
@@ -81,11 +102,15 @@ If initial or final audit evidence is unavailable or incomplete, the run fails
 and skips publication. The report identifies the cause and retains the separate
 frozen-install and project-check results. Its summary and report artifact remain
 available after failure; passing project checks do not make the audit complete.
-The report leads with a summary and validation results. Confirmed security fixes
-appear in a table; the full dependency version list is expandable. Routine-only
-headlines omit unrelated security counts. Existing blocked findings with unchanged
+The report leads with separate counts for platform security updates and confirmed
+package security fixes. Platform and package findings have separate sections and
+share the same validation results. Package tables keep severity separate from
+action: a high-severity package can have a validated fix, while orange means a
+specific decision needs review, such as a retained pin blocking a patch.
+The full dependency version list is expandable. Existing blocked findings with unchanged
 audit evidence appear as neutral background, with severity and constraints in
-expandable details. New findings and evidence that needs review remain visible.
+expandable details during routine-only upgrades. New findings and evidence that
+needs review remain visible.
 Security-fix rows link to one primary reported advisory, and count additional
 advisories with a pointer to the full audit details. The full audit details
 retain every advisory link, including the underlying advisory for an indirectly
@@ -97,6 +122,32 @@ advisory sources through its immediate dependencies.
 It does not flag that entry as a newly introduced vulnerability. Other newly
 reported findings remain visible for review; an audit difference alone does not
 prove that the proposal introduced a vulnerability.
+
+Platform reports list each security release after an exact starting Node version
+and up to the proposed target in the same major. Each row shows the highest
+severity and number of named CVEs read from that version's official Node release
+notes, with links to the CVE list and release notes. These are release-level
+counts, not proof that every CVE affects the starting runtime, and are not summed
+across releases as unique vulnerabilities. Bundled dependency updates may fix
+additional vulnerabilities. A major-only declaration has no known starting patch,
+so the report says so and shows only the target release.
+
+Release-note reads use fixed official sources, bounded responses, no redirects,
+and no credentials. Missing or unreadable CVE metadata is shown as unavailable,
+with the release-note link; it is never represented as zero CVEs. An unavailable
+history lookup explicitly limits coverage to the target release. These display
+lookups do not replace the required runtime security verification or change
+proposal selection, validation, or merge behavior.
+
+For reproducible layout previews generated by the production report functions:
+
+```bash
+python node/tests/security_report_examples.py --output-directory /tmp/node-security-previews
+```
+
+Add `--live-platform` to read the official release history and notes instead of
+using offline fixtures. Package and validation evidence in these previews is
+illustrative; the generated footer identifies that limitation.
 
 Routine-upgrade proposals also show a table of selected direct upgrades that
 remain in the final proposal. Current and proposed values are the declared
@@ -155,7 +206,8 @@ failures do not create configuration issues. No automatic repair PR is generated
 ## Publication and credentials
 
 The dependency-execution job has only `contents: read` and checkout credentials
-are not persisted. A separate serialized reporter has only `issues: write`,
+are not persisted. A separate serialized reporter has `issues: write` and
+`contents: read` to reject stale coordinated reports,
 reads the current run's configuration artifact, and never checks out project code.
 The publisher has Contents and Pull requests write access. Only it can push the
 maintenance branch and open the PR.

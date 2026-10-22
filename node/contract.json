@@ -80,5 +80,23 @@
     "old_script_option": "buildScript",
     "compatibility_layer": false
   },
-  "cron_list_maintenance_mode_default": "security-and-maintenance"
+  "cron_list_maintenance_mode_default": "security-and-maintenance",
+  "coordinated_maintenance": {
+    "caller_template": "node/coordinated-caller.yml",
+    "workflow": ".github/workflows/node-maintenance.yml",
+    "branches": {
+      "security": "maintenance/node-security",
+      "upgrades": "maintenance/node-upgrades"
+    },
+    "push_paths": [
+      "**/pnpm-lock.yaml",
+      "**/package-lock.json",
+      ".github/node-maintenance.json",
+      "**/.nvmrc",
+      "**/.node-version"
+    ],
+    "default_branch_placeholder": "__DEFAULT_BRANCH__",
+    "refresh_creates_prs": false,
+    "legacy_caller_supported": true
+  }
 }
