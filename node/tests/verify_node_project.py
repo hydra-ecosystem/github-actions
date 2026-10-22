@@ -180,6 +180,9 @@ def check(node, manager, version):
         assert (project / ".nvmrc").read_text().strip() == selected["node"]
         preflight["verify_runtime"](directory, selected)
         audit = runpy.run_path(str(ROOT / "runtime/templates/dependency_audit.py"))
+        platform = audit["NODE_RELEASES"]["collect"](node_plan)
+        assert all(release["cves"] for release in platform["releases"]), platform
+        assert selected["node"] in audit["format_platform_security"](platform, True)
         before = {p.name: p.read_bytes() for p in project.glob("*") if p.is_file()}
         validation = {}
         report = audit["prepare"](
