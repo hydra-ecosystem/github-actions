@@ -12,6 +12,7 @@ from pathlib import Path
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
 CONFIGURATION = runpy.run_path(str(Path(__file__).with_name("configuration.py")))
 SCHEDULING = CONFIGURATION["SCHEDULING"]
+NODE_SECURITY = runpy.run_path(str(Path(__file__).with_name("node_security.py")))
 
 
 def node_version(value, location):
@@ -338,6 +339,7 @@ def verify_runtime(directory, selected):
         )
     if tuple(map(int, actual.split("."))) < (22, 13, 0):
         raise ValueError("Installed Node must be >=22.13.0 for pnpm 11")
+    NODE_SECURITY["verify_node_security"](actual)
     manifest = json.loads((directory / "package.json").read_text())
     engine = manifest.get("engines", {}).get("node")
     if engine is not None and not node_satisfies(

@@ -54,6 +54,17 @@ The nearest `.nvmrc` or `.node-version` up to the repository root wins. If both
 exist in that directory, they must agree. Activate that Node version with your
 version manager before continuing.
 
+Each audit checks the installed Node version against the latest security release
+in that major from [Node's official release index](https://nodejs.org/dist/index.json).
+Major declarations such as `24` select the latest available release rather than
+an older runner cache entry. Exact pins remain exact: an outdated pin fails
+preflight and must be updated in the project. Security releases are not delayed
+by the package release cooldown. An unavailable or invalid release index also
+fails preflight; the workflow does not report runtime security as verified
+without that evidence. Logs record the installed version and security baseline.
+This check covers published Node security releases, not undisclosed flaws or
+the security of separately deployed runtimes.
+
 Choose a validation script in `app/package.json`. Both package-manager examples
 below use `check`. For example, a project using Node's test runner could use:
 

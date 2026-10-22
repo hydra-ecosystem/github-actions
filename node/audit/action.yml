@@ -45,6 +45,7 @@ runs:
   - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
     with:
       node-version: ${{ env.NODE_AUDIT_NODE_VERSION }}
+      check-latest: true
   - name: Enable the project's pinned package manager
     env:
       PACKAGE_MANAGER: ${{ env.NODE_AUDIT_MANAGER }}

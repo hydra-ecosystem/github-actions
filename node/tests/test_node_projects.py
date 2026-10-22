@@ -13,6 +13,15 @@ project = runpy.run_path(str(RUNTIME / "project.py"))
 engine = runpy.run_path(str(RUNTIME / "templates/dependency_audit.py"))
 
 
+@pytest.fixture(autouse=True)
+def node_release_index(monkeypatch):
+    monkeypatch.setitem(
+        project["NODE_SECURITY"]["verify_node_security"].__globals__,
+        "read_release_index",
+        lambda: '[{"version":"v24.22.1","security":true}]',
+    )
+
+
 def make_project(root, directory=".", manager="npm", version="11.9.0"):
     path = root / directory
     path.mkdir(parents=True, exist_ok=True)
@@ -68,7 +77,7 @@ def test_plain_node_preflight_without_docusaurus_or_build(
     def invoke(command, **kwargs):
         commands.append(command)
         return subprocess.CompletedProcess(
-            command, 0, "v24.14.0" if command[0] == "node" else version, ""
+            command, 0, "v24.22.1" if command[0] == "node" else version, ""
         )
 
     monkeypatch.setattr(subprocess, "run", invoke)
@@ -165,7 +174,7 @@ def test_reject_unsupported_project_before_dependency_changes(
         lambda command, **kwargs: subprocess.CompletedProcess(
             command,
             0,
-            "v24.14.0"
+            "v24.22.1"
             if command[0] == "node"
             else ("11.8.0" if case == "wrong-runtime" else "11.9.0"),
             "",
