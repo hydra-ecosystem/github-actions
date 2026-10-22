@@ -901,7 +901,7 @@ def test_compact_security_summary_keeps_severity_and_count_meaning(
     result = summarize(before, after, package_manager)
     assert "Fixes unconfirmed" in result
     assert "Resolution unconfirmed" in result
-    assert "🟠" not in result and "| Package |" not in result
+    assert "🟡" not in result and "| Package |" not in result
     # Full findings retain the registry's units and severities.
     detailed = audit_module["format_remaining_audit"](
         {
@@ -992,7 +992,7 @@ def test_new_npm_advisory_in_existing_package_stays_visible(
             "**0 platform security updates · 1 routine dependency update · 0 package security fixes · Validation passed**"
         )
         assert "1 affected package entry is blocked, unchanged by this PR." in visible
-        assert "🔴" not in report
+        assert "🔴 **New findings" not in report
     else:
         assert "routine dependency" not in visible
         assert "0 security fixes · 1 affected package entry remains" in visible
@@ -1083,7 +1083,7 @@ def test_security_outcomes_report_partial_resolution_for_one_package(security_fi
     assert "| `leaf` | Not recorded | High | 1 fixed · 1 pending |" in result
     assert result.count("`leaf`") == 1
     assert all(f"`aaa-{i}`" in result for i in range(7))
-    assert "🟠" not in result
+    assert "🔴 Blocked." in result and "Needs review" not in result
 
 
 def test_security_outcomes_keep_missing_initial_evidence_unconfirmed(security_findings):
@@ -1110,23 +1110,25 @@ def test_security_outcomes_summarize_concrete_blockers(security_findings):
     )
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| `tinypool` | Not recorded | Critical | 2 pending | Blocked. Blocked by the `@docusaurus/core` version constraint. |"
+        "| `tinypool` | Not recorded | Critical | 2 pending | 🔴 Blocked. Blocked by the `@docusaurus/core` version constraint. |"
         in result
     )
     assert "No published patch matches the fix range." in result
     assert result.count("`tinypool`") == 1
-    assert "🔴" not in result
+    assert "🔴 **New findings" not in result
     background = audit_module["format_blocked_findings"](data, "pnpm")
     assert "| Package | Blocked advisories | Reason |" in background
     assert (
-        "| `tinypool` | 2 critical | Blocked by the `@docusaurus/core` version constraint. |"
+        "| 🔴 `tinypool` | 2 critical | Blocked by the `@docusaurus/core` version constraint. |"
         in background
     )
     assert (
-        "| `braces` | 1 high | No published patch matches the fix range. |"
+        "| 🔴 `braces` | 1 high | No published patch matches the fix range. |"
         in background
     )
-    assert "No security fixes" not in background and "🔴" not in background
+    assert (
+        "No security fixes" not in background and "🔴 **New findings" not in background
+    )
 
 
 def test_security_outcomes_bound_the_visible_package_list(security_findings):
@@ -2050,7 +2052,7 @@ def test_attention_lists_all_blocking_pins_before_other_findings(security_findin
     )
     assert result.index("`pinned-6`") < result.index("`aaa-parent`")
     assert result.count("| `pinned-") == 7
-    assert "| `pinned-0` | Not recorded | High | 2 pending | 🟠 Needs review." in result
+    assert "| `pinned-0` | Not recorded | High | 2 pending | 🟡 Needs review." in result
     assert (
         "Pin `1.0.0` blocks fix `1.2.0`; review removing or updating the pin." in result
     )
@@ -2076,7 +2078,7 @@ def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_fi
     data = security_findings([("@scope/leaf", "one", "high", status)])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
-        "| `@scope/leaf` | Not recorded | High | 1 pending | 🟠 Needs review. Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
+        "| `@scope/leaf` | Not recorded | High | 1 pending | 🟡 Needs review. Pin `1.0.0 &#124;&#124; 2.0.0` blocks fix `2.0.1`"
         in result
     )
 
@@ -2084,7 +2086,7 @@ def test_attention_escapes_disjunctive_pin_and_preserves_scoped_name(security_fi
 def test_attention_is_absent_when_no_blocking_pin_was_verified(security_findings):
     data = security_findings([("leaf", "one", "high", "Could not verify publication.")])
     result = audit_module["format_audit_summary"](data, data, "pnpm")
-    assert "🟠" not in result and "your review" not in result
+    assert "🟡" not in result and "your review" not in result
     assert (
         "| `leaf` | Not recorded | High | 1 pending | ⚪ Needs verification." in result
     )
@@ -2109,7 +2111,7 @@ def test_single_table_keeps_other_advisories_for_a_pinned_package_visible(
     result = audit_module["format_audit_summary"](data, data, "pnpm")
     assert (
         result.count(
-            "| `leaf` | Not recorded | Critical | 2 pending | 🟠 Needs review."
+            "| `leaf` | Not recorded | Critical | 2 pending | 🔴 Blocked. 🟡 Needs review."
         )
         == 1
     )
@@ -2301,7 +2303,7 @@ def test_new_parent_is_background_only_with_unchanged_advisory_and_paths(
         before, after, "npm", fixed_ids=set(), reported_parents=parents
     )
     if change in ("none", "middle-version"):
-        assert "🔴" not in report
+        assert "🔴 **New findings" not in report
         assert "Newly reported parent of an existing finding in `leaf`" in report
         assert "affected versions and installed paths are unchanged" in report
     else:
@@ -2616,7 +2618,7 @@ def test_security_headline_separates_fixes_pin_decisions_and_all_blockers(
     )
     assert (
         result.splitlines()[0]
-        == "🟢 **Fixes in 1 package** · 🟠 **1 package needs your review** · **Fixes blocked for 7 packages**"
+        == "🟢 **Fixes in 1 package** · 🟡 **1 package needs your review** · 🔴 **Fixes blocked for 7 packages**"
     )
     assert result.count("| `blocked-") == 7
 
@@ -2630,7 +2632,7 @@ def test_security_headline_does_not_call_unknown_fixes_blocked(security_findings
         result.splitlines()[0]
         == "⚪ **No security fixes** · ⚪ **1 package needs verification**"
     )
-    assert "Fixes blocked" not in result and "🟠" not in result
+    assert "Fixes blocked" not in result and "🟡" not in result
 
 
 def test_security_headline_does_not_infer_fixes_from_totals():
@@ -2638,7 +2640,7 @@ def test_security_headline_does_not_infer_fixes_from_totals():
     after = {"metadata": {"vulnerabilities": {"critical": 1}}}
     result = audit_module["format_audit_summary"](before, after, "pnpm")
     assert result.splitlines()[0] == "⚪ **Fixes unconfirmed**"
-    assert "Fixes in 1" not in result and "🟠" not in result
+    assert "Fixes in 1" not in result and "🟡" not in result
 
 
 @pytest.mark.parametrize("initial_unavailable", [False, True])
@@ -2731,13 +2733,13 @@ def test_maintenance_subtotal_excludes_security_updates_without_guessing(
         )
 
 
-def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
+def test_partial_package_distinguishes_review_blocked_and_unverified_work(
     security_findings,
 ):
     for status, badge in [
         (
             "Published patch: `leaf@1.2.0`. Blocked by retained override `pnpm-workspace.yaml overrides.leaf` = `1.0.0`.",
-            "🟠",
+            "🟡",
         ),
         ("No patched version declared by the registry.", ""),
         ("Publication could not be fully verified.", "⚪"),
@@ -2750,8 +2752,9 @@ def test_partial_package_is_orange_only_when_pending_work_needs_user_decision(
         )
         assert "| `leaf` | Not recorded | High | 1 fixed · 1 pending |" in result
         assert result.count("| `leaf`") == 1
-        assert ("🟠 Needs review." in result) == (badge == "🟠")
-        assert ("your review" in result) == (badge == "🟠")
+        assert ("🟡 Needs review." in result) == (badge == "🟡")
+        assert ("your review" in result) == (badge == "🟡")
+        assert ("🔴 Blocked." in result) == (badge == "")
 
 
 def test_package_advisory_counts_deduplicate_repeated_identity(security_findings):
@@ -2768,7 +2771,8 @@ def test_missing_initial_evidence_cannot_color_a_package_resolved(security_findi
     )
     result = audit_module["format_audit_summary"]("Audit unavailable", current, "pnpm")
     assert "| `leaf` | Not recorded | High | fixes unconfirmed · 1 pending |" in result
-    assert "🟢" not in result and "🟠" not in result
+    assert "🟢" not in result and "✅" not in result
+    assert "🔴 Blocked." in result
 
 
 def test_npm_major_upgrade_requires_user_attention():
@@ -2780,7 +2784,7 @@ def test_npm_major_upgrade_requires_user_attention():
     }
     result = audit_module["format_audit_summary"](data, data, "npm")
     assert (
-        "| `leaf` | Not recorded | High | 1 pending | 🟠 Needs review. The offered fix requires a major upgrade."
+        "| `leaf` | Not recorded | High | 1 pending | 🟡 Needs review. The offered fix requires a major upgrade."
         in result
     )
     assert "your review" in result

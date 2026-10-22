@@ -3,6 +3,7 @@
 import argparse
 import copy
 import hashlib
+import html
 import json
 import re
 import runpy
@@ -17,6 +18,7 @@ import yaml
 
 LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
 NODE_RELEASES = runpy.run_path(str(Path(__file__).parents[1] / "node_releases.py"))
+REPAIR_CHOICES = runpy.run_path(str(Path(__file__).parents[1] / "repair_choices.py"))
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
 DIRECTORY_PATTERN = re.compile(r"[A-Za-z0-9_./ -]+")
@@ -1163,6 +1165,7 @@ def describe_pnpm_fixes(
                 detail["_verifiedPatchedVersions"] = sorted(patches)
             vulnerability["fixAvailable"] = True
             blocked = []
+            checked_parents = []
             unknown = False
             compatible_patches = None
             for parent, snapshot in lock.get("snapshots", {}).items():
@@ -1191,6 +1194,7 @@ def describe_pnpm_fixes(
                 if not isinstance(constraint, str):
                     unknown = True
                     continue
+                checked_parents.append(f"{parent} declares {name}: {constraint}")
                 intersections = [
                     published(f"{name}@{parent_range.strip()} {patch_range.strip()}")
                     for parent_range in constraint.split("||")
@@ -1212,6 +1216,7 @@ def describe_pnpm_fixes(
                         if compatible_patches is None
                         else compatible_patches & parent_patches
                     )
+            detail["_checkedParentConstraints"] = sorted(set(checked_parents))
             override = overrides.get(name) if isinstance(overrides, dict) else None
             override_status = ""
             override_patches = None
@@ -2403,8 +2408,6 @@ def package_advisory_links(before, after, name, source, resolved, pending):
 
 def audit_fix_reason(detail, source):
     status = detail.get("fixStatus", "")
-    if "Blocked by retained override" in status:
-        return "review", "A retained override blocks the published patch."
     if "no single patch satisfies all" in status:
         parents = sorted(set(re.findall(r"`([^`]+)` requires `[^`]+`", status)))
         if len(parents) == 1:
@@ -2413,6 +2416,8 @@ def audit_fix_reason(detail, source):
                 f"Blocked by the `{parents[0].rsplit('@', 1)[0]}` version constraint.",
             )
         return "blocked", "No published patch fits all checked parent constraints."
+    if "Blocked by retained override" in status:
+        return "review", "A retained override blocks the published patch."
     if status.startswith("No published stable patch"):
         return "blocked", "No published patch matches the fix range."
     if status.startswith("No patched version declared"):
@@ -2464,7 +2469,7 @@ def format_blocked_findings(data, source):
                 audit_fix_reason(detail, source)[1] for detail in findings.values()
             )
         )
-        rows.append(f"| `{name}` | {severities} | {reasons} |")
+        rows.append(f"| 🔴 `{name}` | {severities} | {reasons} |")
     return "\n".join(rows)
 
 
@@ -2478,6 +2483,7 @@ def format_audit_summary(
     reported_parents=None,
     locks=None,
     summary=None,
+    repair_options=None,
 ) -> str:
     if isinstance(after, str):
         return "" if fixes_only else f"⚪ **Security:** {after}"
@@ -2518,6 +2524,7 @@ def format_audit_summary(
     )
     fixed_packages, review_packages, blocked_packages = set(), set(), set()
     new_packages, unconfirmed_packages = set(), set()
+    repair_names = {item["name"] for item in repair_options or []}
     for name in old_groups.keys() | groups.keys():
         previous, pending = old_groups.get(name, {}), groups.get(name, {})
         fixed = len(resolved_ids.intersection(previous))
@@ -2534,7 +2541,7 @@ def format_audit_summary(
         outcomes = [audit_fix_reason(detail, source) for detail in details]
         statuses = [detail.get("fixStatus", "") for detail in details]
         pinned = any("Blocked by retained override" in status for status in statuses)
-        review = any(kind == "review" for kind, _ in outcomes)
+        review = pinned or any(kind == "review" for kind, _ in outcomes)
         blocked = any(kind == "blocked" for kind, _ in outcomes) or any(
             "no single patch satisfies all" in status for status in statuses
         )
@@ -2610,6 +2617,8 @@ def format_audit_summary(
                 + ", ".join(f"`{other}`" for other in locations)
                 + "."
             )
+        if name in repair_names:
+            action = "Likely feasible. Repair validation has not run. " + action
         new_count = len(new_ids.intersection(pending))
         if new_count:
             new_packages.add(name)
@@ -2646,12 +2655,12 @@ def format_audit_summary(
             counts.insert(0, "fixes unconfirmed")
         if comparable and not pending_count and not unconfirmed_disappeared:
             badge, rank, action = "🟢", 0, "Resolved."
-        elif review:
-            badge, rank = "🟠", 1
         elif new_count:
             badge, rank = "🔴", 2
         elif blocked:
             badge, rank = "", 2
+        elif review:
+            badge, rank = "🟠", 1
         else:
             badge, rank = "⚪", 3
         severity_details = details + unconfirmed_details + list(previous.values())
@@ -2678,11 +2687,13 @@ def format_audit_summary(
         )
         label = {
             "🟢": "✅ Fix proposed. ",
-            "🟠": "🟠 Needs review. ",
+            "🟠": "🟡 Needs review. ",
             "🔴": "🔴 New findings. ",
             "⚪": "⚪ Needs verification. ",
-            "": "Blocked. ",
+            "": "🔴 Blocked. ",
         }[badge]
+        if blocked and review:
+            label += "🟡 Needs review. "
         rows.append(
             (
                 (rank, severity, name),
@@ -2708,9 +2719,9 @@ def format_audit_summary(
         headline += f" · 🔴 **New findings in {packages(len(new_packages))}**"
     if review_packages:
         verb = "needs" if len(review_packages) == 1 else "need"
-        headline += f" · 🟠 **{packages(len(review_packages))} {verb} your review**"
+        headline += f" · 🟡 **{packages(len(review_packages))} {verb} your review**"
     if blocked_packages:
-        headline += f" · **Fixes blocked for {packages(len(blocked_packages))}**"
+        headline += f" · 🔴 **Fixes blocked for {packages(len(blocked_packages))}**"
     if unconfirmed_packages:
         verb = "needs" if len(unconfirmed_packages) == 1 else "need"
         headline += (
@@ -2724,6 +2735,77 @@ def format_audit_summary(
         )
     if rows:
         unit = "Advisories" if source == "pnpm" else "Affected package entries"
+        if repair_options:
+
+            def cell(value):
+                value = html.escape(html.unescape(value.strip()))
+                value = re.sub(r"`([^`]+)`", r"<code>\1</code>", value)
+                return re.sub(
+                    r"\[([^\]]+)\]\((https://[^ )]+)\)", r'<a href="\2">\1</a>', value
+                )
+
+            options = {item["name"]: item for item in repair_options}
+            table = [
+                "<table>\n<thead><tr>"
+                + "".join(
+                    f"<th>{heading}</th>"
+                    for heading in (
+                        "Package",
+                        "Update",
+                        "Severity",
+                        unit,
+                        "Action / blocker",
+                        "Security evidence",
+                    )
+                )
+                + "</tr></thead>\n<tbody>"
+            ]
+            for (_, _, name), row in sorted(rows):
+                table.append(
+                    "<tr>"
+                    + "".join(
+                        f"<td>{cell(value)}</td>" for value in row.strip("|").split("|")
+                    )
+                    + "</tr>"
+                )
+                if name in options:
+                    item = options[name]
+                    table.append(
+                        '<tr><td colspan="6"><details><summary>Pin repair assessment for '
+                        + html.escape(name)
+                        + "</summary><p>A compatible published patch was found: <code>"
+                        + html.escape(item["to"])
+                        + "</code>. This pin change has not been tested in this run. "
+                        "Select it below to allow an isolated attempt. The attempt must pass a frozen install, "
+                        "the configured project checks, and a fresh audit before publication.</p><p>"
+                        "The existing pin remains unchanged. Historical rationale has not been collected automatically.</p><ul>"
+                        + "".join(
+                            "<li>" + html.escape(parent) + "</li>"
+                            for parent in sorted(
+                                {
+                                    parent
+                                    for detail in groups.get(name, {}).values()
+                                    for parent in detail.get(
+                                        "_checkedParentConstraints", []
+                                    )
+                                }
+                            )
+                        )
+                        + "".join(
+                            "<li>"
+                            + cell(
+                                f"[{detail.get('title', 'Advisory')}]({detail['url']})"
+                            )
+                            + "</li>"
+                            for detail in groups.get(name, {}).values()
+                            if re.fullmatch(
+                                r"https://[^\s<>()\[\]|`]+", detail.get("url", "")
+                            )
+                        )
+                        + "</ul></details></td></tr>"
+                    )
+            table.append("</tbody>\n</table>")
+            return headline + "\n\n" + "\n".join(table)
         headline += (
             f"\n\n| Package | Update | Severity | {unit} | Action / blocker | Security evidence |"
             + "\n| --- | --- | --- | --- | --- | --- |"
@@ -2797,7 +2879,7 @@ def format_security_overview(
     )
     if review_count:
         parts.append(
-            f"🟠 {review_count} package"
+            f"🟡 {review_count} package"
             + (" needs" if review_count == 1 else "s need")
             + " your review"
         )
@@ -3705,6 +3787,7 @@ def prepare(
         else None
     )
     package_metrics = {}
+    repair_options = REPAIR_CHOICES["candidates"](after)
     package_report = format_audit_summary(
         before,
         after,
@@ -3713,6 +3796,7 @@ def prepare(
         reported_parents=reported_parents,
         locks=(before_lock, after_lock),
         summary=package_metrics,
+        repair_options=repair_options,
     )
     background_blockers = bool(routine_only and blocked_findings)
     if background_blockers:
@@ -3823,7 +3907,7 @@ def prepare(
             "Checked committed dependencies without attempting repairs or routine upgrades.\n\n"
             + report.partition("\n")[2]
         )
-    return report
+    return report + ("" if validate_only else REPAIR_CHOICES["render"](repair_options))
 
 
 def main() -> None:

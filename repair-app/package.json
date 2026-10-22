@@ -1,0 +1,11 @@
+{
+  "name": "node-dependency-repair-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-isolation=none worker.test.mjs",
+    "test:runtime": "node runtime-smoke.mjs",
+    "check": "wrangler deploy --dry-run --outdir /tmp/node-repair-worker-build"
+  },
+  "devDependencies": {"wrangler": "4.151.3"}
+}

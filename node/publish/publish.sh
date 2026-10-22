@@ -109,6 +109,18 @@ if [ "$REFRESH_ONLY" = true ] && { [ -z "${EXPECTED_PR:-}" ] || [ "$pr_number" !
   echo 'The original proposal is no longer open; refresh will not create or replace a PR.'
   exit 0
 fi
+if [ "$PROPOSAL_KIND" = security ] && [ -n "$pr_number" ]; then
+  git fetch --no-tags origin "$PR_BRANCH:refs/remotes/origin/$PR_BRANCH"
+  expected_head=$(git rev-parse --verify "refs/remotes/origin/$PR_BRANCH")
+  repair_state=$(git log --format='%(trailers:key=Node-Repair,valueonly)' "$AUDIT_SHA..$expected_head")
+  case "$repair_state" in
+    *validated-selected-pins-v1*)
+      echo '::notice::Selected pin repairs await review on the existing security PR; automatic publication will retain that batch. Merge or close that PR before replacing it with a fresh proposal.'
+      validation_status
+      exit 0
+      ;;
+  esac
+fi
 git checkout -B "$PR_BRANCH"
 git add -- "$NPM_PROJECT/package.json"
 for file in package-lock.json pnpm-lock.yaml pnpm-workspace.yaml; do
