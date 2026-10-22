@@ -41,8 +41,7 @@ def version_tuple(value):
     return tuple(map(int, value.removeprefix("v").split(".")))
 
 
-def verify_node_security(installed, *, read=None):
-    actual = version_tuple(installed)
+def latest_security_release(major, *, read=None):
     data = (read_release_index if read is None else read)()
     try:
         releases = json.loads(data)
@@ -61,7 +60,7 @@ def verify_node_security(installed, *, read=None):
                 "Cannot verify Node runtime security: invalid release record"
             )
         version = version_tuple(release.get("version"))
-        if version[0] != actual[0]:
+        if version[0] != int(major):
             continue
         if type(release.get("security")) is not bool:
             raise ValueError(
@@ -71,10 +70,16 @@ def verify_node_security(installed, *, read=None):
             security_releases.append(version)
     if not security_releases:
         raise ValueError(
-            f"Cannot verify Node runtime security: no security release for Node {actual[0]}"
+            f"Cannot verify Node runtime security: no security release for Node {major}"
         )
     minimum = max(security_releases)
-    minimum_text = ".".join(map(str, minimum))
+    return ".".join(map(str, minimum))
+
+
+def verify_node_security(installed, *, read=None):
+    actual = version_tuple(installed)
+    minimum_text = latest_security_release(actual[0], read=read)
+    minimum = version_tuple(minimum_text)
     if actual < minimum:
         raise ValueError(
             f"Installed Node {installed} is older than the latest Node {actual[0]} "

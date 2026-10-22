@@ -3710,6 +3710,7 @@ def main() -> None:
         help="Write machine-readable validation status for the publisher",
     )
     parser.add_argument("--resolved-config", type=Path)
+    parser.add_argument("--node-update", type=Path)
     parser.add_argument("--local-patches-report", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
@@ -3748,6 +3749,13 @@ def main() -> None:
             local_patches=patches,
             validate_only=args.validate_only,
         )
+        if args.node_update is not None:
+            node_proposal = runpy.run_path(
+                str(Path(__file__).parents[1] / "node_proposal.py")
+            )
+            node_plan = node_proposal["read_plan"](args.node_update)
+            node_proposal["verify_candidate"](Path.cwd().resolve(), node_plan)
+            report = node_proposal["render"](report, node_plan, validation["passed"])
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.local_patches_report is not None:

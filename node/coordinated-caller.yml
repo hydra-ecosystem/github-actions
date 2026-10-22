@@ -18,6 +18,8 @@ name: Node dependency maintenance
     - '**/pnpm-lock.yaml'
     - '**/package-lock.json'
     - '.github/node-maintenance.json'
+    - '**/.nvmrc'
+    - '**/.node-version'
 
 permissions:
   contents: read

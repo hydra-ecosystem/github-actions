@@ -57,8 +57,15 @@ version manager before continuing.
 Each audit checks the installed Node version against the latest security release
 in that major from [Node's official release index](https://nodejs.org/dist/index.json).
 Major declarations such as `24` select the latest available release rather than
-an older runner cache entry. Exact pins remain exact: an outdated pin fails
-preflight and must be updated in the project. Security releases are not delayed
+an older runner cache entry. Security proposals pin a major-only declaration or
+upgrade an outdated exact pin to the latest security release in the same major.
+The candidate is installed and validated before the PR is published. The nearest
+`.nvmrc` and/or `.node-version` files are updated together; an explicit local
+`toolchain.node` pin is also aligned. Shared defaults are not rewritten or
+overridden to bypass an incompatible inherited exact pin. An inherited-only
+declaration requires a local declaration before an update can be proposed.
+Committed-state validation does not rewrite declarations and rejects an unsafe
+runtime. Security releases are not delayed
 by the package release cooldown. An unavailable or invalid release index also
 fails preflight; the workflow does not report runtime security as verified
 without that evidence. Logs record the installed version and security baseline.

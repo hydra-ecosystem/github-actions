@@ -16,6 +16,8 @@ PUSH_PATHS = [
     "**/pnpm-lock.yaml",
     "**/package-lock.json",
     ".github/node-maintenance.json",
+    "**/.nvmrc",
+    "**/.node-version",
 ]
 
 
@@ -46,6 +48,13 @@ def plan(
             for name in ("pnpm-lock.yaml", "package-lock.json")
         ],
     }
+    for parent in (root / directory, *(root / directory).parents):
+        if not parent.is_relative_to(root):
+            break
+        declarations = [parent / name for name in (".nvmrc", ".node-version")]
+        relevant.update(path.relative_to(root).as_posix() for path in declarations)
+        if any(path.exists() for path in declarations):
+            break
     validate_main = event_name == "push" and (
         changed_paths is None or bool(relevant.intersection(changed_paths))
     )

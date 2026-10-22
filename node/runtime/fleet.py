@@ -429,7 +429,12 @@ def check_caller(root, config, selected, github, default_branch="main"):
                 ".github/node-maintenance.json",
             ],
         }
-        if events.get("push") != expected_push:
+        node_push = {
+            **expected_push,
+            "paths": [*expected_push["paths"], "**/.nvmrc", "**/.node-version"],
+        }
+        # Released callers remain valid; new callers also refresh after Node pins merge.
+        if events.get("push") not in (expected_push, node_push):
             raise ValueError(
                 "Coordinated caller requires the default-branch dependency path filters"
             )
