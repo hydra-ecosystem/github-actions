@@ -6,7 +6,12 @@
   "env": {
     "preview": {
       "name": "replace-with-approved-preview-worker-name",
-      "workers_dev": true
+      "workers_dev": true,
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "replace-with-approved-database-name",
+        "database_id": "00000000-0000-0000-0000-000000000000"
+      }]
     }
   }
 }
