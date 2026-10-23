@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {createHmac, createPrivateKey, generateKeyPairSync, verify} from 'node:crypto';
 import {beforeEach, test} from 'node:test';
-import worker, {api, installationToken, verifySignature} from './worker.mjs';
+import {readFileSync} from 'node:fs';
+import worker, {api, installationToken, selections, selectionFingerprint, verifySignature} from './worker.mjs';
 
 const keys = generateKeyPairSync('rsa', {modulusLength: 2048,
   privateKeyEncoding: {type: 'pkcs8', format: 'pem'}});
@@ -259,4 +260,371 @@ test('network and invalid upstream JSON errors stay sanitized in the client and 
   assert.equal(await response.text(), 'Webhook processing failed');
   fetch.mock.mockImplementation(async () => new Response('private-invalid-json'));
   await assert.rejects(api(token, '/repos/fixture/repo'), /^Error: Invalid GitHub response$/);
+});
+
+const fixtures = JSON.parse(readFileSync(new URL('./selection-fixtures.json', import.meta.url), 'utf8'));
+const selectionPR = {number: fixtures.pr.number, head: {sha: fixtures.pr.head_sha}, base: {sha: fixtures.pr.base_sha}};
+for (const fixture of fixtures.cases) {
+  test(`C1 fixture: ${fixture.name}`, async () => {
+    if (fixture.invalid) assert.throws(() => selections(fixture.body));
+    else {
+      const items = selections(fixture.body);
+      assert.deepEqual(items, fixture.items);
+      assert.equal(await selectionFingerprint(selectionPR, items), fixture.fingerprint);
+    }
+  });
+}
+
+test('C1 fingerprint binds the PR, head, base and sorted selected versions', async () => {
+  const items = selections(fixtures.cases[0].body);
+  const original = await selectionFingerprint(selectionPR, items);
+  for (const changed of [{...selectionPR, number: 13}, {...selectionPR, head: {sha: 'c'.repeat(40)}},
+    {...selectionPR, base: {sha: 'c'.repeat(40)}}]) {
+    assert.notEqual(await selectionFingerprint(changed, items), original);
+  }
+  assert.notEqual(await selectionFingerprint(selectionPR, [{...items[0], to: '2.14.3'}]), original);
+});
+
+function checkMock({changePR, list = {total_count: 0, check_runs: []}, failPath} = {}) {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  const pr = {number: 12, state: 'open', user: {type: 'Bot'}, body: fixtures.cases[0].body,
+    head: {sha: 'a'.repeat(40), ref: 'maintenance/node-security', repo: {id: 7}},
+    base: {sha: 'b'.repeat(40), ref: 'main', repo: {id: 7}}};
+  changePR?.(pr, repository);
+  const calls = [];
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = options.body === undefined ? undefined : JSON.parse(options.body);
+    calls.push({path, url, method: options.method, body, signal: options.signal});
+    assert.equal(options.redirect, 'manual');
+    if (path === failPath) return new Response('private upstream failure', {status: 403});
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') return json(pr);
+    if (path === `/repos/fixture/repo/commits/${pr.head.sha}/check-runs`) {
+      const query = new URL(url).searchParams;
+      assert.equal(query.get('app_id'), env.APP_ID);
+      assert.equal(query.get('filter'), 'all');
+      assert.equal(query.get('check_name'), 'Dependency repair');
+      assert.equal(query.get('per_page'), '100');
+      return json(list);
+    }
+    if (path === '/repos/fixture/repo/check-runs' || path === '/repos/fixture/repo/check-runs/77' ||
+        path === '/repos/fixture/repo/check-runs/78') return json({id: 77});
+    throw new Error(`Unexpected API path: ${path}`);
+  });
+  return {calls, pr, repository};
+}
+const ownCheck = (overrides = {}) => ({id: 77, app: {id: 42}, name: 'Dependency repair',
+  head_sha: 'a'.repeat(40), external_id: 'node-repair:12:' + '0'.repeat(64), status: 'completed', ...overrides});
+const listOf = (...checks) => ({total_count: checks.length, check_runs: checks});
+const checkWrites = calls => calls.filter(call => call.path.includes('/check-runs') && call.method !== 'GET');
+const managedPR = (body, headSha = 'a'.repeat(40), state = 'open') => ({number: 12, state, user: {type: 'Bot'}, body,
+  head: {sha: headSha, ref: 'maintenance/node-security', repo: {id: 7}},
+  base: {sha: 'b'.repeat(40), ref: 'main', repo: {id: 7}}});
+
+test('canonical bot PR creates an App Check with exact selections and no action or dispatch', async () => {
+  const {calls, pr} = checkMock();
+  // Event-local PR identity and body are not used as approval evidence.
+  const event = {...payload, number: 12, pull_request: {user: {type: 'User'}, head: {ref: 'other'}, body: 'forged'}};
+  assert.equal((await worker.fetch(signed(event, 'pull_request'), env)).status, 200);
+  assert.deepEqual(calls[0].body, {repository_ids: [7], permissions: {contents: 'read', pull_requests: 'read', checks: 'write'}});
+  assert.ok(calls.every(call => call.signal === calls[0].signal));
+  const writes = checkWrites(calls); assert.equal(writes.length, 1);
+  assert.equal(writes[0].method, 'POST');
+  assert.deepEqual(writes[0].body, {name: 'Dependency repair', head_sha: pr.head.sha,
+    external_id: `node-repair:12:${await selectionFingerprint(pr, selections(pr.body))}`,
+    status: 'completed', conclusion: 'neutral', output: {title: '1 selected fix',
+      summary: '- `launch-editor` `2.14.1 → 2.14.2`\n\nSelections are displayed for review. Running fixes is not enabled yet.'}, actions: []});
+  assert.equal(calls.length, 6);
+});
+
+for (const action of ['opened', 'edited', 'synchronize', 'reopened']) {
+  test(`managed PR ${action} refreshes its own idle Check`, async () => {
+    const {calls} = checkMock({list: listOf(ownCheck())});
+    assert.equal((await worker.fetch(signed({...payload, action, number: 12}, 'pull_request'), env)).status, 200);
+    const writes = checkWrites(calls); assert.equal(writes.length, 1);
+    assert.equal(writes[0].path, '/repos/fixture/repo/check-runs/77');
+    assert.equal(writes[0].method, 'PATCH');
+    assert.deepEqual(writes[0].body.actions, []);
+    assert.equal(writes[0].body.head_sha, undefined);
+  });
+}
+
+test('selection edits and clearing the block replace the idle fingerprint and summary', async () => {
+  const versions = [], identities = [];
+  for (const body of [fixtures.cases[0].body, fixtures.cases[0].body.replace('2.14.2', '2.14.3'),
+    fixtures.cases[1].body, 'malformed selection']) {
+    const {calls} = checkMock({changePR: pr => { pr.body = body; }, list: listOf(ownCheck())});
+    assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
+    const output = checkWrites(calls)[0].body;
+    identities.push(output.external_id);versions.push(output.output.summary);
+    assert.deepEqual(output.actions, []);
+  }
+  assert.notEqual(identities[0], identities[1]);assert.notEqual(identities[1], identities[2]);
+  assert.match(versions[1], /2\.14\.3/);assert.doesNotMatch(versions[2], /launch-editor/);
+  assert.match(versions[3], /valid selection block/);
+});
+
+test('head synchronization creates a Check on the canonical new head', async () => {
+  const {calls, pr} = checkMock({changePR: pr => { pr.head.sha = 'c'.repeat(40); }});
+  assert.equal((await worker.fetch(signed({...payload, number: 12, action: 'synchronize',
+    pull_request: {head: {sha: 'a'.repeat(40)}}}, 'pull_request'), env)).status, 200);
+  const output = checkWrites(calls)[0].body;
+  assert.equal(output.head_sha, 'c'.repeat(40));
+  assert.equal(output.external_id, `node-repair:12:${await selectionFingerprint(pr, selections(pr.body))}`);
+});
+
+for (const [name, changePR] of [
+  ['closed', pr => { pr.state = 'closed'; }], ['human author', pr => { pr.user.type = 'User'; }],
+  ['missing author', pr => { pr.user = null; }], ['fork', pr => { pr.head.repo.id = 99; }],
+  ['wrong base repository', pr => { pr.base.repo.id = 99; }], ['deleted head repository', pr => { pr.head.repo = null; }],
+  ['wrong branch', pr => { pr.head.ref = 'feature'; }], ['stale default branch', pr => { pr.base.ref = 'master'; }],
+  ['wrong PR number', pr => { pr.number = 13; }], ['bad head SHA', pr => { pr.head.sha = 'bad'; }],
+  ['bad base SHA', pr => { pr.base.sha = 'bad'; }],
+  ['missing default branch', (pr, repo) => { delete repo.default_branch; delete pr.base.ref; }],
+]) {
+  test(`canonical ${name} PR cannot write a Check`, async () => {
+    const {calls} = checkMock({changePR});
+    assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
+    assert.equal(checkWrites(calls).length, 0);assert.equal(calls.length, 3);
+  });
+}
+
+test('canonical current default branch is used after a repository rename', async () => {
+  const {calls} = checkMock({changePR: (pr, repo) => { repo.default_branch = 'trunk'; pr.base.ref = 'trunk'; }});
+  assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
+  assert.equal(checkWrites(calls).length, 1);
+});
+
+for (const foreign of [ownCheck({app: {id: 999}}), ownCheck({name: 'Other Check'}),
+  ownCheck({head_sha: 'c'.repeat(40)}), ownCheck({external_id: 'node-repair:13:' + '0'.repeat(64)}),
+  ownCheck({external_id: 'unrelated'})]) {
+  test(`unrelated Check is never reused: ${JSON.stringify(foreign)}`, async () => {
+    const {calls} = checkMock({list: listOf(foreign)});
+    assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
+    assert.equal(checkWrites(calls)[0].method, 'POST');
+    assert.equal(checkWrites(calls)[0].path, '/repos/fixture/repo/check-runs');
+  });
+}
+
+for (const list of [{}, {total_count: 101, check_runs: []}, {total_count: -1, check_runs: []},
+  {total_count: 1, check_runs: []}, listOf(ownCheck({id: 0})), listOf(ownCheck({id: '77'})),
+  listOf(ownCheck({status: 'in_progress'}))]) {
+  test(`incomplete or non-idle Check state fails without a write: ${JSON.stringify(list)}`, async () => {
+    const {calls} = checkMock({list});
+    assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 500);
+    assert.equal(checkWrites(calls).length, 0);
+  });
+}
+
+test('duplicate owned idle Checks refresh the newest Check', async () => {
+  const {calls} = checkMock({list: listOf(ownCheck({id: 78}), ownCheck({id: 77}))});
+  assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
+  const writes = checkWrites(calls);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, '/repos/fixture/repo/check-runs/78');
+  assert.equal(writes[0].method, 'PATCH');
+  assert.deepEqual(writes[0].body.actions, []);
+});
+
+test('overlapping initial deliveries recover from duplicate idle Checks on a later edit', async () => {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  const pr = {number: 12, state: 'open', user: {type: 'Bot'}, body: fixtures.cases[0].body,
+    head: {sha: 'a'.repeat(40), ref: 'maintenance/node-security', repo: {id: 7}},
+    base: {sha: 'b'.repeat(40), ref: 'main', repo: {id: 7}}};
+  const calls = [], created = [];
+  let phase = 'initial', listCalls = 0, resolveLists;
+  const listsReady = new Promise(resolve => { resolveLists = resolve; });
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = options.body === undefined ? undefined : JSON.parse(options.body);
+    calls.push({path, method: options.method, body});
+    assert.equal(options.redirect, 'manual');
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') return json(pr);
+    if (path === `/repos/fixture/repo/commits/${pr.head.sha}/check-runs`) {
+      if (phase === 'initial') {
+        listCalls++;
+        if (listCalls === 2) resolveLists();
+        await listsReady;
+        return json({total_count: 0, check_runs: []});
+      }
+      return json(listOf(ownCheck({id: 77}), ownCheck({id: 78})));
+    }
+    if (path === '/repos/fixture/repo/check-runs') {
+      created.push(body);
+      return json({id: created.length === 1 ? 77 : 78});
+    }
+    if (path === '/repos/fixture/repo/check-runs/78') return json({id: 78});
+    throw new Error(`Unexpected API path: ${path}`);
+  });
+
+  const first = worker.fetch(signed({...payload, number: 12, action: 'opened'}, 'pull_request'), env);
+  const second = worker.fetch(signed({...payload, number: 12, action: 'opened'}, 'pull_request'), env);
+  const initialResponses = await Promise.all([first, second]);
+  assert.deepEqual(initialResponses.map(response => response.status), [200, 200]);
+  assert.equal(listCalls, 2);
+  assert.equal(created.length, 2);
+
+  phase = 'edit';
+  pr.body = fixtures.cases[0].body.replace('2.14.2', '2.14.3');
+  const edit = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
+  assert.equal(edit.status, 200);
+  const writes = checkWrites(calls);
+  assert.deepEqual(writes.slice(0, 2).map(write => write.method), ['POST', 'POST']);
+  assert.equal(writes.length, 3);
+  assert.equal(writes[2].path, '/repos/fixture/repo/check-runs/78');
+  assert.equal(writes[2].method, 'PATCH');
+  assert.match(writes[2].body.output.summary, /2\.14\.3/);
+  assert.deepEqual(writes[2].body.actions, []);
+});
+
+test('overlapping edits reconcile an existing Check to the current canonical selection', async () => {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  let body = fixtures.cases[0].body;
+  const calls = [], writes = [];
+  let listCalls = 0, releaseFirstList, markFirstList;
+  const firstListReached = new Promise(resolve => { markFirstList = resolve; });
+  const firstListHold = new Promise(resolve => { releaseFirstList = resolve; });
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
+    calls.push({path, method: options.method, body: requestBody});
+    assert.equal(options.redirect, 'manual');
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') return json(managedPR(body));
+    if (path === `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`) {
+      if (++listCalls === 1) { markFirstList(); await firstListHold; }
+      return json(listOf(ownCheck()));
+    }
+    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') {
+      writes.push(requestBody);
+      return json({id: 77});
+    }
+    throw new Error(`Unexpected API path: ${options.method} ${path}`);
+  });
+
+  const older = worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
+  await firstListReached;
+  body = fixtures.cases[0].body.replace('2.14.2', '2.14.3');
+  const newer = worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request',
+    {'x-github-delivery': '94e535a5-2a7d-491d-858a-3df51ce211de'}), env);
+  const newerResponse = await newer;
+  releaseFirstList();
+  const olderResponse = await older;
+  assert.equal(newerResponse.status, 200);
+  assert.equal(olderResponse.status, 200);
+  assert.equal(writes.length, 3);
+  assert.match(writes[0].output.summary, /2\.14\.3/);
+  assert.match(writes[1].output.summary, /2\.14\.2/);
+  assert.match(writes[2].output.summary, /2\.14\.3/);
+  assert.equal(writes[0].external_id, writes[2].external_id);
+  assert.notEqual(writes[1].external_id, writes[2].external_id);
+  assert.ok(writes.every(write => write.actions.length === 0));
+});
+
+test('repeated canonical changes exhaust bounded Check reconciliation', async () => {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  const writes = [];
+  let prReads = 0;
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
+    assert.equal(options.redirect, 'manual');
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') {
+      prReads++;
+      return json(managedPR(fixtures.cases[0].body.replace('2.14.2', `2.14.${prReads + 1}`)));
+    }
+    if (path === `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`) return json(listOf(ownCheck()));
+    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') {
+      writes.push(requestBody);
+      return json({id: 77});
+    }
+    throw new Error(`Unexpected API path: ${options.method} ${path}`);
+  });
+  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
+  assert.equal(response.status, 500);
+  assert.equal(prReads, 6);
+  assert.equal(writes.length, 3);
+  assert.deepEqual(writes.map(write => write.actions), [[], [], []]);
+});
+
+test('eligibility loss after a Check write stops reconciliation safely', async () => {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  let prReads = 0;
+  const writes = [];
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
+    assert.equal(options.redirect, 'manual');
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') {
+      prReads++;
+      return json(managedPR(fixtures.cases[0].body, 'a'.repeat(40), prReads === 2 ? 'closed' : 'open'));
+    }
+    if (path === `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`) return json(listOf(ownCheck()));
+    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') {
+      writes.push(requestBody);
+      return json({id: 77});
+    }
+    throw new Error(`Unexpected API path: ${options.method} ${path}`);
+  });
+  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
+  assert.equal(response.status, 200);
+  assert.equal(prReads, 2);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].actions, []);
+});
+
+test('head changes during reconciliation refresh the new canonical head', async () => {
+  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
+  const oldHead = 'a'.repeat(40), newHead = 'c'.repeat(40);
+  let prReads = 0;
+  const calls = [];
+  fetch.mock.mockImplementation(async (url, options) => {
+    const path = new URL(url).pathname;
+    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
+    calls.push({path, method: options.method, body: requestBody});
+    assert.equal(options.redirect, 'manual');
+    if (path === '/app/installations/3/access_tokens') return json({token});
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    if (path === '/repos/fixture/repo') return json(repository);
+    if (path === '/repos/fixture/repo/pulls/12') {
+      prReads++;
+      return json(managedPR(fixtures.cases[0].body, prReads === 1 ? oldHead : newHead));
+    }
+    if (path === `/repos/fixture/repo/commits/${oldHead}/check-runs`) return json(listOf(ownCheck()));
+    if (path === `/repos/fixture/repo/commits/${newHead}/check-runs`) return json(listOf());
+    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') return json({id: 77});
+    if (path === '/repos/fixture/repo/check-runs' && options.method === 'POST') return json({id: 88});
+    throw new Error(`Unexpected API path: ${options.method} ${path}`);
+  });
+  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
+  assert.equal(response.status, 200);
+  const writes = checkWrites(calls);
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].method, 'PATCH');
+  assert.equal(writes[1].method, 'POST');
+  assert.equal(writes[1].body.head_sha, newHead);
+  assert.deepEqual(writes.map(write => write.body.actions), [[], []]);
+});
+
+test('canonical PR or Check-list API failures are sanitized and cannot cause writes', async () => {
+  for (const failPath of ['/repos/fixture/repo/pulls/12', `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`]) {
+    const {calls} = checkMock({failPath});
+    const response = await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env);
+    assert.equal(response.status, 500);assert.equal(await response.text(), 'Webhook processing failed');
+    assert.equal(checkWrites(calls).length, 0);
+  }
 });

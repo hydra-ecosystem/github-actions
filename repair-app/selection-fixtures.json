@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "pr": {
+    "number": 12,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "cases": [
+    {
+      "name": "one selected patch",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "items": [
+        {
+          "name": "launch-editor",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        }
+      ],
+      "fingerprint": "33b17f82caff79dd2065972e92b5e5b83aa761be9c5799dcbbced028f0f60849"
+    },
+    {
+      "name": "unchecked item",
+      "body": "<!-- node-repair:selection:v1 -->\n- [ ] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "items": [],
+      "fingerprint": "75001f5e4c1d47514f4acf0d5760893f104f10f673e2da7d5be350e2672589f7"
+    },
+    {
+      "name": "empty block",
+      "body": "<!-- node-repair:selection:v1 -->\n<!-- /node-repair:selection -->",
+      "items": [],
+      "fingerprint": "75001f5e4c1d47514f4acf0d5760893f104f10f673e2da7d5be350e2672589f7"
+    },
+    {
+      "name": "sorted scoped and uppercase check",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `z-package` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [X] Allow `@scope/pkg` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [ ] Allow `a-package` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "items": [
+        {
+          "name": "@scope/pkg",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "z-package",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        }
+      ],
+      "fingerprint": "26e58144229911e19f502c5bb5e30d795b07fda0646c0092c37710758cd055b7"
+    },
+    {
+      "name": "CRLF and surrounding prose",
+      "body": "Before\r\n<!-- node-repair:selection:v1 -->\r\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\r\n<!-- /node-repair:selection -->\r\nAfter",
+      "items": [
+        {
+          "name": "launch-editor",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        }
+      ],
+      "fingerprint": "33b17f82caff79dd2065972e92b5e5b83aa761be9c5799dcbbced028f0f60849"
+    },
+    {
+      "name": "large exact patch strings",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.9007199254740992 → 2.14.9007199254740993` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "items": [
+        {
+          "name": "launch-editor",
+          "from": "2.14.9007199254740992",
+          "to": "2.14.9007199254740993"
+        }
+      ],
+      "fingerprint": "924a2b588ada48ce305ff44de023f469ef6da46a5effdafe8022ff6b36a667d4"
+    },
+    {
+      "name": "twenty selected",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `package-00` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-01` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-02` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-03` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-04` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-05` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-06` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-07` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-08` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-09` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-10` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-11` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-12` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-13` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-14` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-15` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-16` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-17` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-18` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-19` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "items": [
+        {
+          "name": "package-00",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-01",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-02",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-03",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-04",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-05",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-06",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-07",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-08",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-09",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-10",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-11",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-12",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-13",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-14",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-15",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-16",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-17",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-18",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        },
+        {
+          "name": "package-19",
+          "from": "2.14.1",
+          "to": "2.14.2"
+        }
+      ],
+      "fingerprint": "7833cd0924acca54c2fea66a9bcd2a11a24d63e7932aaa3e4442d7810f849de9"
+    },
+    {
+      "name": "missing",
+      "body": null,
+      "invalid": true
+    },
+    {
+      "name": "no markers",
+      "body": "hello",
+      "invalid": true
+    },
+    {
+      "name": "reversed",
+      "body": "<!-- /node-repair:selection -->\n<!-- node-repair:selection:v1 -->",
+      "invalid": true
+    },
+    {
+      "name": "inline start",
+      "body": "prefix <!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "inline end",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection --> suffix",
+      "invalid": true
+    },
+    {
+      "name": "repeated start",
+      "body": "<!-- node-repair:selection:v1 -->\n<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "repeated end",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "duplicate checked",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "duplicate unchecked",
+      "body": "<!-- node-repair:selection:v1 -->\n- [ ] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [ ] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "duplicate mixed",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [ ] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "blank line",
+      "body": "<!-- node-repair:selection:v1 -->\n\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "wrong grammar",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Upgrade `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "wrong arrow",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 -> 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "trailing space",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2` by updating its explicit pin. \n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "uppercase package",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `Package` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "bad scope",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `@scope/Pkg` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "leading dot",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `.pkg` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "leading underscore",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `_pkg` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "npm name too long",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "major jump",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 3.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "minor jump",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.15.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "equal version",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.1` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "downgrade",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.3 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "leading zero",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.01 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "prerelease",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2-beta.1` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "build metadata",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `launch-editor` `2.14.1 → 2.14.2+meta` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "invalid unchecked patch",
+      "body": "<!-- node-repair:selection:v1 -->\n- [ ] Allow `launch-editor` `2.14.1 → 2.15.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "twenty one selected",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `package-00` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-01` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-02` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-03` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-04` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-05` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-06` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-07` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-08` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-09` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-10` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-11` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-12` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-13` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-14` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-15` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-16` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-17` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-18` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-19` `2.14.1 → 2.14.2` by updating its explicit pin.\n- [x] Allow `package-20` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "reserved npm name node_modules",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `node_modules` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    },
+    {
+      "name": "reserved npm name favicon.ico",
+      "body": "<!-- node-repair:selection:v1 -->\n- [x] Allow `favicon.ico` `2.14.1 → 2.14.2` by updating its explicit pin.\n<!-- /node-repair:selection -->",
+      "invalid": true
+    }
+  ]
+}
