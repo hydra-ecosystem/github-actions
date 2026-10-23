@@ -1,0 +1,14 @@
+{
+  "name": "node-dependency-repair-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-isolation=none --experimental-test-coverage worker.test.mjs",
+    "test:runtime": "node runtime-smoke.mjs",
+    "check": "wrangler deploy --env preview --dry-run --outdir .wrangler/dry-run"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261019.1-beta",
+    "wrangler": "4.151.3"
+  }
+}

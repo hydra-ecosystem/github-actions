@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "replace-with-approved-worker-name",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-19",
+  "env": {
+    "preview": {
+      "name": "replace-with-approved-preview-worker-name",
+      "workers_dev": true
+    }
+  }
+}
