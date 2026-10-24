@@ -88,6 +88,10 @@ const nativeCheck = {id: 77, app: {id: 42}, name: 'Dependency repair', head_sha:
   external_id: `node-repair:12:${nativeFingerprint}`, status: 'completed', conclusion: 'neutral'};
 const documentedCheck = value => { const response = {...value}; delete response.actions; return response; };
 const nativeCalls = [];
+const commandComment = {id: 501, body: '/repair selected', user: {id: 9, type: 'User', login: 'maintainer'},
+  issue_url: 'https://api.github.com/repos/fixture/repo/issues/12',
+  created_at: '2026-10-24T05:00:00Z', updated_at: '2026-10-24T05:00:00Z'};
+let statusComment;
 const admissionService = new Miniflare(convertV4MiniflareOptions({
   modules: true, scriptPath: new URL('./worker.mjs', import.meta.url).pathname,
   compatibilityDate: '2026-10-19', d1Databases: ['DB'],
@@ -108,6 +112,15 @@ const admissionService = new Miniflare(convertV4MiniflareOptions({
     if (path === '/repos/fixture/repo') return Response.json({id: 7, full_name: 'fixture/repo', default_branch: 'main'});
     if (path === '/repos/fixture/repo/pulls/12') return Response.json(nativePR);
     if (path === '/repos/fixture/repo/collaborators/maintainer/permission') return Response.json({permission: 'maintain', user: {login: 'maintainer'}});
+    if (path === '/repos/fixture/repo/issues/comments/501') return Response.json(commandComment);
+    if (path === '/repos/fixture/repo/issues/12/comments' && request.method === 'POST') {
+      statusComment = {id: 600, ...body, performed_via_github_app: {id: 42}, issue_url: commandComment.issue_url};
+      return Response.json(statusComment);
+    }
+    if (path === '/repos/fixture/repo/issues/comments/600') {
+      if (request.method === 'PATCH') Object.assign(statusComment, body);
+      return Response.json(statusComment);
+    }
     if (path === '/repos/fixture/repo/check-runs/77') {
       if (request.method === 'PATCH') Object.assign(nativeCheck, body);
       return Response.json(request.method === 'GET' ? documentedCheck(nativeCheck) : nativeCheck);
@@ -153,7 +166,7 @@ try {
   assert.equal(rows.results.length, 1);assert.equal(rows.results[0].state, 'dispatched');assert.equal(rows.results[0].run_id, 900);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 1);
   assert.equal(nativeCheck.external_id, `node-repair-request:${rows.results[0].id}`);
-  assert.equal(nativeCheck.status, 'in_progress');assert.deepEqual(nativeCheck.actions, []);
+  assert.equal(nativeCheck.status, 'completed');assert.equal(nativeCheck.conclusion, 'neutral');assert.deepEqual(nativeCheck.actions, []);
 
   // A queued A click must not admit the refreshed B selection or a changed base.
   await db.exec('DELETE FROM requests');
@@ -190,6 +203,29 @@ try {
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 2);
   assert.equal(JSON.parse(nativeCalls.findLast(c => c.path.endsWith('/dispatches')).body.inputs.selections)[0].to, '2.14.3');
   console.log('Native D1 passed: concurrent atomic admission, UUID replay, scoped active locks, ambiguous-lock retention, complete clicked Check identity binding across stale selection/base changes, missing identity rejection, and one fresh exact dispatch.');
+
+  await db.exec('DELETE FROM requests');
+  Object.assign(nativeCheck, {external_id: `node-repair:12:${nativeFingerprint}`, status: 'completed', conclusion: 'neutral'});
+  nativePR.body += `\n<!-- node-repair:revision:v1 ${nativePR.head.sha} ${nativePR.base.sha} -->`;
+  const commentEvent = {action: 'created', installation: {id: 3}, repository: {id: 7, full_name: 'fixture/repo'},
+    issue: {number: 12, body: nativePR.body, pull_request: {url: 'https://api.github.com/repos/fixture/repo/pulls/12'}},
+    comment: commandComment, sender: commandComment.user};
+  const submit = id => {
+    const input = signed(commentEvent, 'issue_comment');input.headers['x-github-delivery'] = id;
+    return admissionService.dispatchFetch('https://worker.test/webhook', input);
+  };
+  const commandID = randomUUID();
+  assert.deepEqual((await Promise.all([submit(commandID), submit(randomUUID())])).map(r => r.status), [200, 200]);
+  assert.equal((await submit(commandID)).status, 200);
+  const commentRows = (await db.prepare('SELECT * FROM requests').all()).results;
+  assert.equal(commentRows.length, 1);assert.equal(commentRows[0].comment_id, 501);
+  assert.equal(commentRows[0].status_comment_id, 600);assert.equal(commentRows[0].run_id, 900);
+  assert.match(statusComment.body, /Workflow started/);assert.match(statusComment.body, /launch-editor/);
+  assert.match(statusComment.body, /actions\/runs\/900/);
+  assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 3);
+  assert.equal(nativeCalls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 1);
+  assert.ok(nativeCalls.every(c => c.body?.status !== 'in_progress'));
+  console.log('Native conversation command passed: real local D1 deduplicates concurrent/replayed comments, retains one reply, and links the exact dispatched run without requiring Check navigation.');
 } finally {
   await admissionService.dispose();
 }
