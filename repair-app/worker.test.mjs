@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {createHmac, createPrivateKey, generateKeyPairSync, verify} from 'node:crypto';
 import {beforeEach, test} from 'node:test';
 import {readFileSync} from 'node:fs';
-import worker, {api, installationToken, selections, selectionFingerprint, verifySignature, workflowInputs} from './worker.mjs';
+import worker, {api, installationToken, selections, selectionFingerprint, verifySignature, workflowInputs, requestStatus} from './worker.mjs';
 
 const keys = generateKeyPairSync('rsa', {modulusLength: 2048,
   privateKeyEncoding: {type: 'pkcs8', format: 'pem'}});
@@ -723,12 +723,249 @@ test('an authorized current action reserves once and retains the documented run 
   assert.equal(row.state, 'dispatched');assert.equal(row.run_id, 900);assert.equal(row.check_id, 77);
   assert.equal(row.installation_id, 3);assert.equal(row.repository_id, 7);assert.equal(row.dispatched_ref, 'main');
   assert.equal(row.completed_at, null);assert.equal(row.conclusion, null);
-  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.equal(f.check.status, 'in_progress');
+  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');
   assert.deepEqual(f.check.actions, []);assert.match(f.check.output.summary, /actions\/runs\/900/);
   const before = f.calls.length;
   assert.equal((await f.click()).status, 200);
   assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
   assert.equal(f.calls.length - before, 4); // Token, repository and owned Check reconciliation; no new attempt.
+});
+
+async function commentMock(t, options = {}) {
+  const comments = new Map();
+  const command = {id: 501, body: '/repair selected', user: {id: 9, type: 'User', login: 'maintainer'},
+    issue_url: 'https://api.github.com/repos/fixture/repo/issues/12',
+    created_at: '2026-10-24T05:00:00Z', updated_at: '2026-10-24T05:00:00Z'};
+  const f = await actionMock(t, {...options, async onCall(call, context) {
+    const intercepted = await options.onCall?.(call, {...context, comments, command});
+    if (intercepted) return intercepted;
+    if (call.path === '/repos/fixture/repo/issues/comments/501' ||
+        call.path === `/repos/fixture/repo/issues/comments/${command.id}`) return json(command);
+    if (call.path === '/repos/fixture/repo/issues/12/comments' && call.method === 'POST') {
+      const reply = {id: 600, body: call.body.body, performed_via_github_app: {id: 42},
+        issue_url: command.issue_url};
+      comments.set(reply.id, reply);return json(reply);
+    }
+    if (call.path === '/repos/fixture/repo/issues/comments/600') {
+      const reply = comments.get(600);
+      if (call.method === 'PATCH') Object.assign(reply, call.body);
+      return json(reply);
+    }
+  }});
+  f.pr.body += `\n<!-- node-repair:revision:v1 ${f.pr.head.sha} ${f.pr.base.sha} -->`;
+  const event = {...payload, action: 'created', issue: {number: 12, body: f.pr.body,
+    pull_request: {url: 'https://api.github.com/repos/fixture/repo/pulls/12'}},
+    comment: {...command, user: {...command.user}}, sender: {...command.user}};
+  const submit = (id = delivery, changes = {}) => worker.fetch(signed({...event, ...changes}, 'issue_comment',
+    {'x-github-delivery': id}), f.environment);
+  return {...f, command, comments, commentEvent: event, submit};
+}
+
+test('a conversation command submits description selections and updates one App-owned reply', async t => {
+  const f = await commentMock(t);
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
+  assert.equal(f.rows()[0].comment_id, 501);assert.equal(f.rows()[0].status_comment_id, 600);
+  assert.deepEqual(f.calls[0].body.permissions, {contents: 'read', pull_requests: 'write', checks: 'write', actions: 'write', issues: 'read'});
+  assert.match(f.comments.get(600).body, /Workflow started/);
+  assert.match(f.comments.get(600).body, /launch-editor.*2\.14\.1 → 2\.14\.2/);
+  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  const id = 'a4e535a5-2a7d-491d-858a-3df51ce211df';
+  assert.equal((await f.submit()).status, 200);assert.equal((await f.submit(id)).status, 200);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 1);
+  assert.equal(f.dispatches().length, 1);assert.match(f.comments.get(600).body, /launch-editor/);
+  f.db.sql.prepare("UPDATE requests SET state = 'success' WHERE id = ?").run(delivery);
+  assert.equal((await f.submit(id)).status, 200);assert.equal(f.dispatches().length, 1);
+});
+
+test('a conversation command finishes its status updates within the webhook deadline at realistic API latency', {timeout: 12_000}, async t => {
+  const f = await commentMock(t, {async onCall(call) {
+    await new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(new Error('fixture API deadline')); };
+      const timer = setTimeout(() => { call.signal.removeEventListener('abort', abort); resolve(); }, 550);
+      if (call.signal.aborted) abort();
+      else call.signal.addEventListener('abort', abort, {once: true});
+    });
+  }});
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.rows().length, 1);assert.equal(f.dispatches().length, 1);
+  assert.equal(f.rows()[0].state, 'dispatched');
+  assert.match(f.check.output.summary, /actions\/runs\/900/);
+  assert.match(f.comments.get(600).body, /Workflow started/);
+  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+});
+
+for (const [name, mutate] of [
+  ['quoted command', e => {e.comment.body = '> /repair selected';}],
+  ['extra command text', e => {e.comment.body = '/repair selected extra';}],
+  ['edited event', e => {e.action = 'edited';}],
+  ['deleted event', e => {e.action = 'deleted';}],
+  ['ordinary issue', e => {delete e.issue.pull_request;}],
+  ['bot comment', e => {e.sender.type = e.comment.user.type = 'Bot';}],
+  ['mismatched author', e => {e.comment.user.id = 10;}],
+]) {
+  test(`${name} is not a repair submission`, async t => {
+    const f = await commentMock(t), event = structuredClone(f.commentEvent);mutate(event);
+    assert.equal((await f.submit(delivery, event)).status, 200);
+    assert.equal(f.calls.length, 0);assert.equal(f.rows().length, 0);
+  });
+}
+
+for (const [name, mutate] of [
+  ['changed selections', f => {f.pr.body = f.pr.body.replace('2.14.2', '2.14.3');}],
+  ['changed head with refreshed Check', f => {f.pr.head.sha = 'c'.repeat(40);f.check.head_sha = f.pr.head.sha;}],
+  ['changed base', f => {f.pr.base.sha = 'c'.repeat(40);}],
+  ['missing revision binding', f => {f.commentEvent.issue.body = fixtures.cases[0].body;}],
+  ['multiple revision bindings', f => {f.commentEvent.issue.body += '\n' + f.commentEvent.issue.body.split('\n').at(-1);}],
+  ['mismatched canonical comment ID', f => {f.command.id = 999;}],
+  ['edited canonical comment', f => {f.command.updated_at = '2026-10-24T05:01:00Z';}],
+  ['canonical body changed', f => {f.command.body += ' extra';}],
+  ['foreign comment owner', f => {f.command.user.id = 10;}],
+  ['foreign issue URL', f => {f.command.issue_url = 'https://api.github.com/repos/other/repo/issues/12';}],
+]) {
+  test(`a ${name} cannot authorize a different repair`, async t => {
+    const f = await commentMock(t);mutate(f);
+    f.check.external_id = `node-repair:12:${await selectionFingerprint(f.pr, selections(f.pr.body))}`;
+    assert.equal((await f.submit()).status, 200);
+    assert.equal(f.rows().length, 0);assert.equal(f.dispatches().length, 0);
+    if (['changed selections', 'changed head with refreshed Check', 'changed base', 'missing revision binding', 'multiple revision bindings'].includes(name)) {
+      assert.match(f.comments.get(600).body, /No run started/);
+    } else assert.equal(f.comments.size, 0);
+  });
+}
+
+test('comment authorization still requires current maintainer permission', async t => {
+  const f = await commentMock(t, {permission: 'read'});
+  assert.equal((await f.submit()).status, 200);assert.equal(f.rows().length, 0);
+  assert.equal(f.dispatches().length, 0);assert.equal(f.comments.size, 0);
+});
+
+test('parallel selection reads cannot write before the permission result is known', {timeout: 2_000}, async t => {
+  let releasePermission, selectionRead;
+  const permissionPending = new Promise(resolve => { releasePermission = resolve; });
+  const selectionPending = new Promise(resolve => { selectionRead = resolve; });
+  const f = await commentMock(t, {permission: 'read', async onCall(call) {
+    if (call.path.endsWith('/permission')) await permissionPending;
+    if (call.path.includes('/commits/') && call.path.endsWith('/check-runs')) selectionRead();
+  }});
+  const pending = f.submit();
+  try {
+    await selectionPending;
+    assert.equal(f.rows().length, 0);assert.equal(f.comments.size, 0);
+    assert.equal(f.calls.filter(c => c.method !== 'GET' && !c.path.endsWith('/access_tokens')).length, 0);
+  } finally { releasePermission(); }
+  assert.equal((await pending).status, 200);
+  assert.equal(f.rows().length, 0);assert.equal(f.comments.size, 0);assert.equal(f.dispatches().length, 0);
+});
+
+test('a head change after parallel comment validation is rejected before reservation', async t => {
+  let prReads = 0;
+  const f = await commentMock(t, {onCall(call, {pr}) {
+    if (call.path.endsWith('/pulls/12') && ++prReads === 2) pr.head.sha = 'c'.repeat(40);
+  }});
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.rows().length, 0);assert.equal(f.dispatches().length, 0);
+  assert.match(f.comments.get(600).body, /No run started: the report or PR revision changed/);
+});
+
+test('a lost reply POST retains the reservation and neither reply nor dispatch is retried', async t => {
+  const f = await commentMock(t, {onCall(call) {
+    if (call.path.endsWith('/12/comments') && call.method === 'POST') throw Error('lost reply response');
+  }});
+  assert.equal((await f.submit()).status, 500);assert.equal(f.rows()[0].state, 'reserved');
+  assert.equal((await f.submit()).status, 200);assert.equal(f.dispatches().length, 0);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 1);
+});
+
+test('a deleted source comment cannot reserve or dispatch', async t => {
+  const f = await commentMock(t, {onCall(call) {
+    if (call.path.endsWith('/comments/501')) return new Response(null, {status: 404});
+  }});
+  assert.equal((await f.submit()).status, 200);assert.equal(f.rows().length, 0);
+  assert.equal(f.dispatches().length, 0);assert.equal(f.comments.size, 0);
+});
+
+test('an invalid reply owner retains the reservation without dispatch', async t => {
+  const f = await commentMock(t, {onCall(call) {
+    if (call.path.endsWith('/12/comments') && call.method === 'POST') return json({id: 600,
+      performed_via_github_app: {id: 99}, issue_url: 'https://api.github.com/repos/fixture/repo/issues/12'});
+  }});
+  assert.equal((await f.submit()).status, 500);assert.equal(f.rows()[0].state, 'reserved');
+  assert.equal(f.rows()[0].status_comment_id, null);assert.equal(f.dispatches().length, 0);
+});
+
+test('a delayed reply refresh cannot erase the newly retained run link', {timeout: 2000}, async t => {
+  const dispatchReached = Promise.withResolvers(), finishDispatch = Promise.withResolvers();
+  const replyReached = Promise.withResolvers(), finishReply = Promise.withResolvers();
+  let dispatchPending = false, held = false;
+  const f = await commentMock(t, {async onCall(call) {
+    if (call.path.endsWith('/dispatches')) {
+      dispatchPending = true;dispatchReached.resolve();await finishDispatch.promise;
+    } else if (dispatchPending && !held && call.path.endsWith('/comments/600') && call.method === 'PATCH') {
+      held = true;replyReached.resolve();await finishReply.promise;
+    }
+  }});
+  const submit = f.submit();await dispatchReached.promise;
+  const replay = f.submit();await replyReached.promise;
+  finishDispatch.resolve();assert.equal((await submit).status, 200);
+  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  finishReply.resolve();assert.equal((await replay).status, 200);
+  assert.match(f.comments.get(600).body, /Workflow started/);
+  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  assert.equal(f.dispatches().length, 1);
+});
+
+test('comment and native action submissions share the same active lock', async t => {
+  const f = await commentMock(t);
+  assert.deepEqual((await Promise.all([f.submit(), f.click('a4e535a5-2a7d-491d-858a-3df51ce211df')])).map(r => r.status), [200, 200]);
+  assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
+});
+
+test('a replaced status comment is not overwritten on delivery replay', async t => {
+  const f = await commentMock(t);assert.equal((await f.submit()).status, 200);
+  f.comments.get(600).performed_via_github_app.id = 99;
+  const writes = f.calls.filter(c => c.path.endsWith('/comments/600') && c.method === 'PATCH').length;
+  assert.equal((await f.submit()).status, 500);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/comments/600') && c.method === 'PATCH').length, writes);
+  assert.equal(f.dispatches().length, 1);
+});
+
+test('a second comment updates the active conversation reply without another dispatch', async t => {
+  const f = await commentMock(t);assert.equal((await f.submit()).status, 200);
+  f.command.id = f.commentEvent.comment.id = 502;
+  assert.equal((await f.submit('a4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
+  assert.equal(f.dispatches().length, 1);assert.equal(f.comments.size, 1);
+});
+
+test('an existing native request is explained in the conversation without a new dispatch', async t => {
+  const f = await commentMock(t);assert.equal((await f.click()).status, 200);
+  assert.equal((await f.submit('a4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
+  assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
+  assert.match(f.comments.get(600).body, /another repair request is active/);
+  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+});
+
+test('the source-comment index blocks a second UUID after the first request terminates', async t => {
+  const f = await commentMock(t);assert.equal((await f.submit()).status, 200);
+  f.db.sql.prepare("UPDATE requests SET state = 'success' WHERE id = ?").run(delivery);
+  const inserted = f.db.sql.prepare(`INSERT OR IGNORE INTO requests
+    (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state, comment_id)
+    SELECT 'new-uuid', installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, 'reserved', comment_id FROM requests`).run();
+  assert.equal(inserted.changes, 0);assert.equal(f.rows().length, 1);
+});
+
+test('existing slice-3 rows survive the one-time comment migration', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const oldSchema = readFileSync(new URL('./schema.sql', import.meta.url), 'utf8')
+      .replace(/,\n  comment_id[\s\S]*?selections_json TEXT/, '').replace(/CREATE UNIQUE INDEX IF NOT EXISTS one_comment_request[\s\S]*/, '');
+    db.exec(oldSchema);
+    db.exec("INSERT INTO requests (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state) VALUES ('old', 3, 7, 'fixture/repo', 12, 'head', 'base', 'main', 'fingerprint', 77, 'maintainer', 1, 'unknown')");
+    db.exec(readFileSync(new URL('./migrations/0001_comment_requests.sql', import.meta.url), 'utf8'));
+    const row = db.prepare('SELECT * FROM requests').get();
+    assert.equal(row.state, 'unknown');assert.equal(row.comment_id, null);
+    assert.equal(row.status_comment_id, null);assert.equal(row.selections_json, null);
+  } finally { db.close(); }
 });
 
 test('a queued click for selection A cannot dispatch after the canonical Check refreshes to selection B', async t => {
@@ -851,7 +1088,7 @@ test('a failed in-progress Check update retains reserved state without dispatch'
   assert.equal((await f.click()).status, 500);assert.equal(f.rows()[0].state, 'reserved');assert.equal(f.dispatches().length, 0);
   assert.equal((await f.click()).status, 200);assert.equal(f.dispatches().length, 0);
   assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
-  assert.equal(f.check.status, 'in_progress');assert.deepEqual(f.check.actions, []);
+  assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');assert.deepEqual(f.check.actions, []);
   assert.equal(f.check.output.title, 'Request reserved');
 });
 
@@ -909,13 +1146,17 @@ test('failure after retaining the known run cannot erase its identity or dispatc
   assert.equal((await f.click()).status, 200);assert.equal(f.dispatches().length, 1);
 });
 
-test('concurrent current clicks admit one request through the actual SQLite unique index', async t => {
+test('concurrent current clicks admit one request through the actual SQLite unique index', {timeout: 2000}, async t => {
   let arrivals = 0, release;
+  const reads = new Map();
   const ready = new Promise(resolve => {release = resolve;});
   const f = await actionMock(t, {async onCall(call) {
     if (call.path.endsWith('/check-runs/77') && call.method === 'GET') {
-      if (++arrivals === 4) release();
-      if (arrivals > 2) await ready;
+      const count = (reads.get(call.signal) || 0) + 1;reads.set(call.signal, count);
+      if (count === 2) {
+        if (++arrivals === 2) release();
+        await ready;
+      }
     }
   }});
   const result = await Promise.all([f.click(), f.click('94e535a5-2a7d-491d-858a-3df51ce211de')]);
@@ -936,7 +1177,7 @@ test('PR edits preserve a reserved/dispatched Check request identity and do not 
   const f = await actionMock(t);assert.equal((await f.click()).status, 200);
   f.pr.body = fixtures.cases[1].body;
   assert.equal((await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment)).status, 200);
-  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.equal(f.check.status, 'in_progress');
+  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');
   assert.deepEqual(f.check.actions, []);assert.equal(f.dispatches().length, 1);
 });
 
@@ -961,7 +1202,7 @@ test('an idle refresh that races admission restores the reserved Check identity'
   }});
   assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment)).status, 200);
   assert.equal(raced, true);assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
-  assert.equal(f.check.status, 'in_progress');assert.deepEqual(f.check.actions, []);assert.equal(f.dispatches().length, 0);
+  assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');assert.deepEqual(f.check.actions, []);assert.equal(f.dispatches().length, 0);
 });
 
 test('a different active Check blocks a fresh idle click and links the active request', async t => {

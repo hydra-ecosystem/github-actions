@@ -6,8 +6,10 @@ service. Repository maintainers install the shared App; they do not host it.
 The receiver verifies signed webhook deliveries and reads canonical repository
 metadata with a token restricted to one repository. For managed PRs it also
 reads the canonical PR and displays the selected package versions in the App's
-**Dependency repair** Check. A maintainer can request one harmless pilot run
-through its native action. D1 retains the active request and returned Actions run
+**Dependency repair** Check. A maintainer can select fixes in the PR description
+and post `/repair selected` in the Conversation tab. The App replies there with
+the request status and exact Actions link. The native Check action remains an
+optional secondary entry point. D1 retains the active request and returned Actions run
 identity. Dependency repairs and completion handling belong to later slices.
 
 ## Check the selected batch
@@ -34,12 +36,42 @@ only Contents read, Pull requests read and Checks write. Action-event tokens
 also grant Actions write, restricted to the same repository. The service never
 updates another App's Check.
 
-## Request the selected batch
+## Request the selected batch from the PR conversation
+
+The report includes the head and base revisions in one hidden line outside the
+selection block (replace these illustrative hashes with the exact PR revisions):
+
+```markdown
+<!-- node-repair:revision:v1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->
+```
+
+Tick the allowed fixes in the PR description, then post a new comment containing
+only `/repair selected`. Use GitHub's normal **Comment** button to submit it.
+Neither ticking a checkbox nor editing an existing comment starts an attempt.
+There is no need to visit Checks. Request status appears in an App-owned reply;
+supporting Check details remain available separately.
+
+The receiver accepts only a newly created human comment on a managed PR. It
+re-fetches the comment and verifies its author, exact body, PR association and
+unchanged creation/update timestamps. It checks current maintainer permission,
+the selections captured in the signed comment event, the report's head/base
+binding, and the current canonical PR/Check fingerprint. A stale report or
+selection starts no run and produces a reply asking for a fresh command.
+Unrelated comments and edits are ignored. Missing or edited/deleted commands
+and unmanaged PRs do not authorize an attempt.
+
+For this unreleased integration, reports/pilot descriptions must include the
+revision line. Existing reports without it cannot authorize comment dispatch.
+The production report renderer is still a later slice; it is not deployed.
+
+### Existing Check action
 
 Review the exact versions in the Check summary, then click **Run selected fixes**.
 The service reads current write, maintain or admin permission and verifies the
 canonical PR and Check again. A stale selection or head refreshes the Check and
 requires another click; it starts no run.
+
+### Shared admission and recovery
 
 The request UUID is the signed GitHub delivery ID. A single D1 insert reserves
 one active request per installation, repository and PR before dispatch. Replayed
@@ -53,6 +85,37 @@ run ID and matching repository URLs. The known run link is saved in D1 and shown
 in the Check. The fixture in `repair-app/pilot/` validates those inputs without
 checking out code or changing dependency files. A successful pilot does not mean
 a dependency repair was published.
+
+Comment requests additionally retain the source comment ID, reply ID and exact
+selections. A unique source-comment index prevents the same comment from
+authorizing a second attempt, even under a different delivery UUID. Only the
+winning reservation creates a status reply. Its ID is saved before dispatch;
+a lost reply POST or failed save retains the lock and starts no run. Replays
+update only the recorded reply owned by this App on this PR. They never retry
+an ambiguous reply POST. PR refreshes use read-only PR tokens and do not edit
+conversation replies.
+
+The control Check stays completed/neutral while its text changes. Real GitHub
+did not reopen the previously completed Check when asked for `in_progress`.
+The Actions link, and later canonical completion handling, supply run state.
+
+## Enable comment delivery after review
+
+This change is local and unreleased. Before testing the reviewed revision live:
+
+1. Add **Issues: read** and change **Pull requests** to **read/write** on the App.
+   Subscribe to **Issue comment** events. Existing installations must accept the
+   new permissions. Keep Contents read, Checks write and Actions write.
+2. For an existing slice-3 database, apply
+   `repair-app/migrations/0001_comment_requests.sql` exactly once. It preserves
+   all existing request rows and active locks. New databases use `schema.sql`
+   instead; do not apply both initial schema and migration to one database.
+3. Deploy the reviewed Worker. Put the correct revision marker and selections
+   in the pilot description, then verify a real command, exact inputs, reply
+   link, replay and stale-command rejection against the harmless fixture.
+
+No live permission, database, deployment or repository change is performed by
+these instructions. The local/native tests cannot replace that acceptance.
 
 ## Check the receiver locally
 
@@ -97,7 +160,7 @@ with the exact request inputs, repository, workflow and actor.
 
 Completion updates and releasing finished requests arrive in slice 4. Until then,
 even a finished harmless pilot keeps its active lock. Do not describe its
-in-progress Check as proof that Actions is still running.
+neutral Check as proof that Actions is still running.
 
 Keep App credentials in operator storage and Worker secrets. Keep verification
 receipts outside the repository, without credentials or webhook payloads. A
