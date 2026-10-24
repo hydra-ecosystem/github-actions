@@ -92,6 +92,8 @@ const commandComment = {id: 501, body: '/repair selected', user: {id: 9, type: '
   issue_url: 'https://api.github.com/repos/fixture/repo/issues/12',
   created_at: '2026-10-24T05:00:00Z', updated_at: '2026-10-24T05:00:00Z'};
 let statusComment;
+const statusComments = new Map(), idleChecks = [], nativeRuns = new Map();
+let nativeRunID = 900, completionReplyFailure = false;
 const admissionService = new Miniflare(convertV4MiniflareOptions({
   modules: true, scriptPath: new URL('./worker.mjs', import.meta.url).pathname,
   compatibilityDate: '2026-10-19', d1Databases: ['DB'],
@@ -108,32 +110,46 @@ const admissionService = new Miniflare(convertV4MiniflareOptions({
       assert.equal(body.permissions.checks, 'write');
       return Response.json({token: 'ghs_42.native-action-token'});
     }
+    if (path === '/app') return Response.json({id: 42, slug: 'fixture-maintenance'});
     assert.equal(request.headers.get('authorization'), 'Bearer ghs_42.native-action-token');
     if (path === '/repos/fixture/repo') return Response.json({id: 7, full_name: 'fixture/repo', default_branch: 'main'});
     if (path === '/repos/fixture/repo/pulls/12') return Response.json(nativePR);
     if (path === '/repos/fixture/repo/collaborators/maintainer/permission') return Response.json({permission: 'maintain', user: {login: 'maintainer'}});
-    if (path === '/repos/fixture/repo/issues/comments/501') return Response.json(commandComment);
+    if (path === `/repos/fixture/repo/issues/comments/${commandComment.id}`) return Response.json(commandComment);
     if (path === '/repos/fixture/repo/issues/12/comments' && request.method === 'POST') {
-      statusComment = {id: 600, ...body, performed_via_github_app: {id: 42}, issue_url: commandComment.issue_url};
+      statusComment = {id: 600 + statusComments.size, ...body, performed_via_github_app: {id: 42}, issue_url: commandComment.issue_url};
+      statusComments.set(statusComment.id, statusComment);
       return Response.json(statusComment);
     }
-    if (path === '/repos/fixture/repo/issues/comments/600') {
-      if (request.method === 'PATCH') Object.assign(statusComment, body);
-      return Response.json(statusComment);
+    const reply = statusComments.get(Number(path.match(/\/issues\/comments\/([0-9]+)$/)?.[1]));
+    if (reply) {
+      if (request.method === 'PATCH' && completionReplyFailure) return new Response(null, {status: 503});
+      if (request.method === 'PATCH') Object.assign(reply, body);
+      return Response.json(reply);
     }
-    if (path === '/repos/fixture/repo/check-runs/77') {
-      if (request.method === 'PATCH') Object.assign(nativeCheck, body);
-      return Response.json(request.method === 'GET' ? documentedCheck(nativeCheck) : nativeCheck);
+    const check = [nativeCheck, ...idleChecks].find(c => path === `/repos/fixture/repo/check-runs/${c.id}`);
+    if (check) {
+      if (request.method === 'PATCH') Object.assign(check, body);
+      return Response.json(request.method === 'GET' ? documentedCheck(check) : check);
     }
-    if (path.includes('/commits/') && path.endsWith('/check-runs')) return Response.json({total_count: 1, check_runs: [documentedCheck(nativeCheck)]});
+    if (path === '/repos/fixture/repo/check-runs' && request.method === 'POST') {
+      const idle = {id: 78 + idleChecks.length, app: {id: 42}, ...body};idleChecks.push(idle);return Response.json(idle);
+    }
+    if (path.includes('/commits/') && path.endsWith('/check-runs')) return Response.json({total_count: 1 + idleChecks.length,
+      check_runs: [nativeCheck, ...idleChecks].map(documentedCheck)});
+    if (path.startsWith('/repos/fixture/repo/actions/runs/')) return Response.json(nativeRuns.get(Number(path.split('/').at(-1))));
     assert.equal(path, '/repos/fixture/repo/actions/workflows/dependency-repair.yml/dispatches');
     assert.equal(request.method, 'POST');
     assert.equal(body.ref, 'main');
     assert.deepEqual(Object.keys(body.inputs), ['request-id', 'pull-request', 'expected-head', 'expected-base', 'selections']);
     assert.equal(body.inputs['pull-request'], '12');assert.equal(body.inputs['expected-head'], nativePR.head.sha);
     assert.equal(body.inputs['expected-base'], nativePR.base.sha);assert.equal(body.inputs.selections, JSON.stringify(nativeItems));
-    return Response.json({workflow_run_id: 900, run_url: 'https://api.github.com/repos/fixture/repo/actions/runs/900',
-      html_url: 'https://github.com/fixture/repo/actions/runs/900'});
+    nativeRuns.set(nativeRunID, {id: nativeRunID, repository: {id: 7, full_name: 'fixture/repo'},
+      path: '.github/workflows/dependency-repair.yml', event: 'workflow_dispatch', head_branch: 'main',
+      actor: {type: 'Bot', login: 'fixture-maintenance[bot]'}, status: 'completed', conclusion: 'success',
+      updated_at: '2026-10-24T10:00:00Z', html_url: `https://github.com/fixture/repo/actions/runs/${nativeRunID}`});
+    return Response.json({workflow_run_id: nativeRunID, run_url: `https://api.github.com/repos/fixture/repo/actions/runs/${nativeRunID}`,
+      html_url: `https://github.com/fixture/repo/actions/runs/${nativeRunID}`});
   },
 }));
 try {
@@ -220,12 +236,47 @@ try {
   const commentRows = (await db.prepare('SELECT * FROM requests').all()).results;
   assert.equal(commentRows.length, 1);assert.equal(commentRows[0].comment_id, 501);
   assert.equal(commentRows[0].status_comment_id, 600);assert.equal(commentRows[0].run_id, 900);
-  assert.match(statusComment.body, /Workflow started/);assert.match(statusComment.body, /launch-editor/);
-  assert.match(statusComment.body, /actions\/runs\/900/);
+  assert.match(statusComment.body, /Request accepted/);assert.match(statusComment.body, /launch-editor/);
+  assert.match(statusComment.body, /actions\/workflows\/dependency-repair\.yml/);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 3);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 1);
   assert.ok(nativeCalls.every(c => c.body?.status !== 'in_progress'));
-  console.log('Native conversation command passed: real local D1 deduplicates concurrent/replayed comments, retains one reply, and links the exact dispatched run without requiring Check navigation.');
+  console.log('Native conversation command passed: real local D1 deduplicates concurrent/replayed comments, retains one accepted reply with a workflow-page link without requiring Check navigation.');
+
+  const complete = (runID, installation = 3) => admissionService.dispatchFetch('https://worker.test/webhook',
+    signed({action: 'completed', installation: {id: installation}, repository: {id: 7, full_name: 'fixture/repo'},
+      workflow_run: {id: runID}}, 'workflow_run'));
+  const callsBeforeUnknown = nativeCalls.length;
+  assert.equal((await complete(900, 4)).status, 200);assert.equal((await complete(999)).status, 200);
+  assert.equal(nativeCalls.length, callsBeforeUnknown);
+  completionReplyFailure = true;
+  assert.equal((await complete(900)).status, 500);
+  const pending = await db.prepare('SELECT * FROM requests WHERE id = ?').bind(commandID).first();
+  assert.equal(pending.state, 'dispatched');assert.equal(pending.conclusion, 'success');assert.ok(pending.completed_at);
+  assert.equal((await insert(randomUUID())).meta.changes, 0);
+  completionReplyFailure = false;
+  assert.equal((await complete(900)).status, 200);
+  assert.equal((await db.prepare('SELECT state FROM requests WHERE id = ?').bind(commandID).first()).state, 'success');
+  assert.match(statusComments.get(600).body, /Workflow succeeded/);
+  assert.equal(nativeCheck.output.title, 'Workflow succeeded');assert.equal(idleChecks.length, 1);
+  assert.equal((await complete(900)).status, 200);assert.equal(idleChecks.length, 1);
+
+  for (const [index, outcome] of ['failure', 'cancelled'].entries()) {
+    nativeRunID = 901 + index;commandComment.id = 502 + index;
+    const id = randomUUID();assert.equal((await submit(id)).status, 200);
+    nativeRuns.get(nativeRunID).conclusion = outcome;
+    assert.equal((await complete(nativeRunID)).status, 200);
+    const row = await db.prepare('SELECT * FROM requests WHERE id = ?').bind(id).first();
+    assert.equal(row.state, outcome);assert.equal(row.conclusion, outcome);
+    assert.match(statusComment.body, new RegExp(`Workflow ${outcome === 'failure' ? 'failed' : 'cancelled'}`));
+    assert.match(statusComment.body, /pilot performs no dependency repair/);
+    assert.equal(idleChecks.length, index + 2);
+  }
+  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM requests WHERE state IN ('reserved','dispatched','unknown')").first()).count, 0);
+  assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 5);
+  assert.equal(nativeCalls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 3);
+  assert.match(statusComments.get(600).body, /Workflow succeeded/);
+  console.log('Native completion passed: actual D1 retains the lock after reply failure; canonical redelivery completes it; isolated success/failure/cancellation update the same replies and admit fresh commands without SQL recovery. GitHub responses are intercepted local fixtures, not live evidence.');
 } finally {
   await admissionService.dispose();
 }

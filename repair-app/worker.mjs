@@ -8,10 +8,11 @@ const VERSION = '(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)';
 const PACKAGE = '(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*';
 const LINE = new RegExp('^- \\[([ xX])\\] Allow `(' + PACKAGE + ')` `(' + VERSION + ') → (' + VERSION + ')` by updating its explicit pin\\.$');
 const CHECK = 'Dependency repair';
-const MAX_RECONCILIATIONS = 3;
 const ACTION = {label: 'Run selected fixes', description: 'Run the selected batch in Actions', identifier: 'repair-selected'};
 const WORKFLOW = 'dependency-repair.yml';
 const ACTIVE = "state IN ('reserved', 'dispatched', 'unknown')";
+const TERMINAL = "state IN ('success', 'failure', 'cancelled')";
+const CONCLUSIONS = new Set(['success', 'failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale', 'startup_failure']);
 const MAX_INPUT_CHARS = 65_535;
 const COMMAND = '/repair selected';
 const positiveID = value => Number.isSafeInteger(value) && value > 0;
@@ -227,29 +228,47 @@ function sameCheckIdentity(left, right) {
 
 export function requestStatus(row, items = []) {
   if (row.selections_json) items = JSON.parse(row.selections_json);
-  const title = row.state === 'unknown' ? 'Request requires inspection' : row.run_id ? 'Workflow started' : 'Request reserved';
-  const summary = row.run_id ? `[View workflow run](${row.html_url}). This pilot performs no dependency repair.` :
-    'A request is reserved. Inspect Actions and the request record before recovery; do not retry dispatch automatically.';
-  return {title, summary, body: `<!-- node-repair:request:${row.id} -->\n### Dependency repair: ${title}\n\n` +
+  const outcome = row.conclusion && (row.conclusion === 'success' ? 'succeeded' : row.conclusion === 'cancelled' ? 'cancelled' : 'failed');
+  const title = outcome ? `Workflow ${outcome}` : 'Request accepted';
+  const summary = outcome ? `[View workflow run](${row.html_url}). This pilot performs no dependency repair.` :
+    `[View repair workflows](https://github.com/${row.repository}/actions/workflows/${WORKFLOW}).\n\nWaiting for a verified completion result. This pilot performs no dependency repair.`;
+  const result = outcome ? `${summary}\n\nGitHub conclusion: \`${row.conclusion}\`.` : summary;
+  return {title, summary: result, body: `<!-- node-repair:request:${row.id} -->\n### Dependency repair: ${title}\n\n` +
     (items.length ? items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') + '\n\n' : '') +
-    `${summary}\n\nSelections remain in the PR description. No merge is authorized by this request.`};
+    `${result}\n\nSelections remain in the PR description. No merge is authorized by this request.`};
 }
 
-async function showRequest(token, repository, row, signal, env, items = [], createComment = false) {
+async function requestReply(token, repository, row, env, signal) {
+  if (!row.comment_id || !row.status_comment_id) return null;
+  const prefix = `/repos/${repository.full_name}/issues`;
+  const comment = await api(token, `${prefix}/comments/${row.status_comment_id}`, 'GET', undefined, signal)
+    .catch(error => { if (row.conclusion && error.status === 404) return null; throw error; });
+  if (comment?.id === row.status_comment_id && String(comment.performed_via_github_app?.id) === String(env.APP_ID) &&
+      comment.issue_url === `https://api.github.com${prefix}/${row.pr}` &&
+      comment.body?.startsWith(`<!-- node-repair:request:${row.id} -->\n`)) return comment;
+  if (!row.conclusion) throw new Error('Status comment identity changed');
+  return null;
+}
+
+async function showRequest(token, repository, row, signal, env, items = [], createComment = false, writeCheck = true, reply) {
   const {title, summary, body} = requestStatus(row, items);
-  await api(token, `/repos/${repository.full_name}/check-runs/${row.check_id}`, 'PATCH', {
+  const checkWrite = writeCheck ? api(token, `/repos/${repository.full_name}/check-runs/${row.check_id}`, 'PATCH', {
     external_id: `node-repair-request:${row.id}`, status: 'completed', conclusion: 'neutral', actions: [],
     output: {title, summary},
-  }, signal);
-  if (!row.comment_id || !env) return;
+  }, signal).catch(error => { if (!row.conclusion || error.status !== 404) throw error; }) : Promise.resolve();
+  if (!row.comment_id || !env) { await checkWrite; return; }
   const prefix = `/repos/${repository.full_name}/issues`;
   if (row.status_comment_id) {
-    const comment = await api(token, `${prefix}/comments/${row.status_comment_id}`, 'GET', undefined, signal);
-    if (String(comment.performed_via_github_app?.id) !== String(env.APP_ID) ||
-        comment.issue_url !== `https://api.github.com${prefix}/${row.pr}` ||
-        !comment.body?.startsWith(`<!-- node-repair:request:${row.id} -->\n`)) throw new Error('Status comment identity changed');
-    await api(token, `${prefix}/comments/${row.status_comment_id}`, 'PATCH', {body}, signal);
-  } else if (createComment) {
+    const writes = await Promise.allSettled([checkWrite, (async () => {
+      const comment = reply === undefined ? await requestReply(token, repository, row, env, signal) : reply;
+      if (comment) await api(token, `${prefix}/comments/${row.status_comment_id}`, 'PATCH', {body}, signal)
+        .catch(error => { if (!row.conclusion || error.status !== 404) throw error; });
+    })()]);
+    const failed = writes.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  } else {
+    await checkWrite;
+    if (!createComment) return;
     // Only the winning admission creates a reply. An ambiguous POST is never retried.
     const comment = await api(token, `${prefix}/${row.pr}/comments`, 'POST', {body}, signal);
     if (!positiveID(comment?.id) || String(comment.performed_via_github_app?.id) !== String(env.APP_ID) ||
@@ -261,30 +280,26 @@ async function showRequest(token, repository, row, signal, env, items = [], crea
   }
 }
 
-async function preserveActiveCheck(token, repository, pr, env, installation, signal) {
-  const row = await activeRequest(env, installation, repository.id, pr.number);
-  if (!row || row.head !== pr.head.sha) return row;
-  await restoreRequestCheck(token, repository, row, env, signal);
-  return row;
+async function retainedCheck(env, installation, repository, check) {
+  return env.DB ? env.DB.prepare('SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND check_id = ? ORDER BY created_at DESC LIMIT 1')
+    .bind(installation, repository, check).first() : null;
 }
 
-async function restoreRequestCheck(token, repository, row, env, signal, conversation = false) {
-  for (let attempt = 0; attempt < MAX_RECONCILIATIONS; attempt++) {
-    const check = await api(token, `/repos/${repository.full_name}/check-runs/${row.check_id}`, 'GET', undefined, signal);
-    if (!ownedCheck(check, env.APP_ID, row.head) ||
-        !(check.external_id === `node-repair-request:${row.id}` || new RegExp(`^node-repair:${row.pr}:[a-f0-9]{64}$`).test(check.external_id || ''))) {
-      throw new Error('Active Check identity changed');
-    }
-    await showRequest(token, repository, row, signal, conversation ? env : undefined);
-    // Dispatch may advance while either Check call is pending. Repair any stale write.
-    const current = await env.DB.prepare('SELECT * FROM requests WHERE id = ? AND installation_id = ? AND repository_id = ?')
-      .bind(row.id, row.installation_id, repository.id).first();
-    if (!current || !['reserved', 'dispatched', 'unknown'].includes(current.state)) throw new Error('Active request state changed');
-    if (current.state === row.state && current.run_id === row.run_id && current.html_url === row.html_url &&
-        current.status_comment_id === row.status_comment_id) return;
-    row = current;
-  }
-  throw new Error('Active Check state did not settle');
+async function readRequest(env, row) {
+  return env.DB.prepare('SELECT * FROM requests WHERE id = ? AND installation_id = ? AND repository_id = ?')
+    .bind(row.id, row.installation_id, row.repository_id).first();
+}
+
+async function publishCompletion(token, repository, row, env, signal) {
+  if (!row.conclusion) throw new Error('Completion outcome is not retained');
+  const [check, reply] = await Promise.all([
+    api(token, `/repos/${repository.full_name}/check-runs/${row.check_id}`, 'GET', undefined, signal)
+      .catch(error => { if (error.status === 404) return null; throw error; }),
+    requestReply(token, repository, row, env, signal),
+  ]);
+  const writable = check?.id === row.check_id && ownedCheck(check, env.APP_ID, row.head) &&
+    check.external_id === `node-repair-request:${row.id}`;
+  await showRequest(token, repository, row, signal, env, [], false, writable, reply);
 }
 
 async function requestRepair(token, repository, payload, env, delivery, signal) {
@@ -295,12 +310,7 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   // A retained delivery is never another dispatch attempt, even after a crash.
   const replay = await env.DB.prepare('SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND (id = ? OR comment_id = ?)')
     .bind(installation, repository.id, delivery, isComment ? payload.comment.id : null).first();
-  if (replay) {
-    if (['reserved', 'dispatched', 'unknown'].includes(replay.state)) {
-      await restoreRequestCheck(token, repository, replay, env, signal, isComment);
-    }
-    return;
-  }
+  if (replay) return;
   const prefix = `/repos/${repository.full_name}`;
   const actor = payload.sender?.login;
   if (payload.sender?.type !== 'User' || typeof actor !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i.test(actor)) return;
@@ -313,10 +323,7 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   const submitted = candidate;
   if (isComment) {
     if (!submitted) return;
-    if (submitted.active) {
-      await restoreRequestCheck(token, repository, submitted.active, env, signal, true);
-      return;
-    }
+    if (submitted.active) return;
     if (submitted.rejection) {
       await api(token, `${prefix}/issues/${payload.issue.number}/comments`, 'POST', {body: submitted.rejection}, signal);
       return;
@@ -356,16 +363,11 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
     comment_id: isComment ? payload.comment.id : null, selections_json: JSON.stringify(items)};
   const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO requests
     (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state, comment_id, selections_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(...Object.values(row)).run();
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM requests WHERE installation_id = ? AND repository_id = ? AND check_id = ?)`)
+    .bind(...Object.values(row), installation, repository.id, current.id).run();
   if (inserted.meta?.changes !== 1) {
     if (inserted.meta?.changes !== 0) throw new Error('Invalid admission result');
-    const active = await activeRequest(env, installation, repository.id, number);
-    if (active?.check_id === current.id) await restoreRequestCheck(token, repository, active, env, signal);
-    else if (active) await api(token, `${prefix}/check-runs/${current.id}`, 'PATCH', {
-      actions: [], output: {title: 'Another request is active', summary:
-        `[Inspect the active Check](https://github.com/${repository.full_name}/runs/${active.check_id}). No new run was started.`},
-    }, signal);
     return;
   }
   // Failure here retains reserved state, so redelivery cannot repeat the POST.
@@ -382,7 +384,6 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
     const saved = await env.DB.prepare("UPDATE requests SET state = 'dispatched', run_id = ?, run_url = ?, html_url = ? WHERE id = ? AND installation_id = ? AND repository_id = ? AND state = 'reserved'")
       .bind(run.workflow_run_id, run.run_url, run.html_url, delivery, installation, repository.id).run();
     if (saved.meta?.changes !== 1) throw new Error('Dispatch identity was not retained');
-    await showRequest(token, repository, {...row, state: 'dispatched', run_id: run.workflow_run_id, html_url: run.html_url}, signal, env, items);
   } catch {
     // The POST may have reached GitHub. Never release this lock or repeat it.
     await env.DB.prepare("UPDATE requests SET state = 'unknown' WHERE id = ? AND installation_id = ? AND repository_id = ? AND state = 'reserved' AND run_id IS NULL")
@@ -422,12 +423,12 @@ async function commentSelection(token, repository, payload, env, signal) {
     workflowInputs(pr, items);
   } catch { return rejection; }
   const fingerprint = await selectionFingerprint(pr, items);
-  const check = await findSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal);
+  const check = await findSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
   if (!check) return rejection;
   return {check, fingerprint};
 }
 
-async function findSelectionCheck(token, repository, pr, appID, external, signal) {
+async function findSelectionCheck(token, repository, pr, appID, external, signal, env = {}, installation) {
   let check, total, read = 0;
   for (let page = 1; ; page++) {
     const list = await api(token, `/repos/${repository.full_name}/commits/${pr.head.sha}/check-runs?check_name=Dependency%20repair&app_id=${appID}&filter=all&per_page=100&page=${page}`, 'GET', undefined, signal);
@@ -440,6 +441,7 @@ async function findSelectionCheck(token, repository, pr, appID, external, signal
       if (String(candidate.app?.id) !== String(appID) || candidate.name !== CHECK ||
           candidate.head_sha !== pr.head.sha || candidate.external_id !== external) continue;
       if (!positiveID(candidate.id) || candidate.status !== 'completed') throw new Error('Repair Check is not idle');
+      if (await retainedCheck(env, installation, repository.id, candidate.id)) continue;
       if (!check || candidate.id > check.id) check = candidate;
     }
     read += list.check_runs.length;
@@ -447,46 +449,86 @@ async function findSelectionCheck(token, repository, pr, appID, external, signal
   }
 }
 
-async function refreshSelectionCheck(token, repository, number, appID, signal, env = {}, installation) {
+async function refreshSelectionCheck(token, repository, number, appID, signal, env = {}, installation, expectedHead) {
   const prefix = `/repos/${repository.full_name}`;
-  for (let attempt = 0; attempt < MAX_RECONCILIATIONS; attempt++) {
-    const pr = await api(token, `${prefix}/pulls/${number}`, 'GET', undefined, signal);
-    if (!managedPR(pr, repository, number)) return;
-    const active = await preserveActiveCheck(token, repository, pr, env, installation, signal);
-    if (active?.head === pr.head.sha) return;
-    let items = [], valid = true;
-    try { items = selections(pr.body); workflowInputs(pr, items); } catch { valid = false; items = []; }
-    const external = `node-repair:${number}:${await selectionFingerprint(pr, items)}`;
-    const state = `${valid ? 'valid' : 'invalid'}:${external}`;
-    const check = await findSelectionCheck(token, repository, pr, appID, external, signal);
-    const output = {
-      title: !valid ? 'Repair selections need attention' : items.length ? `${items.length} selected fix${items.length === 1 ? '' : 'es'}` : 'No fixes selected',
-      summary: !valid ? 'Use one valid selection block in the PR description. No run was started.' : items.length ?
-        items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') +
-          (active ? '\n\nAnother request is active. Inspect it before requesting a new attempt.' : env.DB ?
-            '\n\nPost `/repair selected` in the PR conversation to request these fixes. The native Run selected fixes action is also available here. The pilot only validates inputs.' :
-            '\n\nSelections are displayed for review. Running fixes is not enabled yet.') :
-        'Select the allowed fixes in the PR description. Editing checkboxes does not start a run.',
-    };
-    await api(token, `${prefix}/check-runs${check ? `/${check.id}` : ''}`, check ? 'PATCH' : 'POST', {
-      ...(check ? {} : {name: CHECK, head_sha: pr.head.sha}), external_id: external,
-      status: 'completed', conclusion: 'neutral', output,
-      actions: valid && items.length && env.DB && !active ? [ACTION] : [],
-    }, signal);
-    // Repair a concurrent idle write that raced an action's reservation/Check update.
-    const reserved = await preserveActiveCheck(token, repository, pr, env, installation, signal);
-    if (reserved?.head === pr.head.sha) return;
-    const current = await api(token, `${prefix}/pulls/${number}`, 'GET', undefined, signal);
-    if (!managedPR(current, repository, number)) return;
-    let currentItems = [], currentValid = true;
-    try { currentItems = selections(current.body); workflowInputs(current, currentItems); } catch { currentValid = false; currentItems = []; }
-    const currentExternal = `node-repair:${number}:${await selectionFingerprint(current, currentItems)}`;
-    if (`${currentValid ? 'valid' : 'invalid'}:${currentExternal}` === state) return;
+  const pr = await api(token, `${prefix}/pulls/${number}`, 'GET', undefined, signal);
+  if (!managedPR(pr, repository, number) || (expectedHead && pr.head.sha !== expectedHead)) return;
+  const active = await activeRequest(env, installation, repository.id, number);
+  if (active?.head === pr.head.sha) return;
+  let items = [], valid = true;
+  try { items = selections(pr.body); workflowInputs(pr, items); } catch { valid = false; items = []; }
+  const external = `node-repair:${number}:${await selectionFingerprint(pr, items)}`;
+  // An exposed control may already be admitted when this read returns. Never PATCH it.
+  if (await findSelectionCheck(token, repository, pr, appID, external, signal, env, installation)) return;
+  const output = {
+    title: !valid ? 'Repair selections need attention' : items.length ? `${items.length} selected fix${items.length === 1 ? '' : 'es'}` : 'No fixes selected',
+    summary: !valid ? 'Use one valid selection block in the PR description. No run was started.' : items.length ?
+      items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') +
+        (env.DB ? '\n\nPost `/repair selected` in the PR conversation to request these fixes. Only one request can be active per PR. The native Run selected fixes action is also available here. The pilot only validates inputs.' :
+          '\n\nSelections are displayed for review. Running fixes is not enabled yet.') :
+      'Select the allowed fixes in the PR description. Editing checkboxes does not start a run.',
+  };
+  await api(token, `${prefix}/check-runs`, 'POST', {
+    name: CHECK, head_sha: pr.head.sha, external_id: external,
+    status: 'completed', conclusion: 'neutral', output,
+    actions: valid && items.length && env.DB ? [ACTION] : [],
+  }, signal);
+}
+
+async function completeRequest(payload, env, signal) {
+  const installation = payload.installation?.id, repository = payload.repository, runID = payload.workflow_run?.id;
+  if (!env.DB || ![installation, repository?.id, runID].every(positiveID)) return;
+  const found = await env.DB.prepare('SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND run_id = ? LIMIT 2')
+    .bind(installation, repository.id, runID).all();
+  if (!Array.isArray(found.results) || found.results.length > 1) throw new Error('Ambiguous run identity');
+  let row = found.results[0];
+  if (!row || repository.full_name?.toLowerCase() !== row.repository.toLowerCase()) return;
+  const prefix = `/repos/${row.repository}`;
+  const [token, app] = await Promise.all([
+    installationToken(env, installation, repository.id, signal, {contents: 'read',
+      pull_requests: row.comment_id ? 'write' : 'read', checks: 'write', actions: 'read',
+      ...(row.comment_id ? {issues: 'read'} : {})}),
+    appJWT(env).then(jwt => api(jwt, '/app', 'GET', undefined, signal)),
+  ]);
+  const [run, currentRepository] = await Promise.all([
+    api(token, `${prefix}/actions/runs/${runID}`, 'GET', undefined, signal),
+    api(token, prefix, 'GET', undefined, signal),
+  ]);
+  if (String(app?.id) !== String(env.APP_ID) || typeof app.slug !== 'string' ||
+      run?.id !== runID || run.repository?.id !== row.repository_id ||
+      run.repository.full_name?.toLowerCase() !== row.repository.toLowerCase() ||
+      currentRepository?.id !== row.repository_id || currentRepository.full_name?.toLowerCase() !== row.repository.toLowerCase() ||
+      run.path !== `.github/workflows/${WORKFLOW}` || run.event !== 'workflow_dispatch' ||
+      run.head_branch !== row.dispatched_ref || run.actor?.type !== 'Bot' || run.actor.login !== `${app.slug}[bot]` ||
+      run.html_url !== row.html_url || run.status !== 'completed') return;
+  const completed = Date.parse(run.updated_at);
+  if (!CONCLUSIONS.has(run.conclusion) || typeof run.updated_at !== 'string' || !Number.isFinite(completed) || completed <= 0) throw new Error('Invalid completed run');
+  if (row.conclusion && row.conclusion !== run.conclusion) throw new Error('Conflicting retained outcome');
+  if (!row.conclusion) {
+    // Keep the active unique-index lock until known outputs are safely updated.
+    await env.DB.prepare(`UPDATE requests SET conclusion = ?, completed_at = ?
+      WHERE id = ? AND installation_id = ? AND repository_id = ? AND run_id = ? AND conclusion IS NULL AND ${ACTIVE}`)
+      .bind(run.conclusion, completed, row.id, installation, repository.id, runID).run();
   }
-  throw new Error('Repair Check freshness did not settle');
+  row = await readRequest(env, row);
+  if (row?.conclusion !== run.conclusion || !Number.isFinite(row.completed_at) || row.completed_at <= 0) throw new Error('Outcome was not retained');
+  await publishCompletion(token, currentRepository, row, env, signal);
+  const state = ['success', 'cancelled'].includes(run.conclusion) ? run.conclusion : 'failure';
+  await env.DB.prepare(`UPDATE requests SET state = ? WHERE id = ? AND installation_id = ? AND repository_id = ?
+    AND run_id = ? AND conclusion = ? AND ${ACTIVE}`)
+    .bind(state, row.id, installation, repository.id, runID, run.conclusion).run();
+  const terminal = await readRequest(env, row);
+  if (terminal?.state !== state || terminal.conclusion !== run.conclusion) throw new Error('Terminal state was not retained');
+  // A terminal request keeps its own Check. A fresh idle control is separate.
+  await refreshSelectionCheck(token, currentRepository, row.pr, env.APP_ID, signal, env, installation, row.head);
 }
 
 export default {
+  async scheduled(event, env) {
+    if (!env.DB || !Number.isFinite(event.scheduledTime)) throw new Error('Retention is not configured');
+    await env.DB.prepare(`DELETE FROM requests WHERE ${TERMINAL} AND completed_at < ?`)
+      .bind(event.scheduledTime - 90 * 86_400_000).run();
+  },
   async fetch(request, env) {
     if (request.method !== 'POST' || new URL(request.url).pathname !== '/webhook') return new Response('Not found', {status: 404});
     if (!['WEBHOOK_SECRET', 'APP_PRIVATE_KEY'].every(name => typeof env[name] === 'string' && env[name]) ||
@@ -510,6 +552,8 @@ export default {
         await readRepository(payload, env, controller.signal, request.headers.get('x-github-delivery'));
       } else if (event === 'issue_comment' && repairComment(payload)) {
         await readRepository(payload, env, controller.signal, request.headers.get('x-github-delivery'));
+      } else if (event === 'workflow_run' && payload.action === 'completed') {
+        await completeRequest(payload, env, controller.signal);
       }
       controller.signal.throwIfAborted();
       return new Response('Accepted', {status: 200});

@@ -10,7 +10,9 @@ reads the canonical PR and displays the selected package versions in the App's
 and post `/repair selected` in the Conversation tab. The App replies there with
 the request status and exact Actions link. The native Check action remains an
 optional secondary entry point. D1 retains the active request and returned Actions run
-identity. Dependency repairs and completion handling belong to later slices.
+identity. Completed runs update that same reply and release their own request
+lock. The current workflow remains a harmless fixture; dependency repairs belong
+to later slices.
 
 ## Check the selected batch
 
@@ -90,14 +92,21 @@ Comment requests additionally retain the source comment ID, reply ID and exact
 selections. A unique source-comment index prevents the same comment from
 authorizing a second attempt, even under a different delivery UUID. Only the
 winning reservation creates a status reply. Its ID is saved before dispatch;
-a lost reply POST or failed save retains the lock and starts no run. Replays
-update only the recorded reply owned by this App on this PR. They never retry
-an ambiguous reply POST. PR refreshes use read-only PR tokens and do not edit
-conversation replies.
+a lost reply POST or failed save retains the lock and starts no run. Replays,
+losing admissions and PR refreshes do not repaint request output or retry an
+ambiguous reply POST. Exposed idle Checks are reused without PATCHing them,
+or a fresh idle Check is created. Admission still validates current selections
+and revisions; an older idle control cannot authorize a stale batch.
 
 The control Check stays completed/neutral while its text changes. Real GitHub
 did not reopen the previously completed Check when asked for `in_progress`.
-The Actions link, and later canonical completion handling, supply run state.
+The pending text stays **Request accepted**, with a workflow-page link, until
+verified completion. No request-status writes occur after dispatch except
+completion updates using the immutable verified outcome. An uncertain pending
+write prevents dispatch and retains the reservation for operator recovery. The reply
+says **Workflow succeeded**, **Workflow failed** or **Workflow cancelled** and
+retains the exact run link and selected versions. The dependency report is not
+rewritten: harmless success does not turn “needs review” into “upgraded”.
 
 ## Enable comment delivery after review
 
@@ -158,9 +167,31 @@ repeats its dispatch POST. Do not delete an ambiguous row or start another attem
 until an operator proves no run remains active and reconciles any observed run
 with the exact request inputs, repository, workflow and actor.
 
-Completion updates and releasing finished requests arrive in slice 4. Until then,
-even a finished harmless pilot keeps its active lock. Do not describe its
-neutral Check as proof that Actions is still running.
+For a known run, redeliver its `workflow_run.completed` event after correcting
+an output-update failure. The service fetches the canonical run and checks the
+saved installation, repository, run ID, workflow path, dispatch event, original
+dispatched branch and App actor. It never searches by run title. An early event
+that arrives before the run ID is saved can be redelivered afterward.
+
+The service saves the verified conclusion and completion time before updating
+the recorded App-owned reply and request Check. These fields can be populated
+while the state is still active. A transient GitHub failure retains that lock;
+redelivery retries safe output updates without dispatching or posting another
+reply. Conflicting conclusions require inspection. A missing or replaced old
+reply/Check is not overwritten or recreated; the verified run can still finish
+its own record. A new PR head's Check is left alone.
+
+After safe output updates, state becomes `success`, `failure` or `cancelled`.
+Other unsuccessful GitHub conclusions map to `failure` and retain the exact
+conclusion. The request Check stays neutral and request-bound. A separate idle
+Check exposes the current selection action when the same PR head is eligible.
+A later deliberate command can start a fresh attempt without manual SQL recovery.
+Duplicate completion does not dispatch or create another conversation reply.
+
+The daily Cron Trigger runs at 03:17 UTC and deletes terminal records older
+than 90 days. It never expires active or unknown requests, including those with
+a saved outcome awaiting output recovery. Retention bounds replay history;
+it does not promise permanent deduplication after a record is deleted.
 
 Keep App credentials in operator storage and Worker secrets. Keep verification
 receipts outside the repository, without credentials or webhook payloads. A
