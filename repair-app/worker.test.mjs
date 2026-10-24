@@ -320,7 +320,7 @@ function checkMock({changePR, list = {total_count: 0, check_runs: []}, failPath}
   return {calls, pr, repository};
 }
 const ownCheck = (overrides = {}) => ({id: 77, app: {id: 42}, name: 'Dependency repair',
-  head_sha: 'a'.repeat(40), external_id: 'node-repair:12:33b17f82caff79dd2065972e92b5e5b83aa761be9c5799dcbbced028f0f60849', status: 'completed', ...overrides});
+  head_sha: 'a'.repeat(40), external_id: 'node-repair:12:33b17f82caff79dd2065972e92b5e5b83aa761be9c5799dcbbced028f0f60849', status: 'completed', conclusion: 'neutral', ...overrides});
 const listOf = (...checks) => ({total_count: checks.length, check_runs: checks});
 const checkWrites = calls => calls.filter(call => call.path.includes('/check-runs') && call.method !== 'GET');
 const managedPR = (body, headSha = 'a'.repeat(40), state = 'open') => ({number: 12, state, user: {type: 'Bot'}, body,
@@ -340,24 +340,20 @@ test('canonical bot PR creates an App Check with exact selections and no action 
     external_id: `node-repair:12:${await selectionFingerprint(pr, selections(pr.body))}`,
     status: 'completed', conclusion: 'neutral', output: {title: '1 selected fix',
       summary: '- `launch-editor` `2.14.1 → 2.14.2`\n\nSelections are displayed for review. Running fixes is not enabled yet.'}, actions: []});
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 5);
 });
 
 for (const action of ['opened', 'edited', 'synchronize', 'reopened']) {
-  test(`managed PR ${action} refreshes its own idle Check`, async () => {
+  test(`managed PR ${action} reuses an exposed idle Check without writing`, async () => {
     const {calls} = checkMock({list: listOf(ownCheck())});
     assert.equal((await worker.fetch(signed({...payload, action, number: 12}, 'pull_request'), env)).status, 200);
-    const writes = checkWrites(calls); assert.equal(writes.length, 1);
-    assert.equal(writes[0].path, '/repos/fixture/repo/check-runs/77');
-    assert.equal(writes[0].method, 'PATCH');
-    assert.deepEqual(writes[0].body.actions, []);
-    assert.equal(writes[0].body.head_sha, undefined);
+    assert.equal(checkWrites(calls).length, 0);
   });
 }
 
 test('selection edits and clearing the block replace the idle fingerprint and summary', async () => {
   const versions = [], identities = [];
-  for (const body of [fixtures.cases[0].body, fixtures.cases[0].body.replace('2.14.2', '2.14.3'),
+  for (const body of [fixtures.cases[0].body.replace('2.14.2', '2.14.3'),
     fixtures.cases[1].body, 'malformed selection']) {
     const {calls} = checkMock({changePR: pr => { pr.body = body; }, list: listOf(ownCheck())});
     assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
@@ -365,9 +361,9 @@ test('selection edits and clearing the block replace the idle fingerprint and su
     identities.push(output.external_id);versions.push(output.output.summary);
     assert.deepEqual(output.actions, []);
   }
-  assert.notEqual(identities[0], identities[1]);assert.notEqual(identities[1], identities[2]);
-  assert.match(versions[1], /2\.14\.3/);assert.doesNotMatch(versions[2], /launch-editor/);
-  assert.match(versions[3], /valid selection block/);
+  assert.notEqual(identities[0], identities[1]);assert.equal(identities[1], identities[2]);
+  assert.match(versions[0], /2\.14\.3/);assert.doesNotMatch(versions[1], /launch-editor/);
+  assert.match(versions[2], /valid selection block/);
 });
 
 for (const [name, body] of [['changed', fixtures.cases[0].body.replace('2.14.2', '2.14.3')],
@@ -435,14 +431,10 @@ for (const list of [{}, {total_count: 101, check_runs: []}, {total_count: -1, ch
   });
 }
 
-test('duplicate owned idle Checks refresh the newest Check', async () => {
+test('duplicate owned idle Checks are reused without PATCHing either', async () => {
   const {calls} = checkMock({list: listOf(ownCheck({id: 78}), ownCheck({id: 77}))});
   assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), env)).status, 200);
-  const writes = checkWrites(calls);
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].path, '/repos/fixture/repo/check-runs/78');
-  assert.equal(writes[0].method, 'PATCH');
-  assert.deepEqual(writes[0].body.actions, []);
+  assert.equal(checkWrites(calls).length, 0);
 });
 
 test('overlapping initial deliveries recover from duplicate idle Checks on a later edit', async () => {
@@ -499,7 +491,7 @@ test('overlapping initial deliveries recover from duplicate idle Checks on a lat
   assert.deepEqual(writes[2].body.actions, []);
 });
 
-test('overlapping edits reconcile an existing Check to the current canonical selection', async () => {
+test('overlapping edits never PATCH the exposed older control', async () => {
   const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
   let body = fixtures.cases[0].body;
   const calls = [], writes = [];
@@ -540,107 +532,16 @@ test('overlapping edits reconcile an existing Check to the current canonical sel
   const olderResponse = await older;
   assert.equal(newerResponse.status, 200);
   assert.equal(olderResponse.status, 200);
-  assert.equal(writes.length, 3);
+  assert.equal(writes.length, 1);
   assert.match(writes[0].output.summary, /2\.14\.3/);
-  assert.match(writes[1].output.summary, /2\.14\.2/);
-  assert.match(writes[2].output.summary, /2\.14\.3/);
-  assert.equal(writes[0].external_id, writes[2].external_id);
-  assert.notEqual(writes[1].external_id, writes[2].external_id);
+  assert.equal(calls.filter(call => call.method === 'PATCH').length, 0);
   assert.ok(writes.every(write => write.actions.length === 0));
 });
 
-test('repeated canonical changes exhaust bounded Check reconciliation', async () => {
-  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
-  const writes = [];
-  let prReads = 0, currentExternal;
-  fetch.mock.mockImplementation(async (url, options) => {
-    const path = new URL(url).pathname;
-    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
-    assert.equal(options.redirect, 'manual');
-    if (path === '/app/installations/3/access_tokens') return json({token});
-    assert.equal(options.headers.Authorization, `Bearer ${token}`);
-    if (path === '/repos/fixture/repo') return json(repository);
-    if (path === '/repos/fixture/repo/pulls/12') {
-      prReads++;
-      const current = managedPR(fixtures.cases[0].body.replace('2.14.2', `2.14.${prReads + 1}`));
-      currentExternal = `node-repair:12:${await selectionFingerprint(current, selections(current.body))}`;
-      return json(current);
-    }
-    if (path === `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`)
-      return json(listOf(ownCheck({external_id: currentExternal})));
-    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') {
-      writes.push(requestBody);
-      return json({id: 77});
-    }
-    throw new Error(`Unexpected API path: ${options.method} ${path}`);
-  });
-  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
-  assert.equal(response.status, 500);
-  assert.equal(prReads, 6);
-  assert.equal(writes.length, 3);
-  assert.deepEqual(writes.map(write => write.actions), [[], [], []]);
-});
-
-test('eligibility loss after a Check write stops reconciliation safely', async () => {
-  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
-  let prReads = 0;
-  const writes = [];
-  fetch.mock.mockImplementation(async (url, options) => {
-    const path = new URL(url).pathname;
-    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
-    assert.equal(options.redirect, 'manual');
-    if (path === '/app/installations/3/access_tokens') return json({token});
-    assert.equal(options.headers.Authorization, `Bearer ${token}`);
-    if (path === '/repos/fixture/repo') return json(repository);
-    if (path === '/repos/fixture/repo/pulls/12') {
-      prReads++;
-      return json(managedPR(fixtures.cases[0].body, 'a'.repeat(40), prReads === 2 ? 'closed' : 'open'));
-    }
-    if (path === `/repos/fixture/repo/commits/${'a'.repeat(40)}/check-runs`) return json(listOf(ownCheck()));
-    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') {
-      writes.push(requestBody);
-      return json({id: 77});
-    }
-    throw new Error(`Unexpected API path: ${options.method} ${path}`);
-  });
-  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
-  assert.equal(response.status, 200);
-  assert.equal(prReads, 2);
-  assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].actions, []);
-});
-
-test('head changes during reconciliation refresh the new canonical head', async () => {
-  const repository = {id: 7, full_name: 'fixture/repo', default_branch: 'main'};
-  const oldHead = 'a'.repeat(40), newHead = 'c'.repeat(40);
-  let prReads = 0;
-  const calls = [];
-  fetch.mock.mockImplementation(async (url, options) => {
-    const path = new URL(url).pathname;
-    const requestBody = options.body === undefined ? undefined : JSON.parse(options.body);
-    calls.push({path, method: options.method, body: requestBody});
-    assert.equal(options.redirect, 'manual');
-    if (path === '/app/installations/3/access_tokens') return json({token});
-    assert.equal(options.headers.Authorization, `Bearer ${token}`);
-    if (path === '/repos/fixture/repo') return json(repository);
-    if (path === '/repos/fixture/repo/pulls/12') {
-      prReads++;
-      return json(managedPR(fixtures.cases[0].body, prReads === 1 ? oldHead : newHead));
-    }
-    if (path === `/repos/fixture/repo/commits/${oldHead}/check-runs`) return json(listOf(ownCheck()));
-    if (path === `/repos/fixture/repo/commits/${newHead}/check-runs`) return json(listOf());
-    if (path === '/repos/fixture/repo/check-runs/77' && options.method === 'PATCH') return json({id: 77});
-    if (path === '/repos/fixture/repo/check-runs' && options.method === 'POST') return json({id: 88});
-    throw new Error(`Unexpected API path: ${options.method} ${path}`);
-  });
-  const response = await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env);
-  assert.equal(response.status, 200);
-  const writes = checkWrites(calls);
-  assert.equal(writes.length, 2);
-  assert.equal(writes[0].method, 'PATCH');
-  assert.equal(writes[1].method, 'POST');
-  assert.equal(writes[1].body.head_sha, newHead);
-  assert.deepEqual(writes.map(write => write.body.actions), [[], []]);
+test('canonical refresh does not mutate an exposed matching control', async () => {
+  const {calls} = checkMock({list: listOf(ownCheck())});
+  assert.equal((await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), env)).status, 200);
+  assert.equal(checkWrites(calls).length, 0);
 });
 
 test('canonical PR or Check-list API failures are sanitized and cannot cause writes', async () => {
@@ -661,6 +562,7 @@ function requestDatabase() {
   return {sql, prepare(query) {
     return {bind(...values) {
       return {async first() { return sql.prepare(query).get(...values) ?? null; },
+        async all() { return {results: sql.prepare(query).all(...values)}; },
         async run() { return {meta: {changes: Number(sql.prepare(query).run(...values).changes)}}; }};
     }};
   }};
@@ -724,11 +626,11 @@ test('an authorized current action reserves once and retains the documented run 
   assert.equal(row.installation_id, 3);assert.equal(row.repository_id, 7);assert.equal(row.dispatched_ref, 'main');
   assert.equal(row.completed_at, null);assert.equal(row.conclusion, null);
   assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');
-  assert.deepEqual(f.check.actions, []);assert.match(f.check.output.summary, /actions\/runs\/900/);
+  assert.deepEqual(f.check.actions, []);assert.match(f.check.output.summary, /actions\/workflows\/dependency-repair\.yml/);
   const before = f.calls.length;
   assert.equal((await f.click()).status, 200);
   assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
-  assert.equal(f.calls.length - before, 4); // Token, repository and owned Check reconciliation; no new attempt.
+  assert.equal(f.calls.length - before, 2); // Token and repository only; replay never repaints output.
 });
 
 async function commentMock(t, options = {}) {
@@ -761,15 +663,365 @@ async function commentMock(t, options = {}) {
   return {...f, command, comments, commentEvent: event, submit};
 }
 
+async function completionMock(t, {native = false, admit = true, onCall} = {}) {
+  const app = {id: 42, slug: 'fixture-maintenance'};
+  const run = {id: 900, repository: {id: 7, full_name: 'fixture/repo'},
+    path: '.github/workflows/dependency-repair.yml', event: 'workflow_dispatch', head_branch: 'main',
+    actor: {type: 'Bot', login: 'fixture-maintenance[bot]'}, status: 'completed', conclusion: 'success',
+    updated_at: '2026-10-24T10:00:00Z', html_url: 'https://github.com/fixture/repo/actions/runs/900'};
+  const idle = [];
+  const f = await (native ? actionMock : commentMock)(t, {async onCall(call, context) {
+    const intercepted = await onCall?.(call, {...context, app, run, idle});
+    if (intercepted) return intercepted;
+    if (call.path === '/app') {
+      assert.equal(call.method, 'GET');
+      return json(app);
+    }
+    if (call.path === '/repos/fixture/repo/actions/runs/900') return json(run);
+    if (call.path.includes('/commits/') && call.path.endsWith('/check-runs')) return json(listOf(context.check, ...idle));
+    if (call.path === '/repos/fixture/repo/check-runs' && call.method === 'POST') {
+      const check = {id: 78 + idle.length, app: {id: 42}, ...call.body};
+      idle.push(check);return json(check);
+    }
+    const check = idle.find(c => call.path === `/repos/fixture/repo/check-runs/${c.id}`);
+    if (check) {
+      if (call.method === 'PATCH') Object.assign(check, call.body);
+      return json(check);
+    }
+  }});
+  if (admit) assert.equal((await (native ? f.click() : f.submit())).status, 200);
+  const event = {...payload, action: 'completed', workflow_run: {id: 900}};
+  const complete = (changes = {}) => worker.fetch(signed({...event, ...changes}, 'workflow_run'), f.environment);
+  return {...f, app, run, idle, complete};
+}
+
+function pauseNextAdmission(db) {
+  const reached = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const originalPrepare = db.prepare.bind(db);
+  let armed = true;
+  db.prepare = query => {
+    const statement = originalPrepare(query);
+    if (!armed || !query.includes('INSERT OR IGNORE INTO requests')) return statement;
+    armed = false;
+    return {bind(...values) {
+      const bound = statement.bind(...values);
+      return {run: async () => {
+        reached.resolve();
+        await release.promise;
+        return bound.run();
+      }};
+    }};
+  };
+  return {reached: reached.promise, release: release.resolve};
+}
+
+function commentSubmission(f, deliveryID, commentID) {
+  const event = structuredClone(f.commentEvent);
+  event.comment.id = commentID;
+  event.comment.user.id = event.sender.id = 9;
+  return worker.fetch(signed(event, 'issue_comment', {'x-github-delivery': deliveryID}), f.environment);
+}
+
+for (const [name, start] of [
+  ['native/native', (f, firstID, secondID) => Promise.all([f.click(firstID), f.click(secondID)])],
+  ['comment/comment', (f, firstID, secondID) => Promise.all([
+    commentSubmission(f, firstID, 501), commentSubmission(f, secondID, 502),
+  ])],
+  ['native/comment', (f, firstID, secondID) => Promise.all([
+    f.click(firstID), commentSubmission(f, secondID, 502),
+  ])],
+]) {
+  test(`a delayed ${name} loser cannot repaint a terminal Check after a third admission`, {timeout: 3_000}, async t => {
+    const sourceComments = new Map();
+    const f = await completionMock(t, {admit: false, native: name === 'native/native', onCall(call, context) {
+      const match = /\/issues\/comments\/([0-9]+)$/.exec(call.path);
+      if (call.method === 'GET' && match && ['501', '502'].includes(match[1])) {
+        const id = Number(match[1]);
+        if (!sourceComments.has(id)) sourceComments.set(id, {...context.command, id});
+        return json(sourceComments.get(id));
+      }
+    }});
+    const barrier = pauseNextAdmission(f.db);t.after(barrier.release);
+    const firstID = '94e535a5-2a7d-491d-858a-3df51ce211de';
+    const secondID = 'a4e535a5-2a7d-491d-858a-3df51ce211df';
+    const submissions = start(f, firstID, secondID);
+    await barrier.reached;
+    for (let attempt = 0; attempt < 100 && f.rows().length === 0; attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(f.rows().length, 1);
+    assert.equal((await f.complete()).status, 200);
+    assert.equal((await f.click('b4e535a5-2a7d-491d-858a-3df51ce211df', {check_run: f.idle[0]})).status, 200);
+    barrier.release();
+    assert.deepEqual((await submissions).map(response => response.status), [200, 200]);
+    assert.equal(f.rows().length, 2);
+    assert.equal(f.rows()[1].state, 'dispatched');
+    assert.equal(f.rows()[0].state, 'success');
+    assert.equal(f.rows()[0].check_id, 77);
+    assert.equal(f.dispatches().length, 2);
+    assert.equal(f.check.external_id, `node-repair-request:${f.rows()[0].id}`);
+    assert.equal(f.check.output.title, 'Workflow succeeded');
+  });
+}
+
+for (const target of ['Check', 'reply']) {
+  test(`an uncertain pending ${target} write cannot dispatch even if GitHub applies it after timeout`, {timeout: 2_000}, async t => {
+    shortenWebhookDeadline(t);
+    let lateApply, reached = false;
+    const f = await completionMock(t, {admit: false, async onCall(call, context) {
+      const pendingCheck = target === 'Check' && call.method === 'PATCH' && call.path.endsWith('/check-runs/77');
+      const pendingReply = target === 'reply' && call.method === 'POST' && call.path.endsWith('/12/comments');
+      if (!pendingCheck && !pendingReply) return;
+      reached = true;
+      lateApply = () => {
+        if (pendingCheck) Object.assign(context.check, call.body);
+        else context.comments.set(600, {id: 600, ...call.body});
+      };
+      await new Promise((resolve, reject) => {
+        call.signal.addEventListener('abort', () => reject(Error('ambiguous upstream write')), {once: true});
+      });
+    }});
+    assert.equal((await f.submit()).status, 500);assert.equal(reached, true);
+    assert.equal(f.dispatches().length, 0);assert.equal(f.rows()[0].state, 'reserved');
+    lateApply();
+    assert.equal((await f.submit()).status, 200);
+    assert.equal(f.dispatches().length, 0);assert.equal(f.rows()[0].state, 'reserved');
+  });
+}
+
+for (const conclusion of ['success', 'failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'stale', 'action_required', 'startup_failure']) {
+  test(`canonical ${conclusion} updates the same reply and releases only its request`, async t => {
+    const f = await completionMock(t);f.run.conclusion = conclusion;
+    const description = f.pr.body;
+    assert.equal((await f.complete()).status, 200);
+    const row = f.rows()[0], state = ['success', 'cancelled'].includes(conclusion) ? conclusion : 'failure';
+    assert.equal(row.state, state);assert.equal(row.conclusion, conclusion);
+    assert.equal(row.completed_at, Date.parse(f.run.updated_at));
+    assert.equal(f.pr.body, description);assert.equal(f.comments.size, 1);
+    assert.equal(row.status_comment_id, 600);assert.match(f.comments.get(600).body, /Workflow (succeeded|failed|cancelled)/);
+    assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+    assert.match(f.comments.get(600).body, /pilot performs no dependency repair/);
+    assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
+    assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');
+    assert.equal(f.idle.length, 1);assert.equal(f.idle[0].id, 78);
+    assert.equal(f.idle[0].actions[0].identifier, 'repair-selected');
+    const permission = f.calls.filter(c => c.path.endsWith('/access_tokens')).at(-1).body;
+    assert.deepEqual(permission, {repository_ids: [7], permissions: {contents: 'read', pull_requests: 'write', checks: 'write', actions: 'read', issues: 'read'}});
+    assert.equal((await f.complete()).status, 200);
+    assert.equal(f.idle.length, 1);assert.equal(f.dispatches().length, 1);
+    assert.equal((await f.submit()).status, 200);assert.equal(f.dispatches().length, 1);
+  });
+}
+
+test('native completion needs no conversation write grant', async t => {
+  const f = await completionMock(t, {native: true});
+  assert.equal((await f.complete()).status, 200);
+  assert.equal(f.rows()[0].state, 'success');
+  assert.deepEqual(f.calls.filter(c => c.path.endsWith('/access_tokens')).at(-1).body.permissions,
+    {contents: 'read', pull_requests: 'read', checks: 'write', actions: 'read'});
+});
+
+for (const [name, mutate] of [
+  ['run ID', f => {f.run.id = 901;}],
+  ['repository ID', f => {f.run.repository.id = 8;}],
+  ['repository name', f => {f.run.repository.full_name = 'other/repo';}],
+  ['workflow', f => {f.run.path = '.github/workflows/other.yml';}],
+  ['event', f => {f.run.event = 'push';}],
+  ['dispatched ref', f => {f.run.head_branch = 'other';}],
+  ['App identity', f => {f.app.id = 43;}],
+  ['actor type', f => {f.run.actor.type = 'User';}],
+  ['actor login', f => {f.run.actor.login = 'other[bot]';}],
+  ['run URL', f => {f.run.html_url = 'https://github.com/other/repo/actions/runs/900';}],
+  ['unfinished canonical run', f => {f.run.status = 'in_progress';}],
+]) {
+  test(`mismatched canonical ${name} cannot publish or release`, async t => {
+    const f = await completionMock(t);mutate(f);
+    const before = f.calls.length;
+    assert.equal((await f.complete()).status, 200);
+    assert.equal(f.rows()[0].state, 'dispatched');assert.equal(f.rows()[0].conclusion, null);
+    assert.equal(f.calls.slice(before).filter(c => c.method === 'PATCH').length, 0);
+  });
+}
+
+test('unknown, early and cross-installation completions make no GitHub calls or changes', async t => {
+  const f = await completionMock(t);
+  for (const changes of [{workflow_run: {id: 901}}, {installation: {id: 4}}, {repository: {id: 8, full_name: 'fixture/repo'}}]) {
+    const count = f.calls.length;
+    assert.equal((await f.complete(changes)).status, 200);assert.equal(f.calls.length, count);
+  }
+  f.db.sql.prepare("UPDATE requests SET state = 'reserved', run_id = NULL, run_url = NULL, html_url = NULL").run();
+  const count = f.calls.length;
+  assert.equal((await f.complete()).status, 200);assert.equal(f.calls.length, count);
+  assert.equal(f.rows()[0].state, 'reserved');
+});
+
+test('a renamed default branch does not change the retained dispatch ref', async t => {
+  const f = await completionMock(t);f.repository.default_branch = 'trunk';f.pr.base.ref = 'trunk';
+  assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');
+});
+
+for (const target of ['Check', 'reply']) {
+  test(`transient ${target} failure retains outcome and lock until redelivery`, async t => {
+    let armed = false;
+    const f = await completionMock(t, {onCall(call, {db}) {
+      if (armed && call.method === 'PATCH' && call.path.endsWith(target === 'Check' ? '/check-runs/77' : '/comments/600')) {
+        assert.equal(db.sql.prepare('SELECT state FROM requests').get().state, 'dispatched');
+        assert.equal(db.sql.prepare('SELECT conclusion FROM requests').get().conclusion, 'success');
+        return new Response(null, {status: 503});
+      }
+    }});
+    armed = true;assert.equal((await f.complete()).status, 500);
+    assert.equal(f.rows()[0].state, 'dispatched');assert.equal(f.rows()[0].conclusion, 'success');
+    // Its saved outcome still holds the same active-index lock.
+    assert.throws(() => f.db.sql.prepare("INSERT INTO requests SELECT 'other', installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, NULL, state, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM requests").run(), /UNIQUE/);
+    armed = false;assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');
+    assert.equal(f.comments.size, 1);assert.equal(f.dispatches().length, 1);
+  });
+}
+
+for (const target of ['Check', 'reply']) {
+  for (const kind of ['missing', 'replaced']) {
+    test(`${kind} ${target} is not overwritten or recreated on verified completion`, async t => {
+      let armed = false;
+      const path = target === 'Check' ? '/repos/fixture/repo/check-runs/77' : '/repos/fixture/repo/issues/comments/600';
+      const f = await completionMock(t, {onCall(call) {
+        if (!armed || call.path !== path || call.method !== 'GET') return;
+        return kind === 'missing' ? new Response(null, {status: 404}) : json(target === 'Check' ? ownCheck({app: {id: 43}}) :
+          {id: 600, performed_via_github_app: {id: 43}, body: `<!-- node-repair:request:${delivery} -->\n`, issue_url: 'https://api.github.com/repos/fixture/repo/issues/12'});
+      }});
+      armed = true;const before = f.calls.length;
+      assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');
+      assert.equal(f.calls.slice(before).filter(c => c.path === path && c.method === 'PATCH').length, 0);
+      assert.equal(f.comments.size, 1);
+    });
+  }
+}
+
+test('completion does not change a newer head Check', async t => {
+  const f = await completionMock(t);f.pr.head.sha = 'c'.repeat(40);
+  assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');assert.equal(f.idle.length, 0);
+});
+
+test('conflicting canonical outcomes never rewrite a retained result', async t => {
+  const f = await completionMock(t);assert.equal((await f.complete()).status, 200);
+  const before = f.calls.length;f.run.conclusion = 'failure';
+  assert.equal((await f.complete()).status, 500);assert.equal(f.rows()[0].state, 'success');assert.equal(f.rows()[0].conclusion, 'success');
+  assert.equal(f.calls.slice(before).filter(c => c.method === 'PATCH').length, 0);
+});
+
+test('a fresh conversation command can start after completion without manual lock recovery', async t => {
+  let second = false;
+  const f = await completionMock(t, {onCall(call, context) {
+    if (!second) return;
+    if (call.path.endsWith('/dispatches')) return json({workflow_run_id: 901,
+      run_url: 'https://api.github.com/repos/fixture/repo/actions/runs/901', html_url: 'https://github.com/fixture/repo/actions/runs/901'});
+    if (call.path.endsWith('/12/comments') && call.method === 'POST') {
+      const reply = {id: 601, ...call.body, performed_via_github_app: {id: 42}, issue_url: context.command.issue_url};
+      context.comments.set(601, reply);return json(reply);
+    }
+    if (call.path.endsWith('/comments/601')) {
+      const reply = context.comments.get(601);if (call.method === 'PATCH') Object.assign(reply, call.body);return json(reply);
+    }
+  }});
+  assert.equal((await f.complete()).status, 200);second = true;
+  f.command.id = 502;
+  assert.equal((await f.submit('a4e535a5-2a7d-491d-858a-3df51ce211df', {comment: {...f.command}})).status, 200);
+  assert.deepEqual(f.rows().map(r => r.state), ['success', 'dispatched']);
+  assert.deepEqual(f.rows().map(r => r.check_id), [77, 78]);
+  assert.equal(f.dispatches().length, 2);assert.match(f.comments.get(600).body, /succeeded/);assert.match(f.comments.get(601).body, /Request accepted/);
+});
+
+test('completion fits the shared eight-second budget with realistic API latency', {timeout: 12_000}, async t => {
+  let armed = false;
+  const f = await completionMock(t, {async onCall(call) {
+    if (!armed) return;
+    await new Promise((resolve, reject) => {
+      const abort = () => {clearTimeout(timer);reject(Error('fixture deadline'));};
+      const timer = setTimeout(() => {call.signal.removeEventListener('abort', abort);resolve();}, 550);
+      if (call.signal.aborted) abort();else call.signal.addEventListener('abort', abort, {once: true});
+    });
+  }});
+  armed = true;assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');
+});
+
+test('dispatch saves its run without further status writes; observers cannot repaint completion', async t => {
+  const f = await completionMock(t);
+  const before = f.calls.length;
+  assert.equal((await f.complete()).status, 200);
+  const terminal = structuredClone(f.check), reply = structuredClone(f.comments.get(600));
+  const afterCompletion = f.calls.length;
+  await f.submit();
+  await worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment);
+  assert.deepEqual(f.check, terminal);assert.deepEqual(f.comments.get(600), reply);
+  assert.equal(f.calls.slice(afterCompletion).filter(c => c.method === 'PATCH').length, 0);
+  const writes = f.calls.slice(before).filter(c => c.method === 'PATCH');
+  assert.ok(writes.every(c => c.body?.output?.title === 'Workflow succeeded' || c.body?.body?.includes('Workflow succeeded')));
+  assert.equal(f.dispatches().length, 1);
+});
+
+test('an idle refresh delayed across admission and completion cannot repaint the terminal Check', {timeout: 3_000}, async t => {
+  const hold = Promise.withResolvers(), reached = Promise.withResolvers();
+  let armed = true;
+  const f = await completionMock(t, {admit: false, async onCall(call, context) {
+    if (armed && call.method === 'GET' && call.path.includes('/commits/') && call.path.endsWith('/check-runs')) {
+      armed = false;const snapshot = structuredClone(context.check);reached.resolve();await hold.promise;
+      return json(listOf(snapshot));
+    }
+  }});
+  t.after(hold.resolve);
+  const refresh = worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment);
+  await reached.promise;
+  assert.equal((await f.submit()).status, 200);assert.equal((await f.complete()).status, 200);
+  hold.resolve();assert.equal((await refresh).status, 200);
+  assert.equal(f.check.output.title, 'Workflow succeeded');assert.match(f.comments.get(600).body, /Workflow succeeded/);
+  assert.equal(f.calls.filter(c => c.method === 'PATCH' && c.body?.external_id?.startsWith('node-repair:')).length, 0);
+});
+
+test('ambiguous run ownership fails closed without changing either request', async t => {
+  const f = await completionMock(t);
+  const row = {...f.rows()[0], id: 'other-request', pr: 13, check_id: 79, comment_id: null, status_comment_id: null};
+  const columns = Object.keys(row);
+  f.db.sql.prepare(`INSERT INTO requests (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`).run(...Object.values(row));
+  const before = f.calls.length;
+  assert.equal((await f.complete()).status, 500);assert.equal(f.calls.length, before);
+  assert.deepEqual(f.rows().map(r => r.state), ['dispatched', 'dispatched']);
+});
+
+for (const change of [{conclusion: null}, {conclusion: 'invented'}, {updated_at: 'invalid'}]) {
+  test(`invalid canonical completion ${JSON.stringify(change)} retains the active lock`, async t => {
+    const f = await completionMock(t);Object.assign(f.run, change);
+    assert.equal((await f.complete()).status, 500);assert.equal(f.rows()[0].state, 'dispatched');assert.equal(f.rows()[0].conclusion, null);
+  });
+}
+
+test('daily retention deletes only terminal records older than ninety days', async t => {
+  const f = await completionMock(t), now = Date.parse('2026-10-24T12:00:00Z'), cutoff = now - 90 * 86_400_000;
+  f.db.sql.prepare('UPDATE requests SET completed_at = ?, conclusion = ?').run(cutoff - 1, 'success');
+  for (const [index, state] of ['reserved', 'unknown', 'success', 'failure', 'cancelled'].entries()) {
+    const row = {...f.rows()[0], id: state, pr: 20 + index, state, completed_at: cutoff - 1,
+      comment_id: null, status_comment_id: null};
+    const columns = Object.keys(row);
+    f.db.sql.prepare(`INSERT INTO requests (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`).run(...Object.values(row));
+  }
+  const row = {...f.rows()[0], id: 'at-cutoff', pr: 30, state: 'success', completed_at: cutoff, comment_id: null, status_comment_id: null};
+  const columns = Object.keys(row);
+  f.db.sql.prepare(`INSERT INTO requests (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`).run(...Object.values(row));
+  await worker.scheduled({scheduledTime: now}, f.environment);
+  assert.deepEqual(f.rows().map(r => r.id).sort(), [delivery, 'reserved', 'unknown', 'at-cutoff'].sort());
+  assert.equal(f.rows().find(r => r.id === delivery).conclusion, 'success');
+  assert.equal(f.rows().find(r => r.id === delivery).state, 'dispatched');
+});
+
 test('a conversation command submits description selections and updates one App-owned reply', async t => {
   const f = await commentMock(t);
   assert.equal((await f.submit()).status, 200);
   assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
   assert.equal(f.rows()[0].comment_id, 501);assert.equal(f.rows()[0].status_comment_id, 600);
   assert.deepEqual(f.calls[0].body.permissions, {contents: 'read', pull_requests: 'write', checks: 'write', actions: 'write', issues: 'read'});
-  assert.match(f.comments.get(600).body, /Workflow started/);
+  assert.match(f.comments.get(600).body, /Request accepted/);
   assert.match(f.comments.get(600).body, /launch-editor.*2\.14\.1 → 2\.14\.2/);
-  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  assert.match(f.comments.get(600).body, /actions\/workflows\/dependency-repair\.yml/);
   const id = 'a4e535a5-2a7d-491d-858a-3df51ce211df';
   assert.equal((await f.submit()).status, 200);assert.equal((await f.submit(id)).status, 200);
   assert.equal(f.calls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 1);
@@ -790,9 +1042,9 @@ test('a conversation command finishes its status updates within the webhook dead
   assert.equal((await f.submit()).status, 200);
   assert.equal(f.rows().length, 1);assert.equal(f.dispatches().length, 1);
   assert.equal(f.rows()[0].state, 'dispatched');
-  assert.match(f.check.output.summary, /actions\/runs\/900/);
-  assert.match(f.comments.get(600).body, /Workflow started/);
-  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  assert.match(f.check.output.summary, /actions\/workflows\/dependency-repair\.yml/);
+  assert.match(f.comments.get(600).body, /Request accepted/);
+  assert.match(f.comments.get(600).body, /actions\/workflows\/dependency-repair\.yml/);
 });
 
 for (const [name, mutate] of [
@@ -894,24 +1146,18 @@ test('an invalid reply owner retains the reservation without dispatch', async t 
   assert.equal(f.rows()[0].status_comment_id, null);assert.equal(f.dispatches().length, 0);
 });
 
-test('a delayed reply refresh cannot erase the newly retained run link', {timeout: 2000}, async t => {
-  const dispatchReached = Promise.withResolvers(), finishDispatch = Promise.withResolvers();
-  const replyReached = Promise.withResolvers(), finishReply = Promise.withResolvers();
-  let dispatchPending = false, held = false;
+test('replaying a command while dispatch is pending leaves its accepted reply untouched', {timeout: 2_000}, async t => {
+  const reached = Promise.withResolvers(), release = Promise.withResolvers();
   const f = await commentMock(t, {async onCall(call) {
-    if (call.path.endsWith('/dispatches')) {
-      dispatchPending = true;dispatchReached.resolve();await finishDispatch.promise;
-    } else if (dispatchPending && !held && call.path.endsWith('/comments/600') && call.method === 'PATCH') {
-      held = true;replyReached.resolve();await finishReply.promise;
-    }
+    if (call.path.endsWith('/dispatches')) { reached.resolve();await release.promise; }
   }});
-  const submit = f.submit();await dispatchReached.promise;
-  const replay = f.submit();await replyReached.promise;
-  finishDispatch.resolve();assert.equal((await submit).status, 200);
-  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
-  finishReply.resolve();assert.equal((await replay).status, 200);
-  assert.match(f.comments.get(600).body, /Workflow started/);
-  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  t.after(release.resolve);
+  const submit = f.submit();await reached.promise;
+  const reply = structuredClone(f.comments.get(600));
+  assert.equal((await f.submit()).status, 200);
+  release.resolve();assert.equal((await submit).status, 200);
+  assert.deepEqual(f.comments.get(600), reply);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/comments/600') && c.method === 'PATCH').length, 0);
   assert.equal(f.dispatches().length, 1);
 });
 
@@ -925,12 +1171,12 @@ test('a replaced status comment is not overwritten on delivery replay', async t 
   const f = await commentMock(t);assert.equal((await f.submit()).status, 200);
   f.comments.get(600).performed_via_github_app.id = 99;
   const writes = f.calls.filter(c => c.path.endsWith('/comments/600') && c.method === 'PATCH').length;
-  assert.equal((await f.submit()).status, 500);
+  assert.equal((await f.submit()).status, 200);
   assert.equal(f.calls.filter(c => c.path.endsWith('/comments/600') && c.method === 'PATCH').length, writes);
   assert.equal(f.dispatches().length, 1);
 });
 
-test('a second comment updates the active conversation reply without another dispatch', async t => {
+test('a second comment leaves the active conversation reply unchanged', async t => {
   const f = await commentMock(t);assert.equal((await f.submit()).status, 200);
   f.command.id = f.commentEvent.comment.id = 502;
   assert.equal((await f.submit('a4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
@@ -942,7 +1188,7 @@ test('an existing native request is explained in the conversation without a new 
   assert.equal((await f.submit('a4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
   assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
   assert.match(f.comments.get(600).body, /another repair request is active/);
-  assert.match(f.comments.get(600).body, /actions\/runs\/900/);
+  assert.match(f.comments.get(600).body, /actions\/workflows\/dependency-repair\.yml/);
 });
 
 test('the source-comment index blocks a second UUID after the first request terminates', async t => {
@@ -1077,40 +1323,24 @@ for (const dispatch of ['timeout', '204', '201', 'foreign']) {
   });
 }
 
-test('a failed in-progress Check update retains reserved state without dispatch', async t => {
+test('a failed pending Check write retains reservation without dispatch or automatic repaint', async t => {
   let failed = false;
   const f = await actionMock(t, {onCall(call) {
     if (!failed && call.path.endsWith('/check-runs/77') && call.method === 'PATCH') {
-      failed = true;
-      return new Response('private', {status: 502});
+      failed = true;return new Response('private', {status: 502});
     }
   }});
-  assert.equal((await f.click()).status, 500);assert.equal(f.rows()[0].state, 'reserved');assert.equal(f.dispatches().length, 0);
-  assert.equal((await f.click()).status, 200);assert.equal(f.dispatches().length, 0);
-  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
-  assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');assert.deepEqual(f.check.actions, []);
-  assert.equal(f.check.output.title, 'Request reserved');
-});
-
-test('a fresh click restores a same-Check reservation after the first Check write failed', async t => {
-  let failed = false;
-  const f = await actionMock(t, {onCall(call) {
-    if (!failed && call.path.endsWith('/check-runs/77') && call.method === 'PATCH') {
-      failed = true;
-      return new Response('private', {status: 502});
-    }
-  }});
-  assert.equal((await f.click()).status, 500);
+  assert.equal((await f.click()).status, 500);assert.equal(f.rows()[0].state, 'reserved');
+  const writes = checkWrites(f.calls).length;
+  assert.equal((await f.click()).status, 200);
   assert.equal((await f.click('94e535a5-2a7d-491d-858a-3df51ce211de')).status, 200);
-  assert.equal(f.rows().length, 1);assert.equal(f.rows()[0].state, 'reserved');assert.equal(f.dispatches().length, 0);
-  assert.equal(f.check.external_id, `node-repair-request:${delivery}`);assert.deepEqual(f.check.actions, []);
+  assert.equal(f.dispatches().length, 0);assert.equal(checkWrites(f.calls).length, writes);
 });
 
 test('replay cannot overwrite a foreign Check or regress a completed request', async t => {
   const f = await actionMock(t);assert.equal((await f.click()).status, 200);
-  f.check.app.id = 999;
-  const writes = checkWrites(f.calls).length;
-  assert.equal((await f.click()).status, 500);assert.equal(checkWrites(f.calls).length, writes);
+  f.check.app.id = 999;const writes = checkWrites(f.calls).length;
+  assert.equal((await f.click()).status, 200);
   f.db.sql.prepare("UPDATE requests SET state = 'success' WHERE id = ?").run(delivery);
   assert.equal((await f.click()).status, 200);assert.equal(checkWrites(f.calls).length, writes);
   assert.equal(f.dispatches().length, 1);
@@ -1137,12 +1367,10 @@ test('oversized selected versions expose no action and reserve no request', asyn
   assert.deepEqual(writes.at(-1).body.actions, []);
 });
 
-test('failure after retaining the known run cannot erase its identity or dispatch again', async t => {
-  let writes = 0;
-  const f = await actionMock(t, {onCall(call) {
-    if (call.path.endsWith('/check-runs/77') && call.method === 'PATCH' && ++writes === 2) return new Response('private', {status: 502});
-  }});
-  assert.equal((await f.click()).status, 500);assert.equal(f.rows()[0].state, 'dispatched');assert.equal(f.rows()[0].run_id, 900);
+test('retaining the known run performs no second Check write', async t => {
+  const f = await actionMock(t);
+  assert.equal((await f.click()).status, 200);assert.equal(f.rows()[0].run_id, 900);
+  assert.equal(checkWrites(f.calls).length, 1);
   assert.equal((await f.click()).status, 200);assert.equal(f.dispatches().length, 1);
 });
 
@@ -1166,7 +1394,7 @@ test('concurrent current clicks admit one request through the actual SQLite uniq
 test('D1-enabled PR edits show an action only for an eligible selected batch', async t => {
   const f = await actionMock(t);
   const refresh = () => worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment);
-  assert.equal((await refresh()).status, 200);assert.equal(f.check.actions[0].identifier, 'repair-selected');
+  assert.equal((await refresh()).status, 200);assert.equal(checkWrites(f.calls).length, 0);
   f.pr.body = fixtures.cases[1].body;assert.equal((await refresh()).status, 200);
   const writes = checkWrites(f.calls);
   assert.equal(writes.at(-1).method, 'POST');assert.deepEqual(writes.at(-1).body.actions, []);
@@ -1189,73 +1417,31 @@ test('deadline after reservation prevents dispatch and preserves the ambiguous r
   assert.equal((await f.click()).status, 500);assert.equal(f.dispatches().length, 0);assert.equal(f.rows()[0].state, 'reserved');
 });
 
-test('an idle refresh that races admission restores the reserved Check identity', async t => {
-  let raced = false;
-  const f = await actionMock(t, {onCall(call, {db}) {
-    if (!raced && call.path.endsWith('/check-runs/77') && call.method === 'PATCH' && call.body.external_id.startsWith('node-repair:')) {
-      raced = true;
-      db.sql.prepare(`INSERT INTO requests (id, installation_id, repository_id, repository, pr, head, base,
-        dispatched_ref, fingerprint, check_id, actor_login, created_at, state)
-        VALUES (?, 3, 7, 'fixture/repo', 12, ?, ?, 'main', ?, 77, 'maintainer', 1, 'reserved')`)
-        .run(delivery, 'a'.repeat(40), 'b'.repeat(40), '0'.repeat(64));
-    }
-  }});
-  assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment)).status, 200);
-  assert.equal(raced, true);assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
-  assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');assert.deepEqual(f.check.actions, []);assert.equal(f.dispatches().length, 0);
-});
-
-test('a different active Check blocks a fresh idle click and links the active request', async t => {
+test('a different active Check blocks admission without writing either Check', async t => {
   const f = await actionMock(t);
   f.db.sql.prepare(`INSERT INTO requests (id, installation_id, repository_id, repository, pr, head, base,
     dispatched_ref, fingerprint, check_id, actor_login, created_at, state)
     VALUES (?, 3, 7, 'fixture/repo', 12, ?, ?, 'main', ?, 88, 'maintainer', 1, 'unknown')`)
     .run('94e535a5-2a7d-491d-858a-3df51ce211de', 'a'.repeat(40), 'b'.repeat(40), '0'.repeat(64));
   assert.equal((await f.click()).status, 200);assert.equal(f.rows().length, 1);assert.equal(f.dispatches().length, 0);
-  assert.equal(f.check.output.title, 'Another request is active');assert.match(f.check.output.summary, /runs\/88/);
-  assert.deepEqual(f.check.actions, []);
-});
-
-test('an active request cannot authorize overwriting a replaced or foreign Check', async t => {
-  const f = await actionMock(t);assert.equal((await f.click()).status, 200);
-  f.check.app.id = 999;
-  const writes = checkWrites(f.calls).length;
-  assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment)).status, 500);
-  assert.equal(checkWrites(f.calls).length, writes);assert.equal(f.rows()[0].state, 'dispatched');
+  assert.equal(checkWrites(f.calls).length, 0);
 });
 
 for (const route of ['PR edit', 'delivery replay']) {
-  for (const pause of ['GET', 'PATCH']) {
-    test(`a ${route} paused on Check ${pause} cannot erase a newly retained run link`, async t => {
-      const dispatchReached = Promise.withResolvers(), finishDispatch = Promise.withResolvers();
-      const restoreReached = Promise.withResolvers(), finishRestore = Promise.withResolvers();
-      let dispatchPending = false, held = false;
-      const f = await actionMock(t, {async onCall(call) {
-        if (call.path.endsWith('/dispatches')) {
-          dispatchPending = true; dispatchReached.resolve(); await finishDispatch.promise;
-        } else if (dispatchPending && !held && call.path.endsWith('/check-runs/77') && call.method === pause) {
-          held = true; restoreReached.resolve(); await finishRestore.promise;
-        }
-      }});
-      const click = f.click();
-      await dispatchReached.promise;
-      const restore = route === 'PR edit' ?
-        worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment) : f.click();
-      await restoreReached.promise;
-      finishDispatch.resolve();
-      assert.equal((await click).status, 200);
-      assert.equal(f.rows()[0].state, 'dispatched');
-      assert.match(f.check.output.summary, /actions\/runs\/900/);
-      finishRestore.resolve();
-      assert.equal((await restore).status, 200);
-      assert.equal(f.rows()[0].run_id, 900);
-      assert.equal(f.check.output.title, 'Workflow started');
-      assert.match(f.check.output.summary, /actions\/runs\/900/);
-      assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
-      assert.deepEqual(f.check.actions, []);
-      assert.equal(f.dispatches().length, 1);
-    });
-  }
+  test(`a ${route} during dispatch does not write request status`, {timeout: 3_000}, async t => {
+    const reached = Promise.withResolvers(), release = Promise.withResolvers();
+    const f = await actionMock(t, {async onCall(call) {
+      if (call.path.endsWith('/dispatches')) { reached.resolve();await release.promise; }
+    }});
+    t.after(release.resolve);
+    const admission = f.click();await reached.promise;
+    const before = checkWrites(f.calls).length;
+    const response = route === 'PR edit' ?
+      await worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment) : await f.click();
+    assert.equal(response.status, 200);assert.equal(checkWrites(f.calls).length, before);
+    release.resolve();assert.equal((await admission).status, 200);
+    assert.equal(f.check.output.title, 'Request accepted');assert.equal(checkWrites(f.calls).length, before);
+  });
 }
 
 for (const [total, reuse] of [[101, false], [201, true], [1000, true]]) {
@@ -1270,10 +1456,12 @@ for (const [total, reuse] of [[101, false], [201, true], [1000, true]]) {
     const db = requestDatabase(); t.after(() => db.sql.close());
     assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), {...env, DB: db})).status, 200);
     const writes = checkWrites(calls);
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].method, reuse ? 'PATCH' : 'POST');
-    assert.equal(writes[0].path, '/repos/fixture/repo/check-runs' + (reuse ? '/78' : ''));
-    assert.equal(writes[0].body.actions[0].identifier, 'repair-selected');
+    assert.equal(writes.length, reuse ? 0 : 1);
+    if (!reuse) {
+      assert.equal(writes[0].method, 'POST');
+      assert.equal(writes[0].path, '/repos/fixture/repo/check-runs');
+      assert.equal(writes[0].body.actions[0].identifier, 'repair-selected');
+    }
     const pages = calls.filter(c => c.path.includes('/commits/')).map(c => new URL(c.url).searchParams.get('page'));
     assert.deepEqual(pages, Array.from({length: Math.ceil(total / 100)}, (_, i) => String(i + 1)));
   });
