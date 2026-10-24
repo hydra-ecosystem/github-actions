@@ -16,8 +16,14 @@ CREATE TABLE IF NOT EXISTS requests (
   run_id INTEGER CHECK (run_id > 0),
   run_url TEXT,
   html_url TEXT,
-  conclusion TEXT
+  conclusion TEXT,
+  comment_id INTEGER CHECK (comment_id > 0),
+  status_comment_id INTEGER CHECK (status_comment_id > 0),
+  selections_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_request
   ON requests (installation_id, repository_id, pr)
   WHERE state IN ('reserved', 'dispatched', 'unknown');
+CREATE UNIQUE INDEX IF NOT EXISTS one_comment_request
+  ON requests (installation_id, repository_id, comment_id)
+  WHERE comment_id IS NOT NULL;

@@ -281,6 +281,20 @@ It also checks security and still obeys the cooldown and upgrade scope. It does
 not enable automatic upgrades. Nothing merges automatically. See
 [reports and PR behavior](../node/maintenance.md#reports-and-prs) for details.
 
+## Interactive repairs (unreleased)
+
+The repair integration under development keeps selection and submission in the
+PR's **Conversation** tab. Tick the fixes you allow in the PR description, then
+post a new comment containing only `/repair selected` using **Comment**. The App
+replies with the request status and the exact Actions link. Checkbox edits alone
+start no work. The Checks tab is optional for this flow.
+
+This requires an installed repair App, a current report that supports comment
+requests, and the fixed repair workflow. The current pilot only validates inputs;
+it changes no dependencies. Completion reporting and the production repair
+renderer are still later delivery slices. Nothing merges automatically.
+See the [service reference](node-maintenance-operator.md) for current limits.
+
 ## Toolchain selection
 
 The basic setup follows project declarations. Explicit or inherited constraints
