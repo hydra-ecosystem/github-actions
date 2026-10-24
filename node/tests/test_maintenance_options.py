@@ -2222,7 +2222,7 @@ def test_routine_report_keeps_only_known_blockers_in_the_background(
         assert "worker" in visible
     assert "Validation script:" not in visible
     assert "Validation script:" in details
-    assert "🔴" not in report
+    assert "🔴 **New findings" not in report
 
 
 def test_new_security_findings_stay_visible_above_collapsed_details(site, monkeypatch):

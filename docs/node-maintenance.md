@@ -300,6 +300,24 @@ recovery before the next attempt. Production repair and report integration
 remain later delivery slices. Nothing merges automatically.
 See the [service reference](node-maintenance-operator.md) for current limits.
 
+### Reading repair choices
+
+🟡 **Needs review** means a decision or explicit pin needs attention.
+🔴 **Blocked** means the available evidence does not support a compatible fix.
+A check mark identifies a proposed applied fix; the report's validation section
+states whether the project checks passed. Status icons do not indicate severity;
+the severity column reports that separately.
+
+An eligible pin has a folded assessment immediately below its package row. It
+shows the published candidate, checked parent constraints and advisory links.
+**Likely feasible** means that an automatic attempt appears possible. It does
+not mean repair validation passed or that the dependency was upgraded.
+
+The report component can produce the exact selection block bound to a known PR
+head and base. Unbound audit reports do not offer an active repair command. The
+published caller integration and actual dependency repair remain unreleased;
+the harmless pilot's success does not change the package table to upgraded.
+
 ## Toolchain selection
 
 The basic setup follows project declarations. Explicit or inherited constraints
