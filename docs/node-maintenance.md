@@ -286,13 +286,18 @@ not enable automatic upgrades. Nothing merges automatically. See
 The repair integration under development keeps selection and submission in the
 PR's **Conversation** tab. Tick the fixes you allow in the PR description, then
 post a new comment containing only `/repair selected` using **Comment**. The App
-replies with the request status and the exact Actions link. Checkbox edits alone
+replies **Request accepted** with a link to the repair workflow page. It keeps
+that message until verified completion supplies the final result and exact run
+link. It does not show live progress. Checkbox edits alone
 start no work. The Checks tab is optional for this flow.
 
 This requires an installed repair App, a current report that supports comment
 requests, and the fixed repair workflow. The current pilot only validates inputs;
-it changes no dependencies. Completion reporting and the production repair
-renderer are still later delivery slices. Nothing merges automatically.
+it changes no dependencies. Its existing reply reports success, failure or
+cancellation and links to the run. Once completion is safely recorded, a new
+command can request another attempt. A failed status update requires operator
+recovery before the next attempt. Production repair and report integration
+remain later delivery slices. Nothing merges automatically.
 See the [service reference](node-maintenance-operator.md) for current limits.
 
 ## Toolchain selection
