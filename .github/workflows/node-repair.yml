@@ -1,4 +1,4 @@
-name: Prepare selected Node repairs
+name: Validate selected Node repairs
 'on':
   workflow_call:
     inputs:
@@ -19,7 +19,7 @@ name: Prepare selected Node repairs
         required: true
     outputs:
       candidate-artifact-id:
-        description: Immutable preparation artifact ID in this run; no validation or publication occurred.
+        description: Immutable preparation artifact ID in this run; validation never replaces it. No publication occurred.
         value: ${{ jobs.prepare.outputs.candidate-artifact-id }}
 permissions:
   contents: read
@@ -35,6 +35,27 @@ jobs:
       uses: $/node/repair
       with:
         operation: guard
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
+  validate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        persist-credentials: false
+    - name: Validate the sealed candidate using trusted workflow code
+      uses: $/node/repair
+      with:
+        operation: validate
+        candidate-artifact-id: ${{ needs.prepare.outputs.candidate-artifact-id }}
         request-id: ${{ inputs.request-id }}
         pull-request: ${{ inputs.pull-request }}
         expected-head: ${{ inputs.expected-head }}

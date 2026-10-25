@@ -1,4 +1,4 @@
-"""Guard and seal one selected pnpm repair candidate; run no project scripts."""
+"""Prepare a sealed pnpm candidate and validate it without publication."""
 
 import argparse
 import copy
@@ -7,6 +7,7 @@ import os
 import re
 import runpy
 import subprocess
+import tempfile
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -484,6 +485,162 @@ def export_patch(paths):
     )
 
 
+def apply_candidate(expected, artifact, directory, snapshot):
+    """Consume the preparation copy; never produce a new candidate artifact."""
+    root = Path.cwd().resolve()
+    if (
+        artifact.is_symlink()
+        or set(p.name for p in artifact.iterdir())
+        != {"candidate.patch", "audit.json", "result.md"}
+        or any(p.is_symlink() or not p.is_file() for p in artifact.iterdir())
+    ):
+        raise ValueError("Invalid sealed artifact members")
+    envelope = read_envelope(
+        artifact / "audit.json", expected, directory.relative_to(root).as_posix()
+    )
+    paths = {
+        (directory / name).relative_to(root).as_posix()
+        for name in ("pnpm-workspace.yaml", "pnpm-lock.yaml")
+    }
+    # Let Git parse quoted names, binary diffs and path safety. A temporary index
+    # proves the complete patch's paths and modes before it touches the worktree.
+    with tempfile.TemporaryDirectory(prefix="node-repair-index-") as temporary:
+        environment = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / "index"))
+
+        def indexed(*args):
+            return subprocess.check_output(["git", *args], env=environment, text=True)
+
+        indexed("read-tree", "HEAD")
+        indexed(
+            "apply",
+            "--cached",
+            "--whitespace=nowarn",
+            str(artifact / "candidate.patch"),
+        )
+        records = indexed(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--raw",
+            "--no-abbrev",
+            "-z",
+            "HEAD",
+        ).split("\0")
+        if not records[0] or indexed(
+            "diff", "--no-ext-diff", "--no-textconv", "--cached", "--summary", "HEAD"
+        ):
+            raise ValueError("Candidate must modify existing dependency files only")
+        for index in range(0, len(records) - 1, 2):
+            fields = records[index].split()
+            if (
+                len(fields) != 5
+                or fields[:2] != [":100644", "100644"]
+                or fields[4] != "M"
+                or records[index + 1] not in paths
+            ):
+                raise ValueError("Candidate patch changed an unapproved path or mode")
+    git("apply", "--whitespace=nowarn", str(artifact / "candidate.patch"))
+    candidate = ENGINE["valid_snapshot"](directory)
+    check_scope(snapshot, candidate, expected["selections"])
+    return envelope, candidate
+
+
+def validation_state(root, directory):
+    """Capture declaration bytes and modes before running project code."""
+    inputs = PROJECT["configuration_inputs"](root, directory)
+    paths = set(inputs) | {(directory / "pnpm-lock.yaml").relative_to(root).as_posix()}
+    for parent in (directory, *directory.parents):
+        if parent.is_relative_to(root):
+            paths.update(
+                (parent / name).relative_to(root).as_posix()
+                for name in (".npmrc", ".pnpmfile.cjs")
+            )
+    state = {}
+    for name in paths:
+        path = root / project_path(root, name)
+        if path.exists():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("Validation declarations must remain regular files")
+            state[name] = (path.stat().st_mode, path.read_bytes())
+        else:
+            state[name] = None
+    return state
+
+
+def validate(expected, artifact, evidence):
+    root = Path.cwd().resolve()
+    if (
+        git("rev-parse", "HEAD").strip() != expected["head"]
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise ValueError("Validation requires a clean checkout of the expected head")
+    if artifact.resolve() != artifact or artifact.is_relative_to(root):
+        raise ValueError("Candidate artifacts must be outside the project checkout")
+    if (
+        evidence.resolve() != evidence
+        or evidence.is_relative_to(root)
+        or evidence.is_relative_to(artifact)
+        or artifact.is_relative_to(evidence)
+    ):
+        raise ValueError(
+            "Validation evidence must be separate from the checkout and candidate"
+        )
+    evidence.mkdir(parents=True, exist_ok=False)
+    try:
+        with suppress_hooks():
+            directory, selected, snapshot = project_context()
+            envelope, candidate = apply_candidate(
+                expected, artifact, directory, snapshot
+            )
+        state = validation_state(root, directory)
+        deadline = time.monotonic() + 40 * 60
+
+        def unchanged():
+            if (
+                validation_state(root, directory) != state
+                or ENGINE["valid_snapshot"](directory) != candidate
+            ):
+                raise ValueError("Validation changed dependency files or configuration")
+
+        for label, arguments in (
+            ("Frozen install", ("install", "--frozen-lockfile")),
+            (
+                "Configured project/local-patch checks",
+                ("run", selected["validationScript"]),
+            ),
+        ):
+            result = ENGINE["run"](directory, *arguments, deadline=deadline)
+            (
+                evidence
+                / ("install.log" if label == "Frozen install" else "checks.log")
+            ).write_text(result.stdout + "\n" + result.stderr)
+            unchanged()
+            if result.returncode:
+                raise ValueError(f"{label} failed (exit {result.returncode})")
+        with suppress_hooks():
+            after = ENGINE["audit"](directory, deadline=deadline)
+        unchanged()
+        # Reuse the strict selected-fix and no-new-findings checks against a fresh
+        # audit. The in-memory preparation envelope stays the comparison source.
+        validate_envelope(
+            dict(envelope, candidate=after), expected, envelope["project_directory"]
+        )
+        (evidence / "audit.json").write_text(
+            json.dumps(after, ensure_ascii=False) + "\n"
+        )
+        message = "Validation passed: frozen install, configured project/local-patch checks and fresh advisory checks. No dependency change has been published."
+    except Exception as error:
+        (evidence / "result.md").write_text(
+            "Validation failed. No dependency change has been published.\n\n"
+            + str(error)
+            + "\n"
+        )
+        raise
+    (evidence / "result.md").write_text(message + "\n")
+    return after
+
+
 def prepare(expected, artifact):
     with suppress_hooks():
         return prepare_candidate(expected, artifact)
@@ -572,14 +729,19 @@ def prepare_candidate(expected, artifact):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("guard", "prepare"))
+    parser.add_argument("operation", choices=("guard", "prepare", "validate"))
     parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
     expected = request()
     if args.operation == "guard":
         guard(expected)
     elif args.artifact is None:
-        parser.error("prepare requires --artifact")
+        parser.error("prepare and validate require --artifact")
+    elif args.operation == "validate":
+        if args.evidence is None:
+            parser.error("validate requires --evidence")
+        validate(expected, args.artifact, args.evidence)
     else:
         prepare(expected, args.artifact)
 
