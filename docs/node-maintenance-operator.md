@@ -128,8 +128,8 @@ these instructions. The local/native tests cannot replace that acceptance.
 
 ## Candidate preparation boundary
 
-The reusable `.github/workflows/node-repair.yml` currently enables only `guard`
-and `prepare`. It accepts the existing five request inputs and returns
+The reusable `.github/workflows/node-repair.yml` enables `guard`, `prepare`
+and `validate`. It accepts the existing five request inputs and returns
 `candidate-artifact-id` for the immutable artifact created in that run.
 It does not install a caller or enable repairs in an existing repository.
 
@@ -158,8 +158,25 @@ The envelope rejects missing/extra fields, mismatched request or project,
 unsupported versions, symlinked project parents, unconfirmed selected fixes and
 new findings. Later consumers must download by the returned artifact ID from
 the same run. A preparation success is not proof of a validated or published
-repair. Separate validation, publication and normal-audit retention remain
-later slices, followed by the isolated live repair gate and general rollout.
+repair.
+
+Validation checks out the same expected head on a separate read-only runner,
+without persisted Git credentials or App credentials. It downloads only the
+preparation artifact ID from the current run. It rejects extra members and
+unapproved patch paths or file modes before applying the candidate. Frozen
+installation and the configured `validationScript` run against that candidate;
+include any project-specific local-patch tests in this script. Changes to
+dependency files or configuration fail validation. A fresh audit must confirm
+all selected advisories are removed and no new finding is present.
+
+The separate `node-repair-validation-<request-id>` artifact contains human
+evidence only: install/check logs, the fresh audit and a validation result.
+It never replaces the preparation artifact. Project code runs with the
+repository write maintainer as its trust principal; validation cannot attest
+intentionally dishonest tests. A later publisher must use the original
+preparation artifact and actual validation job success, never validation-local
+patches, reports or logs. Publication and normal-audit retention remain later
+slices, followed by the isolated live repair gate and general rollout.
 
 ## Check the receiver locally
 

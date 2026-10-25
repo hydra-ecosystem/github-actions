@@ -1,8 +1,8 @@
 name: Node repair candidate
-description: Guard or prepare a selected pnpm candidate without project scripts or publication.
+description: Guard, prepare or validate a selected pnpm candidate without publication.
 inputs:
   operation:
-    description: guard or prepare.
+    description: guard, prepare or validate.
     required: true
   request-id:
     required: true
@@ -19,6 +19,9 @@ inputs:
   selections:
     required: true
     description: Canonical selected package/version triples.
+  candidate-artifact-id:
+    required: false
+    description: Single immutable preparation artifact ID from this run, required for validate.
 outputs:
   candidate-artifact-id:
     description: Immutable preparation artifact ID from this run.
@@ -32,9 +35,23 @@ runs:
       OPERATION: ${{ inputs.operation }}
     run: |
       case "$OPERATION" in
-        guard|prepare) ;;
-        *) echo '::error::Expected guard or prepare'; exit 1 ;;
+        guard|prepare|validate) ;;
+        *) echo '::error::Expected guard, prepare or validate'; exit 1 ;;
       esac
+  - name: Validate the artifact ID
+    if: ${{ inputs.operation == 'validate' }}
+    shell: bash
+    env:
+      ARTIFACT_ID: ${{ inputs.candidate-artifact-id }}
+    run: |
+      [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::Expected one preparation artifact ID'; exit 1; }
+  - name: Download only the preparation artifact from this run
+    if: ${{ inputs.operation == 'validate' }}
+    uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+    with:
+      artifact-ids: ${{ inputs.candidate-artifact-id }}
+      path: ${{ runner.temp }}/node-repair-candidate
+      digest-mismatch: error
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
     with:
       python-version: '3.13'
@@ -53,18 +70,18 @@ runs:
       REPAIR_SELECTIONS: ${{ inputs.selections }}
     run: python "$GITHUB_ACTION_PATH/../runtime/repair.py" guard
   - name: Resolve the declared preparation toolchain
-    if: ${{ inputs.operation == 'prepare' }}
+    if: ${{ inputs.operation != 'guard' }}
     shell: bash
     run: |
       set -euo pipefail
       python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV" --resolved-config "$RUNNER_TEMP/node-repair-config.json"
   - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-    if: ${{ inputs.operation == 'prepare' }}
+    if: ${{ inputs.operation != 'guard' }}
     with:
       node-version: ${{ env.NODE_AUDIT_NODE_VERSION }}
       check-latest: true
   - name: Enable the declared package manager
-    if: ${{ inputs.operation == 'prepare' }}
+    if: ${{ inputs.operation != 'guard' }}
     shell: bash
     run: corepack enable
   - name: Prepare and seal the selected candidate
@@ -88,3 +105,20 @@ runs:
         ${{ runner.temp }}/node-repair-candidate/candidate.patch
         ${{ runner.temp }}/node-repair-candidate/audit.json
         ${{ runner.temp }}/node-repair-candidate/result.md
+  - name: Validate the selected candidate
+    if: ${{ inputs.operation == 'validate' }}
+    shell: bash
+    env:
+      REPAIR_REQUEST: ${{ inputs.request-id }}
+      REPAIR_PR: ${{ inputs.pull-request }}
+      REPAIR_HEAD: ${{ inputs.expected-head }}
+      REPAIR_BASE: ${{ inputs.expected-base }}
+      REPAIR_SELECTIONS: ${{ inputs.selections }}
+    run: python "$GITHUB_ACTION_PATH/../runtime/repair.py" validate --artifact "$RUNNER_TEMP/node-repair-candidate" --evidence "$RUNNER_TEMP/node-repair-validation"
+  - name: Retain human validation evidence only
+    if: ${{ always() && inputs.operation == 'validate' }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: node-repair-validation-${{ inputs.request-id }}
+      if-no-files-found: warn
+      path: ${{ runner.temp }}/node-repair-validation/

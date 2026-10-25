@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import yaml
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_pnpm_repair(project, command, version):
@@ -217,6 +217,130 @@ def check_npm_policy(version):
             return "passed (project, user and environment configuration)"
 
 
+def check_selected_validation(version):
+    """Exercise the real prepare/consume/frozen-check path in disposable Git."""
+    repair = runpy.run_path(str(ROOT / "runtime/repair.py"))
+    with tempfile.TemporaryDirectory(prefix="selected-validation-") as temporary:
+        root = Path(temporary)
+        checkout = root / "checkout"
+        checkout.mkdir()
+        (checkout / ".github").mkdir()
+        (checkout / ".github/node-maintenance.json").write_text(
+            '{"directory":".","validationScript":"check"}'
+        )
+        (checkout / ".gitignore").write_text("node_modules/\n")
+        (checkout / ".nvmrc").write_text(
+            subprocess.check_output(["node", "--version"], text=True).strip()
+        )
+        (checkout / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "selected-validation",
+                    "private": True,
+                    "packageManager": f"pnpm@{version}",
+                    "dependencies": {"launch-editor": "^2.14.1"},
+                    "scripts": {"check": "node check.cjs"},
+                }
+            )
+        )
+        (checkout / "pnpm-workspace.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "packages": ["."],
+                    "minimumReleaseAge": 14400,
+                    "overrides": {"launch-editor": "2.14.1"},
+                }
+            )
+        )
+        (checkout / "check.cjs").write_text(
+            "const fs=require('node:fs');\n"
+            "require('node:assert/strict').equal(typeof require('launch-editor'),'function');\n"
+            "fs.writeFileSync(process.env.REPAIR_TEST_MARKER,'checked');\n"
+            "if(process.env.REPAIR_TEST_MODE==='fail')process.exit(1);\n"
+            "if(process.env.REPAIR_TEST_MODE==='drift')fs.appendFileSync('pnpm-lock.yaml','\\n# project changed lock\\n');\n"
+            "if(process.env.REPAIR_TEST_MODE==='tamper')for(const name of ['candidate.patch','result.md'])"
+            "fs.writeFileSync(process.env.REPAIR_TEST_ARTIFACT+'/'+name,'forged');\n"
+        )
+        subprocess.run(
+            ["corepack", "pnpm", *repair["CANDIDATE_INSTALL"]],
+            cwd=checkout,
+            check=True,
+            timeout=180,
+        )
+        for args in (
+            ["init", "-q"],
+            ["add", "."],
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        ):
+            subprocess.run(["git", *args], cwd=checkout, check=True)
+        expected = dict(
+            id="12345678-1234-1234-1234-123456789abc",
+            repository="example/fixture",
+            pr=1,
+            head=subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip(),
+            base="b" * 40,
+            selections=[{"name": "launch-editor", "from": "2.14.1", "to": "2.14.2"}],
+        )
+        previous = Path.cwd()
+        try:
+            os.chdir(checkout)
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(root)}):
+                artifact = root / "prepared"
+                repair["prepare"](expected, artifact)
+                sealed = {p.name: p.read_bytes() for p in artifact.iterdir()}
+                for mode in ("pass", "fail", "drift", "tamper"):
+                    subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], check=True)
+                    downloaded = root / f"download-{mode}"
+                    shutil.copytree(artifact, downloaded)
+                    marker = root / f"checked-{mode}"
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "REPAIR_TEST_MODE": mode,
+                            "REPAIR_TEST_MARKER": str(marker),
+                            "REPAIR_TEST_ARTIFACT": str(downloaded),
+                        },
+                    ):
+                        try:
+                            repair["validate"](
+                                expected, downloaded, root / f"evidence-{mode}"
+                            )
+                        except ValueError as error:
+                            assert mode in ("fail", "drift"), str(error)
+                            assert (
+                                "checks failed"
+                                if mode == "fail"
+                                else "changed dependency"
+                            ) in str(error)
+                        else:
+                            assert mode in ("pass", "tamper")
+                    assert marker.exists(), "Configured project check did not run"
+                    assert {
+                        p.name: p.read_bytes() for p in artifact.iterdir()
+                    } == sealed
+                    assert (
+                        subprocess.check_output(
+                            ["git", "rev-parse", "HEAD"], text=True
+                        ).strip()
+                        == expected["head"]
+                    )
+        finally:
+            os.chdir(previous)
+        return "passed (real frozen install, configured checks, failure, drift and immutable original artifact)"
+
+
 def check(node, manager, version):
     with tempfile.TemporaryDirectory(prefix="node-maintenance-") as temporary:
         root = Path(temporary)
@@ -326,6 +450,7 @@ def check(node, manager, version):
             result["selected_repair_preparation"] = check_pnpm_repair(
                 project, command, version
             )
+            result["selected_repair_validation"] = check_selected_validation(version)
         if manager == "npm":
             result["inherited_npm_security_policy"] = check_npm_policy(version)
         return result
