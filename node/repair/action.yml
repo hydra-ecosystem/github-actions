@@ -1,0 +1,90 @@
+name: Node repair candidate
+description: Guard or prepare a selected pnpm candidate without project scripts or publication.
+inputs:
+  operation:
+    description: guard or prepare.
+    required: true
+  request-id:
+    required: true
+    description: App request UUID.
+  pull-request:
+    required: true
+    description: Managed pull request number.
+  expected-head:
+    required: true
+    description: Selected PR head SHA.
+  expected-base:
+    required: true
+    description: Selected PR base SHA.
+  selections:
+    required: true
+    description: Canonical selected package/version triples.
+outputs:
+  candidate-artifact-id:
+    description: Immutable preparation artifact ID from this run.
+    value: ${{ steps.candidate.outputs.artifact-id }}
+runs:
+  using: composite
+  steps:
+  - name: Validate the requested operation
+    shell: bash
+    env:
+      OPERATION: ${{ inputs.operation }}
+    run: |
+      case "$OPERATION" in
+        guard|prepare) ;;
+        *) echo '::error::Expected guard or prepare'; exit 1 ;;
+      esac
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+    with:
+      python-version: '3.13'
+  - name: Install configuration and audit parser
+    shell: bash
+    run: python -I -m pip install PyYAML==6.0.3
+  - name: Recheck the selected PR
+    if: ${{ inputs.operation == 'guard' }}
+    shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPAIR_REQUEST: ${{ inputs.request-id }}
+      REPAIR_PR: ${{ inputs.pull-request }}
+      REPAIR_HEAD: ${{ inputs.expected-head }}
+      REPAIR_BASE: ${{ inputs.expected-base }}
+      REPAIR_SELECTIONS: ${{ inputs.selections }}
+    run: python "$GITHUB_ACTION_PATH/../runtime/repair.py" guard
+  - name: Resolve the declared preparation toolchain
+    if: ${{ inputs.operation == 'prepare' }}
+    shell: bash
+    run: |
+      set -euo pipefail
+      python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV" --resolved-config "$RUNNER_TEMP/node-repair-config.json"
+  - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    if: ${{ inputs.operation == 'prepare' }}
+    with:
+      node-version: ${{ env.NODE_AUDIT_NODE_VERSION }}
+      check-latest: true
+  - name: Enable the declared package manager
+    if: ${{ inputs.operation == 'prepare' }}
+    shell: bash
+    run: corepack enable
+  - name: Prepare and seal the selected candidate
+    if: ${{ inputs.operation == 'prepare' }}
+    shell: bash
+    env:
+      REPAIR_REQUEST: ${{ inputs.request-id }}
+      REPAIR_PR: ${{ inputs.pull-request }}
+      REPAIR_HEAD: ${{ inputs.expected-head }}
+      REPAIR_BASE: ${{ inputs.expected-base }}
+      REPAIR_SELECTIONS: ${{ inputs.selections }}
+    run: python "$GITHUB_ACTION_PATH/../runtime/repair.py" prepare --artifact "$RUNNER_TEMP/node-repair-candidate"
+  - name: Seal the preparation artifact
+    id: candidate
+    if: ${{ inputs.operation == 'prepare' }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    with:
+      name: node-repair-candidate-${{ inputs.request-id }}
+      if-no-files-found: error
+      path: |
+        ${{ runner.temp }}/node-repair-candidate/candidate.patch
+        ${{ runner.temp }}/node-repair-candidate/audit.json
+        ${{ runner.temp }}/node-repair-candidate/result.md
