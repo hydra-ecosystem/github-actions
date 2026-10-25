@@ -126,6 +126,41 @@ This change is local and unreleased. Before testing the reviewed revision live:
 No live permission, database, deployment or repository change is performed by
 these instructions. The local/native tests cannot replace that acceptance.
 
+## Candidate preparation boundary
+
+The reusable `.github/workflows/node-repair.yml` currently enables only `guard`
+and `prepare`. It accepts the existing five request inputs and returns
+`candidate-artifact-id` for the immutable artifact created in that run.
+It does not install a caller or enable repairs in an existing repository.
+
+The read-only guard fetches the canonical repository and managed PR again.
+It checks bot authorship, the same repository, maintenance branch, default
+branch, exact head/base, revision marker and selected versions. It does not
+require the old idle Check identity after the App has admitted the request.
+
+Preparation checks out only the expected head without persisted credentials.
+It uses the configured toolchain, existing audit engine, release cooldown and
+parent/direct constraint evidence. Lifecycle and local/global pnpmfile hooks
+are disabled during metadata reads, audit and lockfile-only resolution.
+Unselected versions, unrelated lockfile metadata and changed peer suffixes
+fail preparation. No project validation script runs in this job.
+
+The preparation artifact contains exactly three regular files:
+
+- `candidate.patch`: only the selected project's `pnpm-workspace.yaml` and
+  `pnpm-lock.yaml` changes, exported with external diff and text conversion off.
+- `audit.json`: a version-1 envelope containing the exact request, normalized
+  project directory, structured before audit and candidate audit.
+- `result.md`: the shared package report. It states that project validation and
+  dependency publication have not run.
+
+The envelope rejects missing/extra fields, mismatched request or project,
+unsupported versions, symlinked project parents, unconfirmed selected fixes and
+new findings. Later consumers must download by the returned artifact ID from
+the same run. A preparation success is not proof of a validated or published
+repair. Separate validation, publication and normal-audit retention remain
+later slices, followed by the isolated live repair gate and general rollout.
+
 ## Check the receiver locally
 
 Use Node 24 and run these commands from `repair-app/`:
