@@ -1,4 +1,4 @@
-"""Selection/report contract tests; no repair execution or publication."""
+"""Selection, candidate and read-only validation contracts; no publication."""
 
 import copy
 import json
@@ -845,7 +845,7 @@ def test_patch_export_never_executes_repository_diff_helpers(monkeypatch, tmp_pa
     assert not (tmp_path / "helper-executed").exists()
 
 
-def test_repair_workflow_uses_trusted_code_and_has_only_read_only_preparation():
+def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
     workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
     action = yaml.safe_load((ROOT / "node/repair/action.yml").read_text())
     assert set(workflow["on"]["workflow_call"]["inputs"]) == {
@@ -855,7 +855,7 @@ def test_repair_workflow_uses_trusted_code_and_has_only_read_only_preparation():
         "expected-base",
         "selections",
     }
-    assert set(workflow["jobs"]) == {"guard", "prepare"}
+    assert set(workflow["jobs"]) == {"guard", "prepare", "validate"}
     for job in workflow["jobs"].values():
         assert set(job["permissions"].values()) == {"read"}
         assert any(step.get("uses") == "$/node/repair" for step in job["steps"])
@@ -875,10 +875,33 @@ def test_repair_workflow_uses_trusted_code_and_has_only_read_only_preparation():
         "audit.json",
         "result.md",
     ]
-    assert not any(
-        "validate" in step.get("run", "") or "publish" in step.get("run", "")
-        for step in action["runs"]["steps"]
+    validation = workflow["jobs"]["validate"]
+    assert validation["needs"] == "prepare"
+    assert validation["steps"][0]["with"] == checkout["with"]
+    assert (
+        validation["steps"][1]["with"]["candidate-artifact-id"]
+        == "${{ needs.prepare.outputs.candidate-artifact-id }}"
     )
+    assert (
+        workflow["on"]["workflow_call"]["outputs"]["candidate-artifact-id"]["value"]
+        == "${{ jobs.prepare.outputs.candidate-artifact-id }}"
+    )
+    download = next(
+        step
+        for step in action["runs"]["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert set(download["with"]) == {"artifact-ids", "path", "digest-mismatch"}
+    assert download["with"]["artifact-ids"] == "${{ inputs.candidate-artifact-id }}"
+    assert download["with"]["digest-mismatch"] == "error"
+    assert upload["if"] == "${{ inputs.operation == 'prepare' }}"
+    human = next(
+        step
+        for step in action["runs"]["steps"]
+        if step.get("name") == "Retain human validation evidence only"
+    )
+    assert human["with"]["path"] == "${{ runner.temp }}/node-repair-validation/"
+    assert "publish" not in workflow["jobs"]
 
 
 def test_parser_install_isolated_from_checkout_module_shadowing(tmp_path):
@@ -923,3 +946,215 @@ def test_parser_install_isolated_from_checkout_module_shadowing(tmp_path):
         )
         assert result.returncode == 0, result.stderr
         assert marker.exists() is shadowed
+
+
+@pytest.fixture
+def sealed_checkout(monkeypatch, tmp_path):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    before = repair_files(root)
+    (root / ".github").mkdir()
+    (root / ".github/node-maintenance.json").write_text('{"validationScript":"check"}')
+    (root / "unrelated.txt").write_text("unchanged\n")
+    subprocess.run(["git", "init", "-q"], check=True)
+    subprocess.run(["git", "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    expected = dict(repair_request(), head=REPAIR["git"]("rev-parse", "HEAD").strip())
+    repair_files(root, ITEM["to"])
+    artifact = tmp_path / "candidate"
+    artifact.mkdir()
+    (artifact / "candidate.patch").write_bytes(
+        REPAIR["export_patch"](["pnpm-workspace.yaml", "pnpm-lock.yaml"])
+    )
+    (artifact / "audit.json").write_text(json.dumps(dict(envelope(), request=expected)))
+    (artifact / "result.md").write_text("Original preparation report\n")
+    subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], check=True)
+    module = REPAIR["validate"].__globals__
+    monkeypatch.setitem(
+        module, "project_context", lambda: (root, {"validationScript": "check"}, before)
+    )
+    return root, artifact, before, expected
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        None,
+        "extra-member",
+        "missing-member",
+        "symlink",
+        "directory",
+        "wrong-request",
+        "empty-patch",
+        "extra-path",
+        "mode",
+        "delete",
+        "rename",
+        "copy",
+        "absolute",
+        "traversal",
+    ],
+)
+def test_candidate_consumption_uses_native_git_scope_before_execution(
+    sealed_checkout, problem
+):
+    root, artifact, before, expected = sealed_checkout
+    patch = artifact / "candidate.patch"
+    if problem == "extra-member":
+        (artifact / "extra").touch()
+    elif problem == "missing-member":
+        (artifact / "result.md").unlink()
+    elif problem in ("symlink", "directory"):
+        (artifact / "result.md").unlink()
+        if problem == "symlink":
+            (artifact / "result.md").symlink_to(root / "unrelated.txt")
+        else:
+            (artifact / "result.md").mkdir()
+    elif problem == "wrong-request":
+        data = json.loads((artifact / "audit.json").read_text())
+        data["request"]["id"] = "0" * 36
+        (artifact / "audit.json").write_text(json.dumps(data))
+    elif problem == "empty-patch":
+        patch.write_text("")
+    elif problem == "extra-path":
+        (root / "unrelated.txt").write_text("changed\n")
+        patch.write_bytes(
+            patch.read_bytes() + REPAIR["export_patch"](["unrelated.txt"])
+        )
+        subprocess.run(["git", "checkout", "--", "unrelated.txt"], check=True)
+    elif problem == "mode":
+        patch.write_text(
+            patch.read_text().replace(
+                "index ", "old mode 100644\nnew mode 100755\nindex ", 1
+            )
+        )
+    elif problem == "delete":
+        (root / "pnpm-lock.yaml").unlink()
+        patch.write_bytes(REPAIR["export_patch"](["pnpm-lock.yaml"]))
+        subprocess.run(["git", "checkout", "--", "pnpm-lock.yaml"], check=True)
+    elif problem in ("rename", "copy"):
+        patch.write_text(
+            f"diff --git a/pnpm-lock.yaml b/other.yaml\nsimilarity index 100%\n{problem} from pnpm-lock.yaml\n{problem} to other.yaml\n"
+        )
+    elif problem in ("absolute", "traversal"):
+        name = "/tmp/outside.yaml" if problem == "absolute" else "../outside.yaml"
+        patch.write_text(
+            patch.read_text()
+            .replace("a/pnpm-lock.yaml", "a/" + name)
+            .replace("b/pnpm-lock.yaml", "b/" + name)
+        )
+    if problem:
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            REPAIR["apply_candidate"](expected, artifact, root, before)
+        assert ENGINE["valid_snapshot"](root) == before
+    else:
+        _, candidate = REPAIR["apply_candidate"](expected, artifact, root, before)
+        REPAIR["check_scope"](before, candidate, expected["selections"])
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        None,
+        "install-failure",
+        "check-failure",
+        "install-drift",
+        "check-drift",
+        "policy-mode",
+        "lock-symlink",
+        "config-drift",
+        "new-config",
+        "audit-drift",
+        "malformed-audit",
+        "selected-remains",
+        "new-finding",
+        "artifact-tamper",
+    ],
+)
+def test_validation_fails_closed_and_never_reseals_candidate(
+    monkeypatch, sealed_checkout, tmp_path, problem
+):
+    import shutil
+
+    root, original, _, expected = sealed_checkout
+    original_bytes = {p.name: p.read_bytes() for p in original.iterdir()}
+    artifact = tmp_path / "downloaded"
+    shutil.copytree(original, artifact)
+    module = REPAIR["validate"].__globals__
+    commands = []
+
+    def command(directory, *args, **kwargs):
+        commands.append(args)
+        install = args[0] == "install"
+        if problem == ("install-drift" if install else "check-drift"):
+            with (root / "pnpm-lock.yaml").open("a") as stream:
+                stream.write("\n# changed by project\n")
+        if not install:
+            if problem == "config-drift":
+                (root / ".github/node-maintenance.json").write_text("{}")
+            elif problem == "new-config":
+                (root / ".npmrc").write_text("ignore-scripts=true")
+            elif problem == "policy-mode":
+                (root / "pnpm-workspace.yaml").chmod(0o755)
+            elif problem == "lock-symlink":
+                lock = root / "pnpm-lock.yaml"
+                saved = tmp_path / "lock-copy"
+                saved.write_bytes(lock.read_bytes())
+                lock.unlink()
+                lock.symlink_to(saved)
+            elif problem == "artifact-tamper":
+                (artifact / "candidate.patch").write_text("forged patch\n")
+                (artifact / "result.md").write_text("forged success\n")
+        return SimpleNamespace(
+            returncode=int(
+                problem == ("install-failure" if install else "check-failure")
+            ),
+            stdout="test output",
+            stderr="",
+        )
+
+    def audit(*args, **kwargs):
+        if problem == "audit-drift":
+            (root / "pnpm-workspace.yaml").write_text("{}")
+        if problem == "malformed-audit":
+            return "unavailable"
+        if problem in ("selected-remains", "new-finding"):
+            result = repair_audit()
+            if problem == "new-finding":
+                result["advisories"]["1"]["url"] += "-new"
+                result["vulnerabilities"][ITEM["name"]]["via"][0]["url"] += "-new"
+            return result
+        return empty_audit()
+
+    monkeypatch.setitem(module["ENGINE"], "run", command)
+    monkeypatch.setitem(module["ENGINE"], "audit", audit)
+    evidence = tmp_path / "human-evidence"
+    if problem in (None, "artifact-tamper"):
+        REPAIR["validate"](expected, artifact, evidence)
+        assert commands == [("install", "--frozen-lockfile"), ("run", "check")]
+        assert "Validation passed" in (evidence / "result.md").read_text()
+        assert "forged" not in (evidence / "result.md").read_text()
+    else:
+        with pytest.raises(ValueError):
+            REPAIR["validate"](expected, artifact, evidence)
+        assert "Validation failed" in (evidence / "result.md").read_text()
+        if problem.startswith("install-"):
+            assert len(commands) == 1
+    assert not (evidence / "candidate.patch").exists()
+    assert {p.name: p.read_bytes() for p in original.iterdir()} == original_bytes
+    assert REPAIR["git"]("rev-parse", "HEAD").strip() == expected["head"]
