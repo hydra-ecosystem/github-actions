@@ -104,6 +104,13 @@ if [ "$PROPOSAL_KIND" != legacy ]; then
   pr_title="${pr_title/Node:/Node $PROPOSAL_KIND:}"
 fi
 printf '\n%s\n' "$PR_FOOTER" >> "$body_file"
+python3 -I - "$body_file" <<'PY'
+from pathlib import Path
+import sys
+length = len(Path(sys.argv[1]).read_text())
+if length > 65536:
+    raise SystemExit(f"::error::PR body exceeds 65536 characters ({length})")
+PY
 pr_number=$(gh pr list --state open --head "$PR_BRANCH" --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository == false)][0].number // empty')
 if [ "$REFRESH_ONLY" = true ] && { [ -z "${EXPECTED_PR:-}" ] || [ "$pr_number" != "$EXPECTED_PR" ]; }; then
   echo 'The original proposal is no longer open; refresh will not create or replace a PR.'
@@ -163,7 +170,9 @@ else
       fi
     fi
   fi
-  git commit -m 'Node dependency audit and upgrades'
+  commit_args=(-m 'Node dependency audit and upgrades')
+  if [ -n "${NODE_AUDIT_HISTORY_TRAILERS:-}" ]; then commit_args+=(-m "$NODE_AUDIT_HISTORY_TRAILERS"); fi
+  git commit "${commit_args[@]}"
   current_base
   if [ "$PROPOSAL_KIND" != legacy ] && [ -n "$pr_number" ] && ! still_open; then
     echo 'The proposal was closed or merged during the audit; no branch update published.'

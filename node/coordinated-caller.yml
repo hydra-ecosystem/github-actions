@@ -35,6 +35,8 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      actions: read
+      checks: read
     uses: __CENTRAL_REPOSITORY__/.github/workflows/node-maintenance.yml@__CENTRAL_REVISION__
     with:
       audit-kind: ${{ inputs.audit-kind || 'auto' }}
