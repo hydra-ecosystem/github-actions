@@ -1,14 +1,18 @@
 """Prepare a best-effort npm or pnpm upgrade report for one standalone Node project."""
 
 import argparse
+import base64
 import copy
 import hashlib
 import html
 import json
+import os
 import re
 import runpy
 import subprocess
 import time
+import zipfile
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3184,6 +3188,7 @@ def prepare(
     upgrade_scope="major",
     local_patches=None,
     validate_only=False,
+    prepare_only=False,
     platform=None,
 ) -> str:
     # Leave time in the 60-minute job to write and upload a partial report.
@@ -3494,12 +3499,18 @@ def prepare(
         if package_manager == "pnpm"
         else ["ci", "--no-audit"]
     )
-    install = run(directory, *install_args, deadline=deadline)
+    install = (
+        subprocess.CompletedProcess([], 1, "", "")
+        if prepare_only
+        else run(directory, *install_args, deadline=deadline)
+    )
     invalid_install_state = restore_invalid_state(
         directory, validation_snapshot, notes, "Frozen install", frozen=True
     )
     last_valid_snapshot = valid_snapshot(directory) or validation_snapshot
-    if install.returncode or invalid_install_state:
+    if prepare_only:
+        check_status = "Pending: separate prepared-candidate validation."
+    elif install.returncode or invalid_install_state:
         check_status = (
             f"Not run: {package_manager} frozen install failed "
             f"(exit {install.returncode}); validation failed."
@@ -3806,7 +3817,11 @@ def prepare(
     if not proposed_changes:
         proposed_changes = "No dependency version changes are proposed."
     install_status = (
-        "Passed." if not install.returncode and not invalid_install_state else "Failed."
+        "Not run: separate prepared-candidate validation."
+        if prepare_only
+        else "Passed."
+        if not install.returncode and not invalid_install_state
+        else "Failed."
     )
     if check_status.startswith("Proposal discarded:"):
         install_status = (
@@ -3945,12 +3960,328 @@ def prepare(
         + f"### Candidate dependency files (SHA-256)\n\n{fingerprints}\n\n</details>\n"
     )
     if validate_only:
+        status = (
+            "Pending"
+            if prepare_only
+            else "Passed"
+            if check_status == "Passed."
+            else "Failed"
+        )
         report = (
-            f"**Committed dependency validation · {'Passed' if check_status == 'Passed.' else 'Failed'}**\n\n"
+            f"**Committed dependency validation · {status}**\n\n"
             "Checked committed dependencies without attempting repairs or routine upgrades.\n\n"
             + report.partition("\n")[2]
         )
+    if prepare_only and not audit_errors:
+        record = {
+            "version": 1,
+            "repository": os.environ["GITHUB_REPOSITORY"],
+            "source": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True
+            ).strip(),
+            "project": directory.as_posix(),
+            "manager": package_manager,
+            "node": os.environ["NODE_AUDIT_NODE_VERSION"],
+            "manager_version": os.environ["NODE_AUDIT_MANAGER_VERSION"],
+            "validation_script": validation_script,
+            "before_state": dependency_state(initial_snapshot),
+            "candidate_state": dependency_state(after_snapshot),
+            "before": before,
+            "after": after,
+            "package_report": package_report,
+            "fixed_ids": sorted(fixed_ids),
+            "initial_ids": sorted(initial_ids or ()),
+            "remaining_ids": sorted(remaining_ids or ()),
+        }
+        encoded = base64.b64encode(canonical_history(record)).decode("ascii")
+        if len(encoded) > 524288:
+            raise ValueError("Historical audit evidence exceeds its bound")
+        report += f"\n<!-- node-audit-history:v1:{encoded} -->\n"
+        heading, separator, tail = report.partition("\n")
+        report = (
+            heading.replace("Validation failed or unavailable", "Validation pending")
+            + separator
+            + tail.replace(
+                "⚪ Upgrade validation failed or unavailable: **Node.js**",
+                "⚪ Upgrade validation pending: **Node.js**",
+                1,
+            )
+        )
+        if len(report.encode()) > 1048576:
+            raise ValueError("Audit report exceeds its bound")
     return report
+
+
+HISTORY_TITLE = "Node audit evidence v1"
+HISTORY_PATTERN = re.compile(
+    r"^<!-- node-audit-history:v1:([A-Za-z0-9+/=]+) -->$", re.M
+)
+
+
+def canonical_history(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+
+
+def dependency_state(snapshot):
+    return {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in sorted({"package.json": snapshot[0], **snapshot[1]}.items())
+    }
+
+
+def history_record(report):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate history field")
+            result[key] = value
+        return result
+
+    if len(report) > 1048576:
+        raise ValueError("Audit report exceeds its bound")
+    text = report.decode("utf-8")
+    matches = HISTORY_PATTERN.findall(text)
+    if (
+        len(matches) != 1
+        or text.count("node-audit-history:") != 1
+        or len(matches[0]) > 524288
+    ):
+        raise ValueError("Missing or ambiguous sealed audit history")
+    raw = base64.b64decode(matches[0], validate=True)
+    record = json.loads(raw, object_pairs_hook=unique)
+    if (
+        canonical_history(record) != raw
+        or not isinstance(record, dict)
+        or type(record.get("version")) is not int
+        or record["version"] != 1
+    ):
+        raise ValueError("Noncanonical or unsupported audit history")
+    return record
+
+
+def check_prepared_history(report, directory):
+    record = history_record(report)
+    if (
+        record["repository"] != os.environ["GITHUB_REPOSITORY"]
+        or record["source"]
+        != subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        or record["project"] != directory.as_posix()
+        or record["candidate_state"] != dependency_state(valid_snapshot(directory))
+    ):
+        raise ValueError(
+            "Prepared dependencies or project identity differ from sealed evidence"
+        )
+    return record
+
+
+def history_api(repository, suffix, *, binary=False):
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repository}/{suffix}"],
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+    if len(result.stdout) > (8388608 if binary else 1048576):
+        raise ValueError("Historical evidence API response exceeds its bound")
+    return result.stdout if binary else json.loads(result.stdout)
+
+
+def verify_history(
+    locator,
+    *,
+    repository,
+    source,
+    project,
+    candidate_state,
+    trusted_workflow_sha,
+    expected_job_name,
+):
+    required = {"run", "job", "check", "artifact", "archive_sha256", "content_sha256"}
+    if (
+        set(locator) != required
+        or any(
+            type(locator[k]) is not int or locator[k] <= 0
+            for k in ("run", "job", "check", "artifact")
+        )
+        or any(
+            not isinstance(locator[k], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", locator[k])
+            for k in ("archive_sha256", "content_sha256")
+        )
+    ):
+        raise ValueError("Invalid exact historical evidence locator")
+    run = history_api(repository, f"actions/runs/{locator['run']}")
+    job = history_api(repository, f"actions/jobs/{locator['job']}")
+    check_url = (
+        f"https://api.github.com/repos/{repository}/check-runs/{locator['check']}"
+    )
+    jobs = history_api(
+        repository,
+        f"actions/runs/{locator['run']}/attempts/{run['run_attempt']}/jobs?per_page=100",
+    )
+    workflows = [
+        w
+        for w in run.get("referenced_workflows", [])
+        if w.get("path", "").split("@")[0]
+        == "hydra-ecosystem/github-actions/.github/workflows/node-audit.yml"
+    ]
+    steps = [
+        (step.get("name"), step.get("conclusion")) for step in job.get("steps", [])
+    ]
+    expected_steps = [
+        ("Prepare and seal audit evidence", "success"),
+        ("Seal uploaded audit evidence", "success"),
+    ]
+    relevant = [
+        step for step in steps if step[0] in {name for name, _ in expected_steps}
+    ]
+    if (
+        run.get("repository", {}).get("full_name") != repository
+        or run.get("head_sha") != source
+        or run.get("event") not in {"push", "schedule", "workflow_dispatch"}
+        or len(workflows) != 1
+        or workflows[0].get("sha") != trusted_workflow_sha
+        or job.get("id") != locator["job"]
+        or job.get("run_id") != locator["run"]
+        or job.get("head_sha") != source
+        or job.get("run_attempt") != run["run_attempt"]
+        or job.get("name") != expected_job_name
+        or job.get("check_run_url") != check_url
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+        or jobs.get("total_count", 100) >= 100
+        or [
+            j.get("id")
+            for j in jobs.get("jobs", [])
+            if j.get("name") == expected_job_name
+        ]
+        != [locator["job"]]
+        or relevant != expected_steps
+    ):
+        raise ValueError(
+            "Historical evidence does not identify the trusted producer job"
+        )
+    check = history_api(repository, f"check-runs/{locator['check']}")
+    annotations = history_api(
+        repository, f"check-runs/{locator['check']}/annotations?per_page=100"
+    )
+    notices = [a for a in annotations if a.get("title") == HISTORY_TITLE]
+    message = f"v1:{locator['artifact']}:{locator['archive_sha256']}:{locator['content_sha256']}"
+    if (
+        check.get("id") != locator["check"]
+        or check.get("head_sha") != source
+        or check.get("app", {}).get("id") != 15368
+        or check.get("details_url") != job.get("html_url")
+        or check.get("output", {}).get("annotations_count", 100) >= 100
+        or len(notices) != 1
+        or notices[0].get("annotation_level") != "notice"
+        or notices[0].get("message") != message
+    ):
+        raise ValueError("Missing or ambiguous producer seal annotation")
+    artifact = history_api(repository, f"actions/artifacts/{locator['artifact']}")
+    if (
+        artifact.get("id") != locator["artifact"]
+        or artifact.get("expired") is not False
+        or type(artifact.get("size_in_bytes")) is not int
+        or not 0 < artifact["size_in_bytes"] <= 8388608
+        or artifact.get("digest") != "sha256:" + locator["archive_sha256"]
+        or artifact.get("workflow_run", {}).get("id") != locator["run"]
+        or artifact.get("workflow_run", {}).get("head_sha") != source
+    ):
+        raise ValueError("Historical artifact metadata differs from its producer seal")
+    archive = history_api(
+        repository, f"actions/artifacts/{locator['artifact']}/zip", binary=True
+    )
+    if (
+        len(archive) != artifact["size_in_bytes"]
+        or hashlib.sha256(archive).hexdigest() != locator["archive_sha256"]
+    ):
+        raise ValueError("Historical archive digest differs")
+    with zipfile.ZipFile(BytesIO(archive)) as bundle:
+        entries = bundle.infolist()
+        if (
+            len(entries) != 1
+            or entries[0].filename != "dependency-audit-pr.md"
+            or entries[0].file_size > 1048576
+        ):
+            raise ValueError("Unexpected historical artifact members or size")
+        report = bundle.read(entries[0])
+    if hashlib.sha256(report).hexdigest() != locator["content_sha256"]:
+        raise ValueError("Historical report digest differs")
+    record = history_record(report)
+    if (
+        record["repository"],
+        record["source"],
+        record["project"],
+        record["candidate_state"],
+    ) != (repository, source, project, candidate_state):
+        raise ValueError(
+            "Historical record belongs to different dependencies or project"
+        )
+    return record
+
+
+def locate_current_history(report, directory, *, trusted_workflow_sha, prefix):
+    repository = os.environ["GITHUB_REPOSITORY"]
+    record = check_prepared_history(report, directory)
+    run_id = int(os.environ["GITHUB_RUN_ID"])
+    jobs = history_api(repository, f"actions/runs/{run_id}/jobs?per_page=100")
+    producer_name = f"Node audit evidence ({prefix or 'dependency-audit'})"
+    matches = [
+        job
+        for job in jobs.get("jobs", [])
+        if job.get("name") == producer_name
+        or job.get("name", "").endswith(" / " + producer_name)
+    ]
+    if jobs.get("total_count", 100) >= 100 or len(matches) != 1:
+        raise ValueError("Missing or ambiguous expected producer job")
+    job = matches[0]
+    check_id = int(job["check_run_url"].rsplit("/", 1)[-1])
+    if (
+        job["check_run_url"]
+        != f"https://api.github.com/repos/{repository}/check-runs/{check_id}"
+    ):
+        raise ValueError("Producer Check locator is not server-derived")
+    annotations = history_api(
+        repository, f"check-runs/{check_id}/annotations?per_page=100"
+    )
+    notices = [item for item in annotations if item.get("title") == HISTORY_TITLE]
+    match = (
+        re.fullmatch(
+            r"v1:([1-9][0-9]*):([a-f0-9]{64}):([a-f0-9]{64})",
+            notices[0].get("message", ""),
+        )
+        if len(notices) == 1
+        else None
+    )
+    if match is None:
+        raise ValueError("Producer has no unique artifact seal")
+    locator = {
+        "run": run_id,
+        "job": job["id"],
+        "check": check_id,
+        "artifact": int(match[1]),
+        "archive_sha256": match[2],
+        "content_sha256": match[3],
+    }
+    verified = verify_history(
+        locator,
+        repository=repository,
+        source=record["source"],
+        project=record["project"],
+        candidate_state=record["candidate_state"],
+        trusted_workflow_sha=trusted_workflow_sha,
+        expected_job_name=job["name"],
+    )
+    if (
+        verified != record
+        or hashlib.sha256(report).hexdigest() != locator["content_sha256"]
+    ):
+        raise ValueError("Publisher report differs from immutable producer evidence")
+    return locator
 
 
 def main() -> None:
@@ -3978,6 +4309,12 @@ def main() -> None:
     parser.add_argument("--node-update", type=Path)
     parser.add_argument("--local-patches-report", type=Path)
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--check-prepared", action="store_true")
+    parser.add_argument("--github-env", type=Path)
+    parser.add_argument("--locate-history", action="store_true")
+    parser.add_argument("--trusted-workflow-sha")
+    parser.add_argument("--artifact-prefix", default="")
     args = parser.parse_args()
     directory = Path(args.directory)
     if (
@@ -3990,7 +4327,101 @@ def main() -> None:
         parser.error(
             "directory must contain valid package files for one npm or pnpm deployment"
         )
+    if args.locate_history:
+        if not args.trusted_workflow_sha or not re.fullmatch(
+            r"[a-f0-9]{40}", args.trusted_workflow_sha
+        ):
+            parser.error("An immutable trusted producer source is required")
+        locator = locate_current_history(
+            args.report.read_bytes(),
+            directory,
+            trusted_workflow_sha=args.trusted_workflow_sha,
+            prefix=args.artifact_prefix,
+        )
+        trailers = "\n".join(
+            f"Node-Audit-{key.replace('_', '-')}: {value}"
+            for key, value in locator.items()
+        )
+        trailers += f"\nNode-Audit-Workflow-SHA: {args.trusted_workflow_sha}"
+        with args.github_env.open("a") as output:
+            output.write(
+                f"NODE_AUDIT_HISTORY_TRAILERS<<NODE_HISTORY_END\n{trailers}\nNODE_HISTORY_END\n"
+            )
+        text = HISTORY_PATTERN.sub("", args.report.read_text(), count=1)
+        heading, separator, tail = text.partition("\n")
+        passed = os.environ.get("VALIDATION_PASSED") == "true"
+        outcome = "Passed." if passed else "Not confirmed: separate validation failed."
+        pending = format_validation(
+            "Not run: separate prepared-candidate validation.",
+            "Pending: separate prepared-candidate validation.",
+        )
+        args.report.write_text(
+            heading.replace(
+                "Validation pending",
+                "Validation passed" if passed else "Validation failed",
+            )
+            + separator
+            + tail.replace(pending, format_validation(outcome, outcome), 1).replace(
+                "⚪ Upgrade validation pending: **Node.js**",
+                "✅ Upgrade validated: **Node.js**"
+                if passed
+                else "⚪ Upgrade validation failed or unavailable: **Node.js**",
+                1,
+            )
+        )
+        return
     validation: dict = {}
+    if args.check_prepared:
+        node_plan = None
+        if args.node_update is not None:
+            node_proposal = runpy.run_path(
+                str(Path(__file__).parents[1] / "node_proposal.py")
+            )
+            node_plan = node_proposal["read_plan"](args.node_update)
+        record = check_prepared_history(args.report.read_bytes(), directory)
+        if record.get("manager") != manager(directory) or any(
+            not isinstance(record.get(key), str)
+            or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", record[key]) is None
+            for key in ("node", "manager_version")
+        ):
+            raise ValueError(
+                "Sealed toolchain must identify exact Node and manager versions"
+            )
+        if node_plan is not None and args.github_env:
+            node_proposal["publish"](Path.cwd().resolve(), node_plan)
+            node_proposal["verify_candidate"](Path.cwd().resolve(), node_plan)
+        if args.github_env:
+            with args.github_env.open("a") as output:
+                output.write(
+                    f"NODE_AUDIT_NODE_VERSION={record['node']}\n"
+                    f"NODE_AUDIT_MANAGER={record['manager']}\n"
+                    f"NODE_AUDIT_MANAGER_VERSION={record['manager_version']}\n"
+                )
+            return
+        installed_node = subprocess.check_output(
+            ["node", "--version"], text=True, timeout=30
+        ).strip()
+        installed_manager = run(directory, "--version", deadline=time.monotonic() + 30)
+        if (
+            installed_node != f"v{record['node']}"
+            or installed_manager.returncode
+            or installed_manager.stdout.strip() != record["manager_version"]
+        ):
+            raise ValueError("Installed toolchain differs from sealed evidence")
+        prepare(
+            directory,
+            validation=validation,
+            validate_only=True,
+            validation_script=record["validation_script"],
+        )
+        if node_plan is not None:
+            node_proposal["verify_candidate"](Path.cwd().resolve(), node_plan)
+        check_prepared_history(args.report.read_bytes(), directory)
+        status = "Passed." if validation["passed"] else "Failed."
+        args.report.write_text(format_validation(status, status))
+        with args.github_output.open("a") as output:
+            output.write(f"validation_passed={str(validation['passed']).lower()}\n")
+        return
     try:
         patches = []
         node_plan = None
@@ -4019,6 +4450,7 @@ def main() -> None:
             upgrade_scope=args.upgrade_scope,
             local_patches=patches,
             validate_only=args.validate_only,
+            prepare_only=args.prepare_only,
             platform=NODE_RELEASES["collect"](node_plan),
         )
         if args.node_update is not None:
@@ -4043,6 +4475,10 @@ def main() -> None:
     if args.github_output is not None:
         with args.github_output.open("a") as output:
             output.write(f"validation_passed={str(validation['passed']).lower()}\n")
+            if args.prepare_only:
+                output.write(
+                    f"report_sha256={hashlib.sha256(report.encode()).hexdigest()}\n"
+                )
             output.write(
                 f"proposal_complete={str(validation['proposal_complete']).lower()}\n"
             )

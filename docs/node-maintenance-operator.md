@@ -248,3 +248,42 @@ it does not promise permanent deduplication after a record is deleted.
 Keep App credentials in operator storage and Worker secrets. Keep verification
 receipts outside the repository, without credentials or webhook payloads. A
 local test or dry-run bundle does not replace live delivery evidence.
+
+## Sealed normal-audit evidence
+
+The normal audit producer prepares dependency changes on a fresh read-only
+runner. It disables lifecycle scripts, local/global pnpmfile hooks and dependency
+materialization. Its parser installer runs in Python isolated mode. Project
+validation runs later on another read-only runner with the exact prepared files.
+That runner can retain check diagnostics; it cannot replace the producer artifact.
+A failed proposal check still permits a PR report with failed validation. A
+committed-state validation run fails when its project checks fail.
+
+The existing `dependency-audit-pr.md` report includes one bounded canonical
+version1 record with original audit advisories, severities, links, package rows,
+before/candidate dependency hashes and deduplicated counts. After the report
+upload succeeds, the producer emits one `Node audit evidence v1` notice on its
+existing Actions job Check. The notice binds the numeric artifact ID and archive
+and content SHA256 hashes. It requires no Checks write permission.
+
+The normal publisher resolves the expected producer job in the exact current
+run, then verifies its server-derived Check URL, immutable workflow revision,
+completed seal steps, unique matching annotation and immutable artifact digest.
+It rejects sibling-job notices, duplicate/ambiguous producer jobs, expired or
+altered artifacts and mismatched project/dependency state. Native commit trailers
+retain exact run/job/Check/artifact IDs and hashes for the later read-only repair
+consumer. Editable PR prose is not historical audit authority.
+The immutable artifact retains the canonical record while the human PR body omits
+that opaque record.
+
+Only the publisher reads Actions metadata/artifacts and Check annotations; grant
+`actions: read` and `checks: read` to its calling job, or the publisher App token.
+The producer and project-validation jobs keep Contents read only. The isolated
+pilot must provide these read grants. General caller/template permission rollout
+and fleet-check updates remain the later installation slice; this experimental
+source does not claim those installation changes are delivered.
+
+Before the cumulative repair consumer begins, verify a distinct-run hosted
+readback against the reviewed source and prove a sibling-job forgery rejects.
+Local API fixtures do not satisfy that hosted gate. Missing or expired history
+must never be reported as an empty original advisory list.

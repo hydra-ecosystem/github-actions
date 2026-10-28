@@ -6,5 +6,8 @@ runs:
   - name: Verify and stage the Node security update
     shell: bash
     run: python "$GITHUB_ACTION_PATH/../runtime/node_proposal.py" --plan "$RUNNER_TEMP/node-audit-node-update.json" --github-env "$GITHUB_ENV"
+  - name: Verify immutable normal-audit history and retain exact native locators
+    shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --locate-history --trusted-workflow-sha "$TRUSTED_WORKFLOW_SHA" --artifact-prefix "$AUDIT_ARTIFACT_PREFIX" --github-env "$GITHUB_ENV"
   - shell: bash
     run: bash "$GITHUB_ACTION_PATH/publish.sh"
