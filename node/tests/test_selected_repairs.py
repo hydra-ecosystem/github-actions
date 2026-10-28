@@ -904,12 +904,19 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
     assert "publish" not in workflow["jobs"]
 
 
-def test_parser_install_isolated_from_checkout_module_shadowing(tmp_path):
-    action = yaml.safe_load((ROOT / "node/repair/action.yml").read_text())
+@pytest.mark.parametrize(
+    "action_path,step_name",
+    [
+        ("node/repair/action.yml", "Install configuration and audit parser"),
+        ("node/audit/action.yml", "Install configuration and audit report parser"),
+    ],
+)
+def test_parser_install_isolated_from_checkout_module_shadowing(
+    tmp_path, action_path, step_name
+):
+    action = yaml.safe_load((ROOT / action_path).read_text())
     command = next(
-        step["run"]
-        for step in action["runs"]["steps"]
-        if step.get("name") == "Install configuration and audit parser"
+        step["run"] for step in action["runs"]["steps"] if step.get("name") == step_name
     )
     assert command == "python -I -m pip install PyYAML==6.0.3"
     legacy_command = command.replace("python -I -m pip", "python -m pip", 1)

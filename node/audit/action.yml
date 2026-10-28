@@ -11,18 +11,36 @@ inputs:
     description: Select an existing proposal channel on a default-branch push.
     default: 'false'
   operation:
-    description: propose or validate (read-only dependency validation).
+    description: propose, validate committed state, or check-prepared on a separate runner.
     default: propose
   proposal-kind:
     description: Verify resolved policy agrees with the selected channel.
     default: legacy
+  prepared-node:
+    description: The producer's selected Node runtime for isolated validation.
+    default: ''
 outputs:
   validation_passed:
     description: Whether frozen installation and project checks passed.
-    value: ${{ steps.proposal.outputs.validation_passed }}
+    value: ${{ steps.prepared-validation.outputs.validation_passed || steps.proposal.outputs.validation_passed }}
   proposal_complete:
     description: Whether proposal resolution and audit evidence completed.
     value: ${{ steps.proposal.outputs.proposal_complete }}
+  report_artifact_id:
+    description: Exact immutable report artifact ID.
+    value: ${{ steps.report.outputs.artifact-id }}
+  dependencies_artifact_id:
+    description: Exact immutable prepared dependency artifact ID.
+    value: ${{ steps.dependencies.outputs.artifact-id }}
+  node_update_artifact_id:
+    description: Exact immutable prepared Node update artifact ID.
+    value: ${{ steps.node-update.outputs.artifact-id }}
+  report_archive_sha256:
+    description: Uploaded report archive digest.
+    value: ${{ steps.report.outputs.artifact-digest }}
+  report_content_sha256:
+    description: Sealed report content digest.
+    value: ${{ steps.proposal.outputs.report_sha256 }}
 runs:
   using: composite
   steps:
@@ -30,9 +48,10 @@ runs:
     with:
       python-version: '3.13'
   - name: Install configuration and audit report parser
-    run: python -m pip install PyYAML==6.0.3
+    run: python -I -m pip install PyYAML==6.0.3
     shell: bash
   - name: Read project configuration
+    if: ${{ inputs.operation != 'check-prepared' }}
     env:
       AUDIT_KIND: ${{ inputs.audit-kind }}
       REFRESH: ${{ inputs.refresh }}
@@ -48,14 +67,19 @@ runs:
       esac
       python "$GITHUB_ACTION_PATH/../runtime/project.py" --github-env "$GITHUB_ENV" --resolved-config "$RUNNER_TEMP/node-audit-resolved-config.json" --configuration-report "$RUNNER_TEMP/node-audit-configuration.json" --audit-kind "$AUDIT_KIND" --node-update "$RUNNER_TEMP/node-audit-node-update.json" "${node_args[@]}" "${refresh_args[@]}"
     shell: bash
+  - name: Read the sealed prepared toolchain
+    if: ${{ inputs.operation == 'check-prepared' }}
+    shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --check-prepared --node-update "$RUNNER_TEMP/node-audit-node-update.json" --github-env "$GITHUB_ENV"
   - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
     with:
-      node-version: ${{ env.NODE_AUDIT_NODE_VERSION }}
+      node-version: ${{ inputs.prepared-node || env.NODE_AUDIT_NODE_VERSION }}
       check-latest: true
   - name: Enable the project's pinned package manager
     env:
       PACKAGE_MANAGER: ${{ env.NODE_AUDIT_MANAGER }}
       PACKAGE_MANAGER_VERSION: ${{ env.NODE_AUDIT_MANAGER_VERSION }}
+      npm_config_package_lock_only: 'false'
     run: |
       set -euo pipefail
       if [ "$PACKAGE_MANAGER" = pnpm ]; then
@@ -65,6 +89,7 @@ runs:
       fi
     shell: bash
   - name: Verify the declared toolchain before dependency changes
+    if: ${{ inputs.operation != 'check-prepared' }}
     env:
       AUDIT_KIND: ${{ inputs.audit-kind }}
       REFRESH: ${{ inputs.refresh }}
@@ -73,15 +98,18 @@ runs:
       refresh_args=()
       if [ "${REFRESH:-false}" = true ]; then refresh_args=(--refresh); fi
       python "$GITHUB_ACTION_PATH/../runtime/project.py" --verify-runtime --resolved-config "$RUNNER_TEMP/node-audit-resolved-config.json" --configuration-report "$RUNNER_TEMP/node-audit-configuration.json" --audit-kind "$AUDIT_KIND" "${refresh_args[@]}"
+      installed_node=$(node --version)
+      printf 'NODE_AUDIT_NODE_VERSION=%s\n' "${installed_node#v}" >> "$GITHUB_ENV"
     shell: bash
   - name: Retain configuration status even when preflight fails
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && inputs.operation != 'check-prepared' }}
     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
       name: ${{ inputs.artifact-prefix || 'node-audit' }}-configuration
       if-no-files-found: ignore
       path: ${{ runner.temp }}/node-audit-configuration.json
   - name: Verify the selected proposal channel
+    if: ${{ inputs.operation != 'check-prepared' }}
     env:
       PROPOSAL_KIND: ${{ inputs.proposal-kind }}
       MODE: ${{ env.NODE_AUDIT_MAINTENANCE_MODE }}
@@ -93,19 +121,25 @@ runs:
       esac
     shell: bash
   - name: Audit, propose upgrades, and validate
+    if: ${{ inputs.operation != 'check-prepared' }}
     id: proposal
     run: |
       set -euo pipefail
-      operation_args=()
+      operation_args=(--prepare-only)
       case "${OPERATION:-propose}" in
         propose) ;;
-        validate) operation_args=(--validate-only) ;;
+        validate) operation_args+=(--validate-only) ;;
         *) echo "::error::Unknown maintenance operation"; exit 1 ;;
       esac
       python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --github-output "$GITHUB_OUTPUT" --validation-script "$NODE_AUDIT_VALIDATION_SCRIPT" --maintenance-mode "$NODE_AUDIT_MAINTENANCE_MODE" --upgrade-scope "$NODE_AUDIT_UPGRADE_SCOPE" --minimum-release-age-days "$NODE_AUDIT_MINIMUM_RELEASE_AGE_DAYS" --resolved-config "$RUNNER_TEMP/node-audit-resolved-config.json" --node-update "$RUNNER_TEMP/node-audit-node-update.json" --local-patches-report "$RUNNER_TEMP/node-audit-local-patches.json" "${operation_args[@]}"
     shell: bash
     env:
       OPERATION: ${{ inputs.operation }}
+  - name: Validate the exact prepared dependencies
+    id: prepared-validation
+    if: ${{ inputs.operation == 'check-prepared' }}
+    shell: bash
+    run: python "$GITHUB_ACTION_PATH/../runtime/templates/dependency_audit.py" --directory "$NPM_PROJECT" --report "$RUNNER_TEMP/dependency-audit-pr.md" --check-prepared --node-update "$RUNNER_TEMP/node-audit-node-update.json" --github-output "$GITHUB_OUTPUT"
   - name: Retain the audit summary even when the audit fails
     if: ${{ always() && !cancelled() }}
     run: |
@@ -113,12 +147,16 @@ runs:
         cat "$RUNNER_TEMP/dependency-audit-pr.md" >> "$GITHUB_STEP_SUMMARY"
       fi
     shell: bash
-  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+  - if: ${{ inputs.operation != 'check-prepared' }}
+    id: node-update
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
       name: ${{ inputs.artifact-prefix || 'dependency-audit' }}-node-update
       if-no-files-found: error
       path: ${{ runner.temp }}/node-audit-node-update.json
-  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+  - if: ${{ inputs.operation != 'check-prepared' }}
+    id: dependencies
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
       name: ${{ inputs.artifact-prefix || 'dependency-audit' }}-dependencies
       if-no-files-found: error
@@ -127,21 +165,22 @@ runs:
         ${{ env.NPM_PROJECT }}/package-lock.json
         ${{ env.NPM_PROJECT }}/pnpm-lock.yaml
         ${{ env.NPM_PROJECT }}/pnpm-workspace.yaml
-  - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-    if: ${{ always() && !cancelled() }}
+  - if: ${{ always() && !cancelled() }}
+    id: report
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
       name: ${{ inputs.artifact-prefix || 'dependency-audit' }}-report
       if-no-files-found: ignore
       path: ${{ runner.temp }}/dependency-audit-pr.md
   - name: Retain local patch status for the issue reporter
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && inputs.operation != 'check-prepared' }}
     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
     with:
       name: ${{ inputs.artifact-prefix || 'node-audit' }}-local-patches
       if-no-files-found: ignore
       path: ${{ runner.temp }}/node-audit-local-patches.json
   - name: Fail committed-state validation when project checks fail
-    if: ${{ inputs.operation == 'validate' && steps.proposal.outputs.validation_passed != 'true' }}
+    if: ${{ inputs.operation == 'check-prepared' && steps.prepared-validation.outputs.validation_passed != 'true' }}
     run: |
       echo "::error::Default-branch validation failed; see the retained report."
       exit 1
