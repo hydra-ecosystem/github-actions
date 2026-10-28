@@ -79,3 +79,30 @@ Keep both artifact IDs and their separate contents in the acceptance record.
 Publication is not enabled yet. These gates do not pass G-REPAIR or upgrade the
 PR. Publication and retention are tested in their owning slices before the
 final Hydra rollout.
+
+## Initial normal-audit evidence acceptance
+
+Use the isolated demo repository for the reviewed producer slice. Keep the
+five repair dispatch inputs and the three-member C4 artifact unchanged. The
+normal-audit probe is a separate workflow; it is not a new repair dispatch route.
+
+Run the reviewed `node-audit.yml` workflow with a fixed artifact prefix and
+retain its exact source ref, audited head, report artifact ID, API/archive and
+content SHA256 hashes, producer job ID and server-derived Check URL. Verify that
+the producer uploaded the report before its seal notice and before the separate
+project-validation job. Poison lifecycle, local/global pnpmfile and project-check
+sentinels must not run on the producer. Validation must consume the exact prepared
+dependency hashes, and must not replace the original report artifact.
+
+Use a later read-only run with Actions and Checks read permission to verify the
+exact original artifact and producer Check annotation. In the original run,
+include a sibling job that uploads a forged report and emits the same notice
+title. A forged locator for that sibling, even with the same run and referenced
+workflow, must reject. Retain both actual outcomes and the immutable artifact
+metadata. The normal publisher also needs those read grants to retain native
+commit locators; it grants no extra permissions to either untrusted runner.
+
+Do not start the cumulative repair consumer from focused/local fixture tests.
+The required local full review, regular PR approval/CI and this hosted mapping
+and forgery gate must all pass first. This gate does not claim cumulative repair
+reporting, dependency publication or full repair acceptance is complete.
