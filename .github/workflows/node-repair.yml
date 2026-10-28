@@ -1,0 +1,70 @@
+name: Prepare selected Node repairs
+'on':
+  workflow_call:
+    inputs:
+      request-id:
+        type: string
+        required: true
+      pull-request:
+        type: string
+        required: true
+      expected-head:
+        type: string
+        required: true
+      expected-base:
+        type: string
+        required: true
+      selections:
+        type: string
+        required: true
+    outputs:
+      candidate-artifact-id:
+        description: Immutable preparation artifact ID in this run; no validation or publication occurred.
+        value: ${{ jobs.prepare.outputs.candidate-artifact-id }}
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+    - name: Recheck canonical PR eligibility and selections
+      uses: $/node/repair
+      with:
+        operation: guard
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
+  prepare:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    env:
+      npm_config_ignore_scripts: 'true'
+      pnpm_config_ignore_scripts: 'true'
+      npm_config_ignore_pnpmfile: 'true'
+      pnpm_config_ignore_pnpmfile: 'true'
+    outputs:
+      candidate-artifact-id: ${{ steps.prepare.outputs.candidate-artifact-id }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        persist-credentials: false
+    - name: Prepare the selected candidate using trusted workflow code
+      id: prepare
+      uses: $/node/repair
+      with:
+        operation: prepare
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}

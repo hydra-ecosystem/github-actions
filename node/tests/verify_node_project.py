@@ -10,7 +10,97 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 ROOT = Path(__file__).parents[1]
+
+
+def check_pnpm_repair(project, command, version):
+    """Exercise real hooks and selected resolution through production primitives."""
+    repair = runpy.run_path(str(ROOT / "runtime/repair.py"))
+    engine = repair["ENGINE"]
+    fixture = project.parent / "repair"
+    fixture.mkdir()
+    markers = {
+        kind: fixture / f"{kind}-executed" for kind in ("local", "global", "lifecycle")
+    }
+    for kind in ("local", "global"):
+        hook = fixture / (".pnpmfile.cjs" if kind == "local" else "global-pnpmfile.cjs")
+        hook.write_text(
+            "require('node:fs').writeFileSync("
+            + json.dumps(str(markers[kind]))
+            + ", 'executed');\nmodule.exports = {};\n"
+        )
+    policy = yaml.safe_load(
+        (ROOT / "runtime/templates/pnpm-workspace.yaml").read_text()
+    )
+    policy.update(
+        overrides={"semver": "7.5.1"},
+        globalPnpmfile=str(fixture / "global-pnpmfile.cjs"),
+    )
+    workspace = fixture / "pnpm-workspace.yaml"
+    workspace.write_text(yaml.safe_dump(policy))
+    (fixture / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "repair-hook-fixture",
+                "private": True,
+                "version": "1.0.0",
+                "packageManager": f"pnpm@{version}",
+                "dependencies": {
+                    "semver": "^7.5.1",
+                    "react": "18.2.0",
+                    "react-dom": "18.2.0",
+                },
+                "scripts": {
+                    "preinstall": "node -e "
+                    + json.dumps(
+                        "require('node:fs').writeFileSync("
+                        + json.dumps(str(markers["lifecycle"]))
+                        + ", 'executed')"
+                    )
+                },
+            }
+        )
+    )
+    subprocess.run(
+        [*command, "install", "--lockfile-only", "--ignore-scripts"],
+        cwd=fixture,
+        check=True,
+        timeout=180,
+    )
+    assert markers["local"].exists() and markers["global"].exists(), (
+        "Unsafe metadata resolution must reproduce both hooks"
+    )
+    assert not markers["lifecycle"].exists()
+    markers["local"].unlink()
+    markers["global"].unlink()
+    before = engine["valid_snapshot"](fixture)
+    assert before is not None
+    items = [{"name": "semver", "from": "7.5.1", "to": "7.5.2"}]
+    with repair["suppress_hooks"]():
+        for arguments in [
+            ("view", "semver@7.5.2", "version", "--json"),
+            ("audit", "--json"),
+        ]:
+            result = engine["run"](fixture, *arguments)
+            assert result.returncode in (0, 1), result.stderr
+            if arguments[0] == "view":
+                assert result.returncode == 0 and json.loads(result.stdout) == "7.5.2"
+        workspace.write_text(repair["update_policy"](workspace.read_text(), items))
+        result = engine["run"](fixture, *repair["CANDIDATE_INSTALL"])
+        assert result.returncode == 0, result.stderr
+        repair["check_scope"](before, engine["valid_snapshot"](fixture), items)
+    assert not any(path.exists() for path in markers.values()), (
+        "Preparation executed a project hook"
+    )
+    for snapshot in (before, engine["valid_snapshot"](fixture)):
+        lock = yaml.safe_load(snapshot[1]["pnpm-lock.yaml"])
+        assert (
+            lock["importers"]["."]["dependencies"]["react-dom"]["version"]
+            == "18.2.0(react@18.2.0)"
+        )
+    return "passed (real local/global hooks, view/audit/install, selected direct pin and unrelated peer suffix)"
 
 
 def check_npm_policy(version):
@@ -232,6 +322,10 @@ def check(node, manager, version):
             "frozen_install_and_tests": "passed",
             "committed_state_validation": "passed without dependency changes",
         }
+        if manager == "pnpm":
+            result["selected_repair_preparation"] = check_pnpm_repair(
+                project, command, version
+            )
         if manager == "npm":
             result["inherited_npm_security_policy"] = check_npm_policy(version)
         return result
