@@ -41,6 +41,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
+      checks: read
     steps:
     - name: Create repository-scoped publisher token
       if: ${{ inputs.app-client-id != '' }}
@@ -53,6 +55,8 @@ jobs:
         repositories: ${{ github.event.repository.name }}
         permission-contents: write
         permission-pull-requests: write
+        permission-actions: read
+        permission-checks: read
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         token: ${{ steps.app-token.outputs.token || github.token }}
@@ -113,6 +117,8 @@ jobs:
         PR_FOOTER: |
           [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
         PROPOSAL_KIND: ${{ inputs.proposal-kind }}
+        TRUSTED_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        AUDIT_ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
         REFRESH_ONLY: ${{ inputs.refresh-only }}
         EXPECTED_PR: ${{ inputs.expected-pr }}
         PROPOSAL_COMPLETE: ${{ inputs.proposal-complete }}

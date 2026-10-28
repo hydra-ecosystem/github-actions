@@ -235,6 +235,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
+      checks: read
     uses: hydra-ecosystem/github-actions/.github/workflows/node-publish.yml@v1
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}

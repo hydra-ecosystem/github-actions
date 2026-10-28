@@ -20,7 +20,12 @@ def test_caller_separates_audit_and_publisher_authority():
         "contents": "read",
     }
     assert "secrets" not in audit
-    assert publisher["permissions"] == {"contents": "write", "pull-requests": "write"}
+    assert publisher["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "actions": "read",
+        "checks": "read",
+    }
     assert set(publisher["secrets"]) == {"app-private-key"}
     assert publisher["needs"] == "audit"
     assert audit["uses"].endswith("@__CENTRAL_REVISION__")

@@ -22,6 +22,58 @@ ITEM = {"name": "launch-editor", "from": "2.14.1", "to": "2.14.2"}
 REVISION = {"head": "a" * 40, "base": "b" * 40}
 
 
+@pytest.mark.parametrize("override", ["2.14.1", "2.14.2", "^2.14.1", None])
+def test_security_candidate_cannot_bypass_retained_exact_direct_pin(tmp_path, override):
+    manifest = {
+        "packageManager": "pnpm@11.21.0",
+        "dependencies": {"launch-editor": "^2.14.1"},
+    }
+    policy = {
+        "packages": ["."],
+        "overrides": {"launch-editor": override} if override else {},
+    }
+    lock = {
+        "lockfileVersion": "9.0",
+        "importers": {
+            ".": {
+                "dependencies": {
+                    "launch-editor": {"specifier": "2.14.1", "version": "2.14.1"}
+                }
+            }
+        },
+        "packages": {"launch-editor@2.14.1": {}},
+    }
+    (tmp_path / "package.json").write_text(json.dumps(manifest))
+    (tmp_path / "pnpm-workspace.yaml").write_text(yaml.safe_dump(policy))
+    (tmp_path / "pnpm-lock.yaml").write_text(yaml.safe_dump(lock))
+    original = ENGINE["valid_snapshot"](tmp_path)
+    # Actual hosted pnpm audit --fix=update output: the preserved pin and
+    # lockfile override remain 2.14.1, but the direct candidate becomes 2.14.2.
+    manifest["dependencies"]["launch-editor"] = "2.14.2"
+    lock["importers"]["."]["dependencies"]["launch-editor"] = {
+        "specifier": "2.14.2",
+        "version": "2.14.2",
+    }
+    lock["packages"] = {"launch-editor@2.14.2": {}}
+    (tmp_path / "package.json").write_text(json.dumps(manifest))
+    (tmp_path / "pnpm-lock.yaml").write_text(yaml.safe_dump(lock))
+    notes = []
+    rejected = ENGINE["restore_invalid_state"](
+        tmp_path, original, notes, "Security fix", security_fix=True
+    )
+    assert rejected == (override == "2.14.1")
+    if rejected:
+        assert ENGINE["valid_snapshot"](tmp_path) == original
+        assert "pin" in notes[0]
+    else:
+        assert (
+            json.loads((tmp_path / "package.json").read_text())["dependencies"][
+                "launch-editor"
+            ]
+            == "2.14.2"
+        )
+
+
 @pytest.mark.parametrize("case", FIXTURES["cases"], ids=lambda case: case["name"])
 def test_shared_app_fixtures(case):
     if case.get("invalid"):
@@ -904,12 +956,19 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
     assert "publish" not in workflow["jobs"]
 
 
-def test_parser_install_isolated_from_checkout_module_shadowing(tmp_path):
-    action = yaml.safe_load((ROOT / "node/repair/action.yml").read_text())
+@pytest.mark.parametrize(
+    "action_path,step_name",
+    [
+        ("node/repair/action.yml", "Install configuration and audit parser"),
+        ("node/audit/action.yml", "Install configuration and audit report parser"),
+    ],
+)
+def test_parser_install_isolated_from_checkout_module_shadowing(
+    tmp_path, action_path, step_name
+):
+    action = yaml.safe_load((ROOT / action_path).read_text())
     command = next(
-        step["run"]
-        for step in action["runs"]["steps"]
-        if step.get("name") == "Install configuration and audit parser"
+        step["run"] for step in action["runs"]["steps"] if step.get("name") == step_name
     )
     assert command == "python -I -m pip install PyYAML==6.0.3"
     legacy_command = command.replace("python -I -m pip", "python -m pip", 1)

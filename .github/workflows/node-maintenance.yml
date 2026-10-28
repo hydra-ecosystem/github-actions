@@ -77,6 +77,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
+      checks: read
     uses: ./.github/workflows/node-publish.yml
     with:
       validation-passed: ${{ needs.security.outputs.validation_passed }}
@@ -110,6 +112,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
+      checks: read
     uses: ./.github/workflows/node-publish.yml
     with:
       validation-passed: ${{ needs.upgrades.outputs.validation_passed }}
