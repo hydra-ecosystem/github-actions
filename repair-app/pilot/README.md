@@ -29,7 +29,7 @@ Restore the original PR description after temporary probe selections, checking
 that no concurrent edit would be overwritten. Record actual source/deployment
 identities and distinguish local intercepted API tests from real GitHub events.
 
-## Isolated candidate-preparation acceptance
+## Isolated candidate preparation and validation acceptance
 
 After reviewing the preparation slice, use a separately authorized isolated
 repository. Replace its existing harmless caller's job with a call to the
@@ -64,6 +64,18 @@ unselected dependencies and a truthful preparation-only report. Also record
 that no project scripts ran and no repository dependency files were published.
 Stale consent and unavailable evidence must fail without a candidate artifact.
 
-Only guard and preparation are enabled now. This gate does not pass G-REPAIR,
-upgrade the PR or prove the later validation/publisher jobs. Those are added and
-tested in their owning slices before the final Hydra rollout.
+Validation runs on a separate read-only runner after preparation. Record a
+successful frozen install and configured project/local-patch checks, followed
+by a fresh audit with all selected advisories removed and no new finding.
+Use a deliberately failing check or dependency-file mutation to prove rejection
+without changes to the PR. Keep those test changes in the isolated repository.
+
+Also exercise project code that changes the validation runner's downloaded
+`candidate.patch` or `result.md`. Download the original preparation artifact by
+its retained ID again and prove its bytes did not change. The validation
+artifact is human evidence only; its files cannot become publication inputs.
+Keep both artifact IDs and their separate contents in the acceptance record.
+
+Publication is not enabled yet. These gates do not pass G-REPAIR or upgrade the
+PR. Publication and retention are tested in their owning slices before the
+final Hydra rollout.
