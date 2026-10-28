@@ -412,6 +412,8 @@ def check_caller(root, config, selected, github, default_branch="main"):
             "contents": "write",
             "pull-requests": "write",
             "issues": "write",
+            "actions": "read",
+            "checks": "read",
         }:
             raise ValueError(
                 "Coordinated caller permissions differ from the supported contract"
@@ -476,6 +478,8 @@ def check_caller(root, config, selected, github, default_branch="main"):
         } or publisher.get("permissions") != {
             "contents": "write",
             "pull-requests": "write",
+            "actions": "read",
+            "checks": "read",
         }:
             raise ValueError(
                 "Caller audit/publisher permissions differ from the supported caller contract"

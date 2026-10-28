@@ -192,6 +192,32 @@ def test_fleet_accepts_coordinated_installation_and_checks_trigger_contract(prob
     assert result["status"] == ("ok" if problem is None else "failed"), result
 
 
+@pytest.mark.parametrize("coordinated", [False, True])
+@pytest.mark.parametrize("permission", ["actions", "checks"])
+def test_fleet_rejects_missing_publisher_evidence_permissions(coordinated, permission):
+    github = GitHub()
+    files = github.repos["owner/project"]
+    if coordinated:
+        caller = yaml.safe_load(
+            (ROOT / "node/coordinated-caller.yml")
+            .read_text()
+            .replace("__CENTRAL_REPOSITORY__", "owner/actions")
+            .replace("__CENTRAL_REVISION__", SHA)
+            .replace("__DEFAULT_BRANCH__", "main")
+        )
+        caller["on"]["schedule"] = [
+            {"cron": cron} for cron in ["0 2 * * 1", "0 2 1 */3 *"]
+        ]
+    else:
+        caller = yaml.safe_load(files[".github/workflows/dependency-audit.yml"])
+    publisher = caller["jobs"]["maintenance" if coordinated else "pull-request"]
+    publisher["permissions"].pop(permission, None)
+    files[".github/workflows/dependency-audit.yml"] = yaml.safe_dump(caller).encode()
+    result = FLEET["check_repository"](github, "owner/project", SOURCE)
+    assert result["status"] == "failed", result
+    assert "permissions" in result["diagnostic"]
+
+
 @pytest.mark.parametrize("manager", ["npm", "pnpm"])
 def test_healthy_fleet_without_running_project_commands(monkeypatch, manager):
     def forbidden(*args, **kwargs):

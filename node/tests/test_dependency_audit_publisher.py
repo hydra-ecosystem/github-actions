@@ -36,6 +36,8 @@ def test_app_credentials_are_scoped_to_trusted_repository_publishing():
     assert permissions == {
         "permission-contents": "write",
         "permission-pull-requests": "write",
+        "permission-actions": "read",
+        "permission-checks": "read",
     }
     assert app["with"].get("skip-token-revoke", False) is False
     assert checkout["with"]["token"] == PUBLISH["env"]["GH_TOKEN"]
@@ -280,3 +282,1030 @@ def test_publication_preserves_reports_and_signals_failed_validation(
     assert len(pushes) == int(changes and not blocked)
     if pushes and draft_commands:
         assert commands.index(draft_commands[0]) < commands.index(pushes[0])
+
+
+def test_publication_rejects_oversized_final_body_before_push(tmp_path):
+    cli = tmp_path / "mock-cli"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "tool, args = Path(sys.argv[0]).name, sys.argv[1:]\n"
+        "with open(os.environ['COMMAND_LOG'], 'a') as log: log.write(tool + ' ' + ' '.join(args) + '\\n')\n"
+        "if tool == 'git' and args[0] == 'rev-parse': sys.exit(1)\n"
+        "if tool == 'git' and args[0] == 'diff': sys.exit(int(os.environ['HAS_CHANGES']))\n"
+        "if tool == 'gh' and args[:2] == ['pr', 'list']: print('')\n"
+        "if tool == 'gh' and args[:2] == ['pr', 'create']:\n"
+        "    body = Path(args[args.index('--body-file') + 1]).read_text()\n"
+        "    sys.exit(42 if len(body) > 65536 else 0)\n"
+    )
+    cli.chmod(0o755)
+    for tool in ("git", "gh"):
+        (tmp_path / tool).symlink_to(cli)
+    project = tmp_path / "website"
+    project.mkdir()
+    (project / "package.json").write_text("{}\n")
+    (project / "package-lock.json").write_text("{}\n")
+    report = tmp_path / "dependency-audit-pr.md"
+    report.write_text(
+        "**9 dependency updates · 1 security fix · Validation passed**\n\n"
+        + "x" * 65520
+    )
+    log = tmp_path / "commands"
+    result = subprocess.run(
+        ["bash", "-c", PUBLISH["run"]],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            **PUBLISH["env"],
+            "PROPOSAL_KIND": "legacy",
+            "NPM_PROJECT": "website",
+            "BASE_BRANCH": "main",
+            "PR_BRANCH": "maintenance/dependency-audit",
+            "VALIDATION_PASSED": "true",
+            "RUNNER_TEMP": str(tmp_path),
+            "COMMAND_LOG": str(log),
+            "HAS_CHANGES": "1",
+            "PR_FOOTER": "footer",
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    commands = log.read_text().splitlines()
+    assert not any(command.startswith("git push ") for command in commands)
+    assert not any(command.startswith("gh pr create ") for command in commands)
+    assert "65536" in result.stderr
+
+
+def test_publisher_size_block_isolated_from_checkout_python_modules(
+    tmp_path, monkeypatch
+):
+    import shlex
+
+    marker = tmp_path / "shadowed"
+    (tmp_path / "pathlib.py").write_text(
+        "import os\n"
+        "Path = type('Path', (), {'__init__': lambda self, _: None})\n"
+        "open(os.environ['SHADOW_MARKER'], 'w').write(os.environ['GH_TOKEN'])\n"
+        "raise SystemExit(73)\n"
+    )
+    body = tmp_path / "body.md"
+    body.write_text("small body\n")
+    marker_text = "python3 -I - \"$body_file\" <<'PY'\n"
+    assert marker_text in PUBLISH["run"]
+    python_body = PUBLISH["run"].split(marker_text, 1)[1].split("\nPY\n", 1)[0]
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("GH_TOKEN", "dummy-publisher-token")
+    monkeypatch.setenv("SHADOW_MARKER", str(marker))
+    environment = os.environ.copy()
+
+    def invoke(flag):
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                "body_file="
+                + shlex.quote(str(body))
+                + "\npython3 "
+                + flag
+                + " - \"$body_file\" <<'PY'\n"
+                + python_body
+                + "\nPY\n",
+            ],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+    control = invoke("")
+    assert control.returncode == 73
+    assert marker.read_text() == "dummy-publisher-token"
+    marker.unlink()
+    isolated = invoke("-I")
+    assert isolated.returncode == 0, isolated.stderr
+    assert not marker.exists()
+
+
+@pytest.fixture
+def sealed_history(tmp_path, monkeypatch):
+    import base64
+    import hashlib
+    import io
+    import runpy
+    import zipfile
+    from pathlib import Path
+
+    engine = runpy.run_path(
+        str(Path(__file__).parents[1] / "runtime/templates/dependency_audit.py")
+    )
+    record = dict(
+        version=1,
+        repository="owner/repo",
+        source="a" * 40,
+        project="app",
+        candidate_state={"package.json": "b" * 64},
+        before_state={"package.json": "c" * 64},
+        manager="pnpm",
+        node="24.22.1",
+        manager_version="11.21.0",
+        validation_script="build",
+        before={"original": "CVE-2026-12345"},
+        after={},
+        package_report="Original row",
+        fixed_ids=["GHSA-aaaa-bbbb-cccc"],
+        initial_ids=["GHSA-aaaa-bbbb-cccc"],
+        remaining_ids=[],
+    )
+    report = (
+        b"Report\n<!-- node-audit-history:v1:"
+        + base64.b64encode(engine["canonical_history"](record))
+        + b" -->\n"
+    )
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as bundle:
+        bundle.writestr("dependency-audit-pr.md", report)
+    archive = stream.getvalue()
+    locator = dict(
+        run=10,
+        job=20,
+        check=30,
+        artifact=40,
+        archive_sha256=hashlib.sha256(archive).hexdigest(),
+        content_sha256=hashlib.sha256(report).hexdigest(),
+    )
+    job_name = "security / Node audit evidence (node-security)"
+    check_url = "https://api.github.com/repos/owner/repo/check-runs/30"
+    job = dict(
+        id=20,
+        run_id=10,
+        head_sha="a" * 40,
+        run_attempt=1,
+        name=job_name,
+        check_run_url=check_url,
+        status="completed",
+        conclusion="success",
+        html_url="job-url",
+        steps=[
+            dict(name=name, conclusion="success")
+            for name in [
+                "Prepare and seal audit evidence",
+                "Seal uploaded audit evidence",
+            ]
+        ],
+    )
+    data = {
+        "actions/runs/10": dict(
+            repository={"full_name": "owner/repo"},
+            head_sha="a" * 40,
+            event="workflow_dispatch",
+            run_attempt=1,
+            referenced_workflows=[
+                dict(
+                    path="hydra-ecosystem/github-actions/.github/workflows/node-audit.yml@tag",
+                    sha="d" * 40,
+                )
+            ],
+        ),
+        "actions/jobs/20": job,
+        "actions/runs/10/attempts/1/jobs?per_page=100": dict(total_count=1, jobs=[job]),
+        "check-runs/30": dict(
+            id=30,
+            head_sha="a" * 40,
+            app={"id": 15368},
+            details_url="job-url",
+            output={"annotations_count": 1},
+        ),
+        "check-runs/30/annotations?per_page=100": [
+            dict(
+                title=engine["HISTORY_TITLE"],
+                annotation_level="notice",
+                message=f"v1:40:{locator['archive_sha256']}:{locator['content_sha256']}",
+            )
+        ],
+        "actions/artifacts/40": dict(
+            id=40,
+            expired=False,
+            size_in_bytes=len(archive),
+            digest="sha256:" + locator["archive_sha256"],
+            workflow_run={"id": 10, "head_sha": "a" * 40},
+        ),
+        "actions/artifacts/40/zip": archive,
+    }
+
+    def api(repository, suffix, **_):
+        assert repository == "owner/repo"
+        return data[suffix]
+
+    monkeypatch.setitem(engine["verify_history"].__globals__, "history_api", api)
+    arguments = dict(
+        repository="owner/repo",
+        source="a" * 40,
+        project="app",
+        candidate_state=record["candidate_state"],
+        trusted_workflow_sha="d" * 40,
+        expected_job_name=job_name,
+    )
+    return engine, record, report, locator, data, arguments
+
+
+def test_sealed_history_retains_original_cve_rows_and_exact_artifact(sealed_history):
+    engine, record, report, locator, _, arguments = sealed_history
+    assert engine["history_record"](report) == record
+    assert engine["verify_history"](locator, **arguments) == record
+
+
+def test_history_binds_trigger_and_planned_checkout_separately(sealed_history):
+    engine, record, _, locator, data, arguments = sealed_history
+    data["actions/runs/10"]["head_sha"] = "b" * 40
+    data["actions/jobs/20"]["head_sha"] = "b" * 40
+    data["check-runs/30"]["head_sha"] = "b" * 40
+    data["actions/artifacts/40"]["workflow_run"]["head_sha"] = "b" * 40
+    assert engine["verify_history"](locator, **arguments) == record
+
+
+@pytest.mark.parametrize("mismatch", ["job", "check", "artifact", "checkout", "run"])
+def test_history_rejects_mismatched_trigger_or_checkout(sealed_history, mismatch):
+    engine, _, _, locator, data, arguments = sealed_history
+    data["actions/runs/10"]["head_sha"] = "b" * 40
+    data["actions/jobs/20"]["head_sha"] = "b" * 40
+    data["check-runs/30"]["head_sha"] = "b" * 40
+    data["actions/artifacts/40"]["workflow_run"]["head_sha"] = "b" * 40
+    if mismatch == "job":
+        data["actions/jobs/20"]["head_sha"] = arguments["source"]
+    elif mismatch == "check":
+        data["check-runs/30"]["head_sha"] = arguments["source"]
+    elif mismatch == "artifact":
+        data["actions/artifacts/40"]["workflow_run"]["head_sha"] = arguments["source"]
+    elif mismatch == "checkout":
+        arguments["source"] = "c" * 40
+    else:
+        data["actions/runs/10"]["head_sha"] = "not-a-revision"
+    with pytest.raises(ValueError):
+        engine["verify_history"](locator, **arguments)
+
+
+def test_locate_history_omits_opaque_record_from_human_report(
+    sealed_history, tmp_path, monkeypatch
+):
+    import hashlib
+    from pathlib import Path
+
+    engine, record, sealed, locator, _, _ = sealed_history
+    project = tmp_path / "app"
+    project.mkdir()
+    (project / "package.json").write_text('{"name":"app"}\n')
+    (project / "package-lock.json").write_text('{"lockfileVersion":3}\n')
+    canonical = sealed[sealed.index(b"<!--") :]
+    original = (
+        "**1 dependency update · 1 security fix · Validation pending**\n\n".encode()
+        + b"## Validation\n\n- Project checks: Pending.\n\n"
+        + canonical
+    )
+    report = tmp_path / "dependency-audit-pr.md"
+    report.write_bytes(original)
+    envfile = tmp_path / "environment"
+    published_locator = dict(
+        locator, content_sha256=hashlib.sha256(original).hexdigest()
+    )
+    located = []
+
+    def locate(actual, directory, **kwargs):
+        located.append((actual, directory, kwargs))
+        return published_locator
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("VALIDATION_PASSED", "true")
+    monkeypatch.setitem(engine["main"].__globals__, "locate_current_history", locate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dependency_audit.py",
+            "--directory",
+            "app",
+            "--report",
+            str(report),
+            "--locate-history",
+            "--trusted-workflow-sha",
+            "d" * 40,
+            "--artifact-prefix",
+            "node-security",
+            "--github-env",
+            str(envfile),
+        ],
+    )
+    engine["main"]()
+
+    assert located == [
+        (
+            original,
+            Path("app"),
+            {"trusted_workflow_sha": "d" * 40, "prefix": "node-security"},
+        )
+    ]
+    assert engine["history_record"](original) == record
+    assert hashlib.sha256(original).hexdigest() == published_locator["content_sha256"]
+    human = report.read_text()
+    assert "node-audit-history:v1:" not in human
+    assert "## Validation" in human and "Project checks: Pending." in human
+    assert "Node-Audit-content-sha256: " + published_locator["content_sha256"] in (
+        envfile.read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "sibling-job",
+        "forged-check",
+        "unrelated-app",
+        "duplicate-notice",
+        "wrong-notice",
+        "failed-seal",
+        "wrong-workflow",
+        "wrong-head",
+        "wrong-project",
+        "wrong-state",
+        "expired",
+        "missing-digest",
+        "altered-archive",
+        "oversized",
+        "ambiguous-job",
+        "old-attempt",
+    ],
+)
+def test_history_rejects_forged_or_unavailable_evidence(sealed_history, case):
+    engine, _, _, locator, data, arguments = sealed_history
+    if case == "sibling-job":
+        data["actions/jobs/20"]["check_run_url"] = (
+            "https://api.github.com/repos/owner/repo/check-runs/31"
+        )
+    elif case == "forged-check":
+        locator["check"] = 31
+    elif case == "unrelated-app":
+        data["check-runs/30"]["app"]["id"] = 999
+    elif case == "duplicate-notice":
+        data["check-runs/30/annotations?per_page=100"] *= 2
+    elif case == "wrong-notice":
+        data["check-runs/30/annotations?per_page=100"][0]["message"] = (
+            "v1:41:" + "a" * 129
+        )
+    elif case == "failed-seal":
+        data["actions/jobs/20"]["steps"][-1]["conclusion"] = "failure"
+    elif case == "wrong-workflow":
+        data["actions/runs/10"]["referenced_workflows"][0]["sha"] = "e" * 40
+    elif case == "wrong-head":
+        data["actions/jobs/20"]["head_sha"] = "e" * 40
+    elif case == "wrong-project":
+        arguments["project"] = "other"
+    elif case == "wrong-state":
+        arguments["candidate_state"] = {}
+    elif case == "expired":
+        data["actions/artifacts/40"]["expired"] = True
+    elif case == "missing-digest":
+        data["actions/artifacts/40"].pop("digest")
+    elif case == "altered-archive":
+        data["actions/artifacts/40/zip"] += b"x"
+    elif case == "oversized":
+        data["actions/artifacts/40"]["size_in_bytes"] = 8388609
+    elif case == "ambiguous-job":
+        data["actions/runs/10/attempts/1/jobs?per_page=100"]["jobs"] *= 2
+    elif case == "old-attempt":
+        data["actions/jobs/20"]["run_attempt"] = 2
+    with pytest.raises(ValueError):
+        engine["verify_history"](locator, **arguments)
+
+
+@pytest.mark.parametrize(
+    "change", ["duplicate", "unknown-version", "oversized", "malformed"]
+)
+def test_sealed_history_rejects_ambiguous_records(sealed_history, change):
+    engine, _, report, _, _, _ = sealed_history
+    if change == "duplicate":
+        report *= 2
+    elif change == "unknown-version":
+        report = report.replace(b"node-audit-history:v1:", b"node-audit-history:v2:")
+    elif change == "oversized":
+        report = b"x" * 1048577
+    else:
+        report = b"<!-- node-audit-history:v1:==== -->"
+    with pytest.raises(ValueError):
+        engine["history_record"](report)
+
+
+@pytest.mark.parametrize("validate_only", [False, True])
+def test_producer_never_installs_or_runs_project_checks(
+    tmp_path, monkeypatch, validate_only
+):
+    import runpy
+    from pathlib import Path
+    from test_dependency_audit import fake_npm, npm_project
+
+    project = tmp_path / "app"
+    project.mkdir()
+    npm_project.__wrapped__(project)
+    commands = fake_npm(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("NODE_AUDIT_NODE_VERSION", "24.22.1")
+    monkeypatch.setenv("NODE_AUDIT_MANAGER_VERSION", "11.9.0")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **kw: "a" * 40 + "\n")
+    engine = runpy.run_path(
+        str(Path(__file__).parents[1] / "runtime/templates/dependency_audit.py")
+    )
+    report = engine["prepare"](
+        Path("app"),
+        prepare_only=True,
+        maintenance_mode="security-only",
+        validate_only=validate_only,
+    )
+    assert not any(command[0] in {"ci", "run"} for command in commands)
+    assert all(
+        "--lockfile-only" in command or "--package-lock-only" in command
+        for command in commands
+        if command[0] == "install"
+    )
+    record = engine["history_record"](report.encode())
+    assert record["repository"] == "owner/repo"
+    assert record["source"] == "a" * 40
+    assert record["before"]["vulnerabilities"]["transitive"]["severity"] == "high"
+    assert (
+        "Committed dependency validation · Pending"
+        if validate_only
+        else "Validation pending"
+    ) in report.splitlines()[0]
+
+
+def test_current_publisher_resolves_only_expected_producer(sealed_history, monkeypatch):
+    from pathlib import Path
+
+    engine, record, report, locator, data, _ = sealed_history
+    original = data["actions/jobs/20"]
+    sibling = dict(
+        original,
+        id=21,
+        name="Project validation",
+        check_run_url="https://api.github.com/repos/owner/repo/check-runs/31",
+    )
+    data["actions/runs/10/jobs?per_page=100"] = dict(
+        total_count=2, jobs=[original, sibling]
+    )
+    data["check-runs/31/annotations?per_page=100"] = data[
+        "check-runs/30/annotations?per_page=100"
+    ]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_RUN_ID", "10")
+    monkeypatch.setitem(
+        engine["locate_current_history"].__globals__,
+        "check_prepared_history",
+        lambda actual, _: record if actual == report else None,
+    )
+    assert (
+        engine["locate_current_history"](
+            report, Path("app"), trusted_workflow_sha="d" * 40, prefix="node-security"
+        )
+        == locator
+    )
+    data["check-runs/30/annotations?per_page=100"] = []
+    with pytest.raises(ValueError, match="unique artifact seal"):
+        engine["locate_current_history"](
+            report, Path("app"), trusted_workflow_sha="d" * 40, prefix="node-security"
+        )
+    sibling["name"] = original["name"]
+    with pytest.raises(ValueError, match="ambiguous expected producer"):
+        engine["locate_current_history"](
+            report, Path("app"), trusted_workflow_sha="d" * 40, prefix="node-security"
+        )
+
+
+def test_producer_and_validation_keep_separate_permissions_and_artifacts():
+    import yaml
+    from pathlib import Path
+
+    value = yaml.safe_load(
+        (Path(__file__).parents[2] / ".github/workflows/node-audit.yml").read_text()
+    )
+    producer, validation = value["jobs"]["audit"], value["jobs"]["validation"]
+    assert producer["permissions"] == validation["permissions"] == {"contents": "read"}
+    for namespace in ["npm", "pnpm"]:
+        for setting in ["ignore_scripts", "ignore_pnpmfile", "lockfile_only"]:
+            assert producer["env"][namespace + "_config_" + setting] == "true"
+    assert "env" not in validation
+    assert validation["needs"] == "audit"
+    checks = next(
+        step for step in validation["steps"] if step.get("id") == "validation"
+    )
+    assert checks["continue-on-error"] == "${{ inputs.operation != 'validate' }}"
+    downloads = [
+        step["with"]
+        for step in validation["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact@")
+    ]
+    assert [step["artifact-ids"] for step in downloads] == [
+        "${{ needs.audit.outputs.dependencies_artifact_id }}",
+        "${{ needs.audit.outputs.node_update_artifact_id }},${{ needs.audit.outputs.report_artifact_id }}",
+    ]
+    assert "node_update_artifact_id" in producer["outputs"]
+    assert "history-seal" not in value["on"]["workflow_call"]["inputs"]
+
+
+@pytest.fixture(params=["npm", "pnpm"])
+def prepared_validation(request, sealed_history, tmp_path, monkeypatch):
+    import base64
+    from pathlib import Path
+
+    engine, original, *_ = sealed_history
+    project = tmp_path / "app"
+    project.mkdir()
+    selected = request.param
+    version = "11.21.0" if selected == "pnpm" else "11.9.0"
+    (project / "package.json").write_text(
+        json.dumps(
+            {"packageManager": f"{selected}@{version}", "scripts": {"build": "true"}}
+        )
+    )
+    if selected == "pnpm":
+        (project / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages: {}\n"
+        )
+        (project / "pnpm-workspace.yaml").write_text("packages: ['.']\n")
+    else:
+        (project / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
+    monkeypatch.chdir(tmp_path)
+    for args in [
+        ["init", "-q"],
+        ["add", "app"],
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ]:
+        subprocess.run(["git", *args], check=True, cwd=tmp_path)
+    record = dict(
+        original,
+        manager=selected,
+        manager_version=version,
+        candidate_state=engine["dependency_state"](engine["valid_snapshot"](project)),
+        source=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    )
+    report = tmp_path / "dependency-audit-pr.md"
+
+    def seal():
+        report.write_bytes(
+            b"Report\n<!-- node-audit-history:v1:"
+            + base64.b64encode(engine["canonical_history"](record))
+            + b" -->\n"
+        )
+
+    seal()
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    log = tmp_path / "commands.jsonl"
+    audit_state = tmp_path / "audit-count"
+    stub = (
+        f"#!{sys.executable}\n"
+        "import json, os, sys\nfrom pathlib import Path\n"
+        "name = Path(sys.argv[0]).name\nargs = sys.argv[1:]\n"
+        "with open(os.environ['COMMAND_LOG'], 'a') as f:\n"
+        " f.write(json.dumps([name, *args]) + '\\n')\n"
+        "if name == 'npm' and args[:2] == ['install', '--global'] and os.environ.get('npm_config_package_lock_only') == 'true':\n"
+        " sys.exit(17)\n"
+        "if args[-1:] == ['--version']:\n"
+        " print(os.environ['TEST_NODE'] if name == 'node' else os.environ['TEST_MANAGER'])\n"
+        " if name != 'node': sys.exit(int(os.environ.get('TEST_MANAGER_EXIT', '0')))\n"
+        "elif 'audit' in args:\n"
+        " count = int(Path(os.environ['AUDIT_STATE']).read_text()) if Path(os.environ['AUDIT_STATE']).exists() else 0\n"
+        " Path(os.environ['AUDIT_STATE']).write_text(str(count + 1))\n"
+        " mode = os.environ.get('TEST_AUDIT_MODE', '')\n"
+        " phase = 'initial' if count == 0 else 'final'\n"
+        " if mode == phase + '-unavailable': print('registry unavailable'); sys.exit(1)\n"
+        " elif mode == phase + '-malformed':\n"
+        "  print(json.dumps({'advisories': []} if name == 'corepack' else {'vulnerabilities': {'broken': {}}, 'metadata': {'vulnerabilities': {'total': 1}}}))\n"
+        " else: print(json.dumps({'advisories': {}, 'vulnerabilities': {}, 'metadata': {'vulnerabilities': {'total': 0}}}))\n"
+    )
+    for name in ["node", "npm", "corepack"]:
+        executable = binary / name
+        executable.write_text(stub)
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("COMMAND_LOG", str(log))
+    monkeypatch.setenv("AUDIT_STATE", str(audit_state))
+    monkeypatch.setenv("TEST_NODE", "v24.22.1")
+    monkeypatch.setenv("TEST_MANAGER", version)
+    output = tmp_path / "outputs"
+    envfile = tmp_path / "environment"
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[1] / "runtime/templates/dependency_audit.py"),
+        "--directory",
+        "app",
+        "--report",
+        str(report),
+        "--check-prepared",
+    ]
+    return command, record, seal, report, envfile, output, log, selected, version
+
+
+def test_prepared_toolchain_export_and_validation_run_real_cli(prepared_validation):
+    command, record, _, report, envfile, output, log, selected, version = (
+        prepared_validation
+    )
+    before = report.read_bytes()
+    result = subprocess.run(
+        command + ["--github-env", str(envfile)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in envfile.read_text().splitlines())
+    assert values == {
+        "NODE_AUDIT_NODE_VERSION": record["node"],
+        "NODE_AUDIT_MANAGER": selected,
+        "NODE_AUDIT_MANAGER_VERSION": version,
+    }
+    assert report.read_bytes() == before
+    assert not log.exists(), (
+        "Configuration export must not run project or manager commands"
+    )
+    import yaml
+    from pathlib import Path
+
+    steps = yaml.safe_load(
+        (Path(__file__).parents[1] / "audit/action.yml").read_text()
+    )["runs"]["steps"]
+    export = next(
+        step
+        for step in steps
+        if "--check-prepared" in step.get("run", "")
+        and "--github-env" in step.get("run", "")
+    )
+    setup_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/setup-node@")
+    )
+    assert steps.index(export) < setup_index
+    setup = next(
+        step
+        for step in steps
+        if step.get("name") == "Enable the project's pinned package manager"
+    )
+    assert setup["env"]["npm_config_package_lock_only"] == "false"
+    setup_env = {
+        **os.environ,
+        **setup["env"],
+        "PACKAGE_MANAGER": selected,
+        "PACKAGE_MANAGER_VERSION": version,
+        "npm_config_package_lock_only": "false",
+    }
+    subprocess.run(
+        ["bash", "-c", setup["run"]],
+        check=True,
+        env=setup_env,
+    )
+    result = subprocess.run(
+        command + ["--github-output", str(output)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text() == "validation_passed=true\n"
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert commands[0] == (
+        ["corepack", "enable"]
+        if selected == "pnpm"
+        else [
+            "npm",
+            "install",
+            "--global",
+            f"npm@{version}",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+        ]
+    )
+    assert ["node", "--version"] in commands
+    assert (
+        ["corepack", "pnpm", "--version"]
+        if selected == "pnpm"
+        else ["npm", "--version"]
+    ) in commands
+
+
+@pytest.mark.parametrize(
+    ("audit_mode", "diagnostic"),
+    [
+        ("initial-unavailable", "Initial audit: Audit unavailable (exit 1)."),
+        (
+            "initial-malformed",
+            "Initial audit: Audit unavailable: malformed",
+        ),
+        ("final-unavailable", "Final audit: Audit unavailable (exit 1)."),
+        ("final-malformed", "Final audit: Audit unavailable: malformed"),
+    ],
+)
+def test_prepared_validation_fails_closed_on_audit_errors(
+    prepared_validation, monkeypatch, audit_mode, diagnostic
+):
+    command, _, _, report, _, output, log, selected, _ = prepared_validation
+    original = report.read_bytes()
+    producer_artifact = report.parent / "sealed-producer-report.md"
+    producer_artifact.write_bytes(original)
+    monkeypatch.setenv("TEST_AUDIT_MODE", audit_mode)
+
+    result = subprocess.run(
+        command + ["--github-output", str(output)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert output.read_text() == "validation_passed=false\n"
+    local_report = report.read_text()
+    assert local_report.startswith("**Committed dependency validation · Failed**")
+    assert "validation_passed=true" not in local_report
+    assert "## Security audit incomplete" in local_report
+    assert diagnostic in local_report
+    assert "- Frozen install: passed." in local_report
+    assert "- Project checks: passed." in local_report
+    assert producer_artifact.read_bytes() == original
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (
+        ["corepack", "pnpm", "install", "--frozen-lockfile"]
+        if selected == "pnpm"
+        else ["npm", "ci", "--no-audit"]
+    ) in commands
+    assert (
+        ["corepack", "pnpm", "run", "build"]
+        if selected == "pnpm"
+        else ["npm", "run", "build"]
+    ) in commands
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "node",
+        "manager",
+        "manager-failure",
+        "files",
+        "source",
+        "unsafe-version",
+        "wrong-manager",
+    ],
+)
+def test_prepared_validation_rejects_drift_before_project_commands(
+    prepared_validation, monkeypatch, mutation
+):
+    command, record, seal, report, envfile, output, log, selected, _ = (
+        prepared_validation
+    )
+    if mutation == "node":
+        monkeypatch.setenv("TEST_NODE", "v24.23.0")
+    elif mutation == "manager":
+        monkeypatch.setenv("TEST_MANAGER", "99.0.0")
+    elif mutation == "manager-failure":
+        monkeypatch.setenv("TEST_MANAGER_EXIT", "1")
+    elif mutation == "files":
+        from pathlib import Path
+
+        with Path("app/package.json").open("a") as file:
+            file.write("\n")
+    elif mutation == "source":
+        record["source"] = "b" * 40
+    elif mutation == "unsafe-version":
+        record["manager_version"] = "11.9.0\nINJECTED=value"
+    else:
+        record["manager"] = "npm" if selected == "pnpm" else "pnpm"
+    seal()
+    before = report.read_bytes()
+    export_only = mutation in {"files", "source", "unsafe-version", "wrong-manager"}
+    args = (
+        ["--github-env", str(envfile)]
+        if export_only
+        else ["--github-output", str(output)]
+    )
+    result = subprocess.run(command + args, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout
+    assert report.read_bytes() == before
+    assert not envfile.exists() and not output.exists()
+    commands = (
+        [json.loads(line) for line in log.read_text().splitlines()]
+        if log.exists()
+        else []
+    )
+    assert all(command[-1:] == ["--version"] for command in commands)
+
+
+def test_verified_producer_seals_concrete_node_version(tmp_path):
+    import yaml
+    from pathlib import Path
+
+    steps = yaml.safe_load(
+        (Path(__file__).parents[1] / "audit/action.yml").read_text()
+    )["runs"]["steps"]
+    verify = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify the declared toolchain before dependency changes"
+    )
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    for name, content in {"python": "exit 0", "node": "echo v24.22.1"}.items():
+        executable = binary / name
+        executable.write_text("#!/bin/bash\n" + content + "\n")
+        executable.chmod(0o755)
+    envfile = tmp_path / "environment"
+    subprocess.run(
+        ["bash", "-c", verify["run"]],
+        check=True,
+        env={
+            **os.environ,
+            "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+            "NODE_AUDIT_NODE_VERSION": "24",
+            "GITHUB_ACTION_PATH": str(tmp_path),
+            "RUNNER_TEMP": str(tmp_path),
+            "AUDIT_KIND": "security",
+            "GITHUB_ENV": str(envfile),
+        },
+    )
+    assert envfile.read_text() == "NODE_AUDIT_NODE_VERSION=24.22.1\n"
+
+
+def test_prepared_validation_reconstructs_node_candidate_before_project_check(
+    tmp_path, monkeypatch
+):
+    import base64
+    import runpy
+    from pathlib import Path
+
+    engine = runpy.run_path(
+        str(Path(__file__).parents[1] / "runtime/templates/dependency_audit.py")
+    )
+    project = tmp_path / "app"
+    project.mkdir()
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/node-maintenance.json").write_text(
+        json.dumps({"directory": "app", "toolchain": {"node": "project"}})
+    )
+    (project / "package.json").write_text(
+        json.dumps({"packageManager": "pnpm@11.21.0", "scripts": {"build": "true"}})
+    )
+    (project / "pnpm-lock.yaml").write_text(
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages: {}\n"
+    )
+    (project / "pnpm-workspace.yaml").write_text("packages: ['.']\n")
+    (project / ".nvmrc").write_text("24.13.0\n")
+    monkeypatch.chdir(tmp_path)
+    for args in [
+        ["init", "-q"],
+        ["add", "app"],
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ]:
+        subprocess.run(["git", *args], check=True, cwd=tmp_path)
+    record = {
+        "version": 1,
+        "repository": "owner/repo",
+        "source": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "project": "app",
+        "candidate_state": engine["dependency_state"](
+            engine["valid_snapshot"](project)
+        ),
+        "before_state": {"package.json": "c" * 64},
+        "manager": "pnpm",
+        "node": "24.22.1",
+        "manager_version": "11.21.0",
+        "validation_script": "build",
+        "before": {"original": "CVE-2026-12345"},
+        "after": {},
+        "package_report": "Original row",
+        "fixed_ids": ["GHSA-aaaa-bbbb-cccc"],
+        "initial_ids": ["GHSA-aaaa-bbbb-cccc"],
+        "remaining_ids": [],
+    }
+    report = tmp_path / "dependency-audit-pr.md"
+    report.write_bytes(
+        b"Report\n<!-- node-audit-history:v1:"
+        + base64.b64encode(engine["canonical_history"](record))
+        + b" -->\n"
+    )
+    plan = tmp_path / "node-audit-node-update.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "directory": "app",
+                "version": "24.14.0",
+                "changes": [
+                    {
+                        "path": "app/.nvmrc",
+                        "before": "24.13.0\n",
+                        "after": "24.14.0\n",
+                    }
+                ],
+                "message": "",
+            }
+        )
+    )
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    (binary / "node").write_text("#!/bin/sh\nprintf 'v24.22.1\\n'\n")
+    (binary / "corepack").write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args and args[0] == 'pnpm': args = args[1:]\n"
+        "if args[-1:] == ['--version']: print('11.21.0')\n"
+        "elif 'audit' in args: print(json.dumps({'advisories': {}, 'vulnerabilities': {}, 'metadata': {'vulnerabilities': {'total': 0}}}))\n"
+        "elif args[:2] == ['run', 'build']:\n"
+        "    if os.environ.get('MUTATE_NODE'): pathlib.Path('.nvmrc').write_text('24.13.0\\n')\n"
+        "    raise SystemExit(0 if pathlib.Path('.nvmrc').read_text() == '24.14.0\\n' else 1)\n"
+    )
+    for name in ("node", "corepack"):
+        (binary / name).chmod(0o755)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    command = [
+        str(Path(__file__).parents[1] / "runtime/templates/dependency_audit.py"),
+        "--directory",
+        "app",
+        "--report",
+        str(report),
+        "--check-prepared",
+        "--node-update",
+        str(plan),
+    ]
+    namespace = engine["main"].__globals__
+    original_run_path = namespace["runpy"].run_path
+
+    def load_node_proposal(path, *args, **kwargs):
+        loaded = original_run_path(path, *args, **kwargs)
+        if str(path).endswith("node_proposal.py"):
+            loaded["SECURITY"]["latest_security_release"] = lambda _: "24.14.0"
+        return loaded
+
+    monkeypatch.setattr(namespace["runpy"], "run_path", load_node_proposal)
+
+    def invoke(*args):
+        monkeypatch.setattr(sys, "argv", [*command, *args])
+        namespace["main"]()
+
+    envfile = tmp_path / "environment"
+    invoke("--github-env", str(envfile))
+    assert (project / ".nvmrc").read_text() == "24.14.0\n"
+    sealed_report = report.read_bytes()
+    output = tmp_path / "outputs"
+    invoke("--github-output", str(output))
+    assert output.read_text() == "validation_passed=true\n"
+    report.write_bytes(sealed_report)
+    output.unlink()
+    monkeypatch.setenv("MUTATE_NODE", "1")
+    with pytest.raises(
+        ValueError, match="Project validation changed a proposed Node declaration"
+    ):
+        invoke("--github-output", str(output))
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("declaration", [".nvmrc", ".node-version", "local-config"])
+def test_node_candidate_reconstruction_covers_declaration_forms(tmp_path, declaration):
+    import runpy
+    from pathlib import Path
+
+    proposal = runpy.run_path(
+        str(Path(__file__).parents[1] / "runtime/node_proposal.py")
+    )
+    project = tmp_path / "app"
+    project.mkdir()
+    (tmp_path / ".github").mkdir()
+    config = {"directory": "app", "toolchain": {"node": "project"}}
+    if declaration == "local-config":
+        config["toolchain"]["node"] = "24.13.0"
+    else:
+        (project / declaration).write_text("24.13.0\n")
+    (tmp_path / ".github/node-maintenance.json").write_text(json.dumps(config))
+    changes = proposal["declaration_changes"](tmp_path, project, "24.14.0")
+    assert changes and changes[0]["path"] == (
+        ".github/node-maintenance.json"
+        if declaration == "local-config"
+        else f"app/{declaration}"
+    )
+    plan = {"changes": changes}
+    proposal["write_changes"](tmp_path, plan)
+    proposal["verify_candidate"](tmp_path, plan)

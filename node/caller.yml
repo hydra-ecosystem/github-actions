@@ -33,6 +33,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
+      checks: read
     uses: __CENTRAL_REPOSITORY__/.github/workflows/node-publish.yml@__CENTRAL_REVISION__
     with:
       validation-passed: ${{ needs.audit.outputs.validation_passed }}
