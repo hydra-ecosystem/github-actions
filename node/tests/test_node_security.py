@@ -42,6 +42,53 @@ def test_a_new_security_release_changes_the_floor_without_a_workflow_update():
         MODULE["verify_node_security"]("24.23.0", read=lambda: json.dumps(releases))
 
 
+@pytest.mark.parametrize("version", ["v27.0.0-alpha.0.0.0", "v24.24.0-rc.1"])
+def test_non_security_prereleases_do_not_break_or_change_the_stable_security_floor(
+    version,
+):
+    releases = [{"version": version, "security": False}, *RELEASES]
+
+    def read():
+        return json.dumps(releases)
+
+    assert MODULE["verify_node_security"]("24.22.1", read=read) == "24.22.1"
+    with pytest.raises(ValueError, match="older than the latest.*security release"):
+        MODULE["verify_node_security"]("24.22.0", read=read)
+
+
+@pytest.mark.parametrize("security", [True, "false", 0, None])
+def test_prerelease_with_missing_or_non_false_security_flag_fails(security):
+    releases = [{"version": "v27.0.0-alpha.0.0.0", "security": security}, *RELEASES]
+    with pytest.raises(ValueError):
+        MODULE["verify_node_security"]("24.22.1", read=lambda: json.dumps(releases))
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "broken",
+        "v27.0.0-",
+        "v27.0.0-alpha..0",
+        "v027.0.0-alpha.0",
+        "v27.00.0-rc.1",
+        "v27.0.00-rc.1",
+        "v27.0.0-01",
+        "v27.0.0-alpha.01",
+    ],
+)
+def test_malformed_non_security_release_still_fails(version):
+    releases = [{"version": version, "security": False}, *RELEASES]
+    with pytest.raises(ValueError):
+        MODULE["verify_node_security"]("24.22.1", read=lambda: json.dumps(releases))
+
+
+def test_installed_prerelease_is_not_accepted_as_a_stable_runtime():
+    with pytest.raises(ValueError, match="exact stable release"):
+        MODULE["verify_node_security"](
+            "24.24.0-rc.1", read=lambda: json.dumps(RELEASES)
+        )
+
+
 @pytest.mark.parametrize(
     "data",
     [
