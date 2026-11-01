@@ -26,6 +26,12 @@ outputs:
   candidate-artifact-id:
     description: Immutable preparation artifact ID from this run.
     value: ${{ steps.candidate.outputs.artifact-id }}
+  candidate-archive-sha256:
+    description: Preparation archive SHA256 returned by immutable upload.
+    value: ${{ steps.candidate.outputs.artifact-digest }}
+  candidate-report-sha256:
+    description: Exact sealed cumulative result SHA256.
+    value: ${{ steps.report-digest.outputs.sha256 }}
 runs:
   using: composite
   steps:
@@ -88,12 +94,21 @@ runs:
     if: ${{ inputs.operation == 'prepare' }}
     shell: bash
     env:
+      GH_TOKEN: ${{ github.token }}
       REPAIR_REQUEST: ${{ inputs.request-id }}
       REPAIR_PR: ${{ inputs.pull-request }}
       REPAIR_HEAD: ${{ inputs.expected-head }}
       REPAIR_BASE: ${{ inputs.expected-base }}
       REPAIR_SELECTIONS: ${{ inputs.selections }}
     run: python "$GITHUB_ACTION_PATH/../runtime/repair.py" prepare --artifact "$RUNNER_TEMP/node-repair-candidate"
+  - name: Hash the sealed cumulative report
+    id: report-digest
+    if: ${{ inputs.operation == 'prepare' }}
+    shell: bash
+    run: |
+      set -euo pipefail
+      digest=$(sha256sum "$RUNNER_TEMP/node-repair-candidate/result.md")
+      printf 'sha256=%s\n' "${digest%% *}" >> "$GITHUB_OUTPUT"
   - name: Seal the preparation artifact
     id: candidate
     if: ${{ inputs.operation == 'prepare' }}

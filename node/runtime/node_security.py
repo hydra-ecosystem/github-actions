@@ -63,7 +63,19 @@ def security_releases(major, *, read=None):
             raise ValueError(
                 "Cannot verify Node runtime security: invalid release record"
             )
-        version = version_tuple(release.get("version"))
+        value = release.get("version")
+        if (
+            isinstance(value, str)
+            and re.fullmatch(
+                r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-"
+                r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+                r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*",
+                value,
+            )
+            and release.get("security") is False
+        ):
+            continue
+        version = version_tuple(value)
         if version[0] != int(major):
             continue
         if type(release.get("security")) is not bool:

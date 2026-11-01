@@ -290,3 +290,32 @@ Before the cumulative repair consumer begins, verify a distinct-run hosted
 readback against the reviewed source and prove a sibling-job forgery rejects.
 Local API fixtures do not satisfy that hosted gate. Missing or expired history
 must never be reported as an empty original advisory list.
+
+## Cumulative repair preparation
+
+Selected repair preparation reads the nearest native producer receipt on the
+PR's first-parent history. The initial receipt names the immutable normal audit;
+later receipts name the original repair preparation artifact. Editable PR text
+is never used as historical audit evidence. The consumer verifies the producer
+job, its Check annotation, workflow revision, artifact ID and archive/report
+hashes, then checks the exact project and dependency-state binding.
+
+Each sealed `result.md` retains the earlier canonical audit records and renders
+one cumulative table. Earlier rows keep their recorded outcomes with a historical
+evidence qualifier. A current unresolved finding takes precedence. An advisory
+missing from today's audit is only "not observed in the current audit"; absence
+is not evidence of withdrawal or a newly confirmed repair. The preparation
+notice names only the currently selected repair.
+
+The preparation runner needs Contents, Actions and Checks read access. It emits
+one `Node repair evidence v1` notice after uploading exactly `candidate.patch`,
+`audit.json` and `result.md`. The notice binds the immutable artifact and report
+hashes. Project validation runs on a separate runner and cannot replace this
+artifact. Missing, expired, ambiguous or mismatched history stops preparation
+before sealing. Inspect and finish the existing proposal, or explicitly close it
+and create a new normal-audit proposal; do not reset a branch containing repairs.
+
+This checkpoint prepares cumulative evidence. It does not publish dependency
+changes or authorize merging. The later publisher must retain the validated
+repair marker and exact native `Node-Repair-*` locator trailers for another
+read-only attempt; producer job outputs alone do not persist across runs.

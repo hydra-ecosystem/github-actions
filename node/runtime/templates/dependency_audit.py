@@ -9,6 +9,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import time
 import zipfile
@@ -468,9 +469,14 @@ def run(
         return subprocess.CompletedProcess(
             command, 124, "", "Dependency audit time budget exhausted."
         )
-    # GNU timeout owns the process group and kills npm and lifecycle/build children.
+    # Some runners name GNU timeout gnutimeout; use its process-group kill.
     result = subprocess.run(
-        ["timeout", "--signal=KILL", f"{timeout}s", *command],
+        [
+            shutil.which("gnutimeout") or "timeout",
+            "--signal=KILL",
+            f"{timeout}s",
+            *command,
+        ],
         cwd=directory,
         capture_output=True,
         text=True,
