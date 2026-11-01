@@ -173,10 +173,9 @@ The separate `node-repair-validation-<request-id>` artifact contains human
 evidence only: install/check logs, the fresh audit and a validation result.
 It never replaces the preparation artifact. Project code runs with the
 repository write maintainer as its trust principal; validation cannot attest
-intentionally dishonest tests. A later publisher must use the original
-preparation artifact and actual validation job success, never validation-local
-patches, reports or logs. Publication and normal-audit retention remain later
-slices, followed by the isolated live repair gate and general rollout.
+intentionally dishonest tests. The publisher uses the original preparation artifact and actual validation job
+success, never validation-local patches, reports or logs. Normal-audit retention
+and the full isolated live repair gate remain required before general rollout.
 
 ## Check the receiver locally
 
@@ -319,3 +318,41 @@ This checkpoint prepares cumulative evidence. It does not publish dependency
 changes or authorize merging. The later publisher must retain the validated
 repair marker and exact native `Node-Repair-*` locator trailers for another
 read-only attempt; producer job outputs alone do not persist across runs.
+
+## Publish the validated selected repair
+
+The reusable repair workflow now has a fresh publisher after successful
+preparation and validation. Only that job receives Contents/Pull requests write
+permission; its caller must grant those scopes plus Actions/Checks read. It
+downloads the original three-member preparation artifact by its exact ID and
+verifies the producer job, Check seal, immutable archive/content digests, source,
+request, project and exact candidate dependency state. Missing cumulative history
+or stale evidence stops before a branch push. Project scripts and package-manager
+commands never run on this writer.
+
+Immediately before pushing, it rechecks the canonical PR, selected batch and
+head/base. The native push uses an explicit expected-head lease. Its commit
+contains `Node-Repair: validated-selected-pins-v1` plus the original preparation
+run/job/Check/artifact IDs, archive/content digests and trusted workflow SHA.
+These trailers locate the immutable cumulative report for the next attempt;
+editable PR prose is never historical audit input.
+
+The PR body uses the sealed cumulative rows and verified candidate choices,
+adds the actual successful-validation run link and binds choices to the new
+head/base. It preserves the existing recognized platform section byte-for-byte,
+including CRLF and per-release CVE links. A missing or ambiguous platform section
+or an oversized body stops before push; inspect or replace an old proposal
+through the normal audit flow rather than dropping evidence.
+
+The push and PR-body edit are separate operations. A successful push followed
+by an edit failure leaves the repair commit published and reports the incomplete
+body update with its commit ID. After push, the writer rereads only an exact
+unchanged pre-push PR view up to four times, with waits of one, two and four
+seconds. It never repeats the push. An unexpected head or changed base, body,
+open state, branch or repository stops immediately; an old view at the limit also
+leaves an explicit partial result. The report is edited only after the expected
+published head and unchanged remaining PR state are observed.
+An uncertain push reports the attempted commit
+and requires branch inspection before another attempt. Nothing merges
+automatically. Normal-audit preservation and full live repair acceptance remain
+required before general rollout.

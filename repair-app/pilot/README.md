@@ -29,10 +29,10 @@ Restore the original PR description after temporary probe selections, checking
 that no concurrent edit would be overwritten. Record actual source/deployment
 identities and distinguish local intercepted API tests from real GitHub events.
 
-## Isolated candidate preparation and validation acceptance
+## Isolated candidate preparation, validation and publication acceptance
 
-After reviewing the preparation slice, use a separately authorized isolated
-repository. Replace its existing harmless caller's job with a call to the
+After reviewing the preparation, validation and publisher slices and completing
+their required checks, use an explicitly authorized isolated repository. Replace its existing harmless caller's job with a call to the
 reviewed reusable workflow. Keep the default-branch workflow path
 `.github/workflows/dependency-repair.yml` and its five dispatch inputs unchanged.
 Do not replace Hydra's harmless caller or roll this out to other installations
@@ -45,8 +45,8 @@ experimentation, use a dedicated experimentation tag whose updates are reviewed.
 jobs:
   candidate:
     permissions:
-      contents: read
-      pull-requests: read
+      contents: write
+      pull-requests: write
       actions: read
       checks: read
     uses: hydra-ecosystem/github-actions/.github/workflows/node-repair.yml@REVIEWED_REF
@@ -62,8 +62,8 @@ Retain the exact caller and reusable-workflow revisions, the bot-authored manage
 PR's head/base, selected batch, Actions run and immutable candidate artifact ID.
 Inspect the downloaded artifact for exactly `candidate.patch`, `audit.json` and
 `result.md`. Verify request/project binding, allowed patch paths, unchanged
-unselected dependencies and a truthful preparation-only report. Also record
-that no project scripts ran and no repository dependency files were published.
+unselected dependencies and a truthful preparation-only report. Record that producer upload precedes validation and publication and that no
+project scripts run on the producer or publisher.
 Stale consent and unavailable evidence must fail without a candidate artifact.
 
 Validation runs on a separate read-only runner after preparation. Record a
@@ -78,9 +78,11 @@ its retained ID again and prove its bytes did not change. The validation
 artifact is human evidence only; its files cannot become publication inputs.
 Keep both artifact IDs and their separate contents in the acceptance record.
 
-Publication is not enabled yet. These gates do not pass G-REPAIR or upgrade the
-PR. Publication and retention are tested in their owning slices before the
-final Hydra rollout.
+These preparation/validation checks alone do not pass G-REPAIR. The current
+workflow also has a separate publisher. Grant the caller write permissions only
+for an explicitly authorized isolated publication test; the prepare and validate
+jobs still receive read-only permissions. Normal-audit retention remains its own
+acceptance gate before general rollout.
 
 ## Initial normal-audit evidence acceptance
 
@@ -122,3 +124,28 @@ and reject an identical sibling-job copy. Grant only Actions/Checks read access
 to the consumer. Preserve the existing demo PR and restore the complete fixture
 file tree after the bounded test. No Hydra mutation, dependency publication or
 source merge is included in this preparation slice.
+
+## Isolated cumulative publication acceptance
+
+After the publisher source passes full local validation, independent review,
+regular PR approval and required CI, run one bounded private-demo publication
+test using its reviewed reference. Keep the five dispatch inputs unchanged.
+Select fixes in the existing managed PR and post a new `/repair selected`
+comment. Retain the original preparation run/job/Check/artifact IDs and digests,
+old/new branch heads and report URL. Verify the publisher changes only the
+approved dependency files after actual separate validation success, uses the
+original sealed cumulative report, and preserves the platform section exactly.
+
+The publisher records the original preparation locator and trusted workflow SHA
+in its validated-repair commit trailers. The next attempt must consume that
+original artifact through native history. It does not fetch validation artifacts
+or execute project hooks, package-manager commands or a fresh audit. Native Git
+stale-consent, lease-race and push-success/body-edit-failure tests are required;
+ambiguous pushes require branch inspection rather than an automatic retry.
+
+Preserve original CVEs and cumulative historical/current rows in the PR
+conversation. Restore the isolated fixture tree and original PR head/body with
+expected-head guards after the bounded test. No source merge, stable-tag update,
+Hydra change or App/Worker/D1 deployment is included. The deployed App's historical
+harmless-pilot wording must be corrected before general actual-repair use; this
+is an isolated publisher test, not general consumer rollout.

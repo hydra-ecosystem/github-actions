@@ -1,4 +1,4 @@
-"""Selection, candidate and read-only validation contracts; no publication."""
+"""Selection, sealed candidate, validation and guarded publication contracts."""
 
 import copy
 import json
@@ -908,9 +908,10 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
         "expected-base",
         "selections",
     }
-    assert set(workflow["jobs"]) == {"guard", "prepare", "validate"}
-    for job in workflow["jobs"].values():
-        assert set(job["permissions"].values()) == {"read"}
+    assert set(workflow["jobs"]) == {"guard", "prepare", "validate", "publish"}
+    for name, job in workflow["jobs"].items():
+        if name != "publish":
+            assert set(job["permissions"].values()) == {"read"}
         assert any(step.get("uses") == "$/node/repair" for step in job["steps"])
     prepare = workflow["jobs"]["prepare"]
     assert prepare["env"] == REPAIR["HOOK_ENV"]
@@ -957,7 +958,39 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
         if step.get("name") == "Retain human validation evidence only"
     )
     assert human["with"]["path"] == "${{ runner.temp }}/node-repair-validation/"
-    assert "publish" not in workflow["jobs"]
+    publisher = workflow["jobs"]["publish"]
+    assert publisher["needs"] == ["prepare", "validate"]
+    assert publisher["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "actions": "read",
+        "checks": "read",
+    }
+    assert publisher["concurrency"] == {
+        "group": "node-dependency-proposal-${{ github.repository }}",
+        "cancel-in-progress": False,
+    }
+    # The job context is available in step env, not in job-level env.
+    assert "env" not in publisher
+    assert publisher["steps"][1]["env"] == {
+        "TRUSTED_WORKFLOW_SHA": "${{ job.workflow_sha }}"
+    }
+    assert publisher["steps"][0]["with"] == checkout["with"]
+    assert (
+        publisher["steps"][1]["with"]["candidate-artifact-id"]
+        == "${{ needs.prepare.outputs.candidate-artifact-id }}"
+    )
+    for step in action["runs"]["steps"]:
+        if (
+            "corepack" in step.get("run", "")
+            or step.get("uses", "").startswith("actions/setup-node@")
+            or step.get("name") == "Resolve the declared preparation toolchain"
+        ):
+            assert (
+                step["if"]
+                == "${{ inputs.operation == 'prepare' || inputs.operation == 'validate' }}"
+            )
+    assert "publish" in download["if"]
 
 
 @pytest.mark.parametrize(
@@ -1693,14 +1726,17 @@ def test_cumulative_table_keeps_range_pipes_inside_six_cells(
     assert audit["advisories"]["1"]["url"] in cells[5]
 
 
-def test_documented_caller_covers_reusable_workflow_read_permissions():
+def test_documented_caller_covers_reusable_workflow_permissions():
     text = (ROOT / "repair-app/pilot/README.md").read_text()
     caller = yaml.safe_load(text.split("```yaml\n", 1)[1].split("```", 1)[0])
     workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
     job = caller["jobs"]["candidate"]
     for reusable in workflow["jobs"].values():
         for scope, level in reusable["permissions"].items():
-            assert level == "read" and job["permissions"][scope] == level
+            assert (
+                job["permissions"][scope] == "write"
+                or level == job["permissions"][scope]
+            )
     assert set(job["with"]) == set(workflow["on"]["workflow_call"]["inputs"])
 
 
@@ -1887,3 +1923,489 @@ def test_full_checkout_resolves_native_receipt_at_or_below_head(
     monkeypatch.setitem(module["ENGINE"], "verify_history", verify)
     REPAIR["native_history"](expected, clone, snapshot)
     assert calls[0]["source"] == receipt_parent
+
+
+@pytest.fixture
+def publisher_checkout(sealed_checkout, monkeypatch, tmp_path):
+    root, artifact, before, expected = sealed_checkout
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    git = REPAIR["git"]
+    git("remote", "add", "origin", str(remote))
+    git("push", "origin", "HEAD:refs/heads/maintenance/node-security")
+    body = (
+        "## Platform security\n\nNode upgrade evidence stays unchanged.\n\n"
+        "## Package security\n\nOld package report\n"
+        + CHOICES["render"]([ITEM], head=expected["head"], base=expected["base"])
+    ).replace("- [ ]", "- [x]")
+    state = dict(body=body, base=expected["base"], updates=[], reads=0)
+    repository = dict(id=1, full_name=expected["repository"], default_branch="main")
+
+    def remote_head():
+        return subprocess.check_output(
+            [
+                "git",
+                "--git-dir",
+                str(remote),
+                "rev-parse",
+                "refs/heads/maintenance/node-security",
+            ],
+            text=True,
+        ).strip()
+
+    def advance_remote():
+        commit = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=Maintainer",
+                "-c",
+                "user.email=m@example.invalid",
+                "commit-tree",
+                git("rev-parse", "HEAD^{tree}").strip(),
+                "-p",
+                expected["head"],
+            ],
+            input="Maintainer concurrent work\n",
+            text=True,
+        ).strip()
+        git("push", "origin", f"{commit}:refs/heads/maintenance/node-security")
+        return commit
+
+    def api(path, *, body=None):
+        if path == f"repos/{expected['repository']}":
+            return repository
+        assert path == f"repos/{expected['repository']}/pulls/{expected['pr']}"
+        if body is not None:
+            if state.get("edit_failure"):
+                raise subprocess.CalledProcessError(1, ["gh", "api"])
+            state["updates"].append(body["body"])
+            state["body"] = body["body"]
+            return {}
+        state["reads"] += 1
+        response = dict(
+            number=expected["pr"],
+            state="open",
+            user={"type": "Bot"},
+            body=state["body"],
+            head=dict(
+                ref="maintenance/node-security", sha=remote_head(), repo=repository
+            ),
+            base=dict(ref="main", sha=state["base"], repo=repository),
+        )
+        if state.get("lease_race") and state["reads"] == 2:
+            state["concurrent_commit"] = advance_remote()
+        return response
+
+    module = REPAIR["publish"].__globals__
+    monkeypatch.setitem(module, "gh", api)
+
+    def context(*, verify_runtime=True):
+        assert not verify_runtime, "Publisher must not execute a package manager"
+        return root, {}, before
+
+    monkeypatch.setitem(module, "project_context", context)
+    monkeypatch.setitem(
+        module["ENGINE"], "run", lambda *a, **k: pytest.fail("Project command executed")
+    )
+    monkeypatch.setenv("GH_TOKEN", "fixture-no-real-token")
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    candidate = repair_files(root, ITEM["to"])
+    report = REPAIR["cumulative_report"](
+        normal_history(before),
+        expected,
+        root,
+        {},
+        before,
+        candidate,
+        repair_audit(),
+        empty_audit(),
+        ENGINE["finding_ids"](repair_audit(), "pnpm"),
+    )
+    subprocess.run(["git", "checkout", "--", "."], check=True)
+    (artifact / "result.md").write_text(report)
+    import hashlib
+
+    locator = dict(
+        run=123,
+        job=20,
+        check=30,
+        artifact=40,
+        archive_sha256="a" * 64,
+        content_sha256=hashlib.sha256(report.encode()).hexdigest(),
+    )
+    record = ENGINE["history_record"](report.encode())
+    state.update(record=record, locator=locator, report=report)
+    monkeypatch.setitem(
+        module,
+        "publication_locator",
+        lambda value: locator if value == expected else pytest.fail("Request changed"),
+    )
+
+    def verified(loc, repo, source, project, hashes, workflow):
+        assert (loc, repo, source, project, hashes, workflow) == (
+            locator,
+            expected["repository"],
+            expected["head"],
+            ".",
+            record["candidate_state"],
+            "f" * 40,
+        )
+        REPAIR["validate_history"](record)
+        return record
+
+    monkeypatch.setitem(module, "verify_repair_history", verified)
+    monkeypatch.setenv("TRUSTED_WORKFLOW_SHA", "f" * 40)
+    hook = root / ".git/hooks/pre-commit"
+    marker = tmp_path / "commit-hook-executed"
+    hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n")
+    hook.chmod(0o755)
+    return root, artifact, expected, state, remote_head, advance_remote, marker
+
+
+def test_publisher_commits_only_sealed_files_without_project_execution(
+    publisher_checkout,
+):
+    root, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    sealed = {p.name: p.read_bytes() for p in artifact.iterdir()}
+    commit = REPAIR["publish"](expected, artifact)
+    assert remote_head() == commit != expected["head"]
+    assert REPAIR["git"]("rev-parse", "HEAD^").strip() == expected["head"]
+    assert set(REPAIR["git"]("diff", "--name-only", "HEAD^", "HEAD").splitlines()) == {
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+    }
+    assert "Node-Repair: validated-selected-pins-v1" in REPAIR["git"](
+        "log", "-1", "--format=%B"
+    )
+    assert "Node-Repair-run: 123" in REPAIR["git"]("log", "-1", "--format=%B")
+    assert "Node-Repair-artifact: 40" in REPAIR["git"]("log", "-1", "--format=%B")
+    assert "Node-Repair-Workflow-SHA: " + "f" * 40 in REPAIR["git"](
+        "log", "-1", "--format=%B"
+    )
+    assert not marker.exists()
+    assert not REPAIR["git"]("status", "--porcelain").strip()
+    assert len(state["updates"]) == 1
+    body = state["updates"][0]
+    assert body.startswith(
+        "## Platform security\n\nNode upgrade evidence stays unchanged.\n\n"
+    )
+    assert "✅ Upgraded." in body and "Historical evidence (attempt 1)" in body
+    assert "Project validation has not run" not in body
+    assert "actions/runs/123" in body and commit in body
+    assert CHOICES["revision_marker"](commit, expected["base"]) in body
+    assert {p.name: p.read_bytes() for p in artifact.iterdir()} == sealed
+    assert "were published" in body
+
+
+@pytest.mark.parametrize(
+    "problem", ["head", "base", "selection", "lease", "bad-report"]
+)
+def test_publisher_rejects_stale_consent_and_native_push_lease_conflicts(
+    publisher_checkout, problem
+):
+    root, artifact, expected, state, remote_head, advance_remote, marker = (
+        publisher_checkout
+    )
+    previous = expected["head"]
+    if problem == "head":
+        previous = advance_remote()
+    elif problem == "base":
+        state["base"] = "c" * 40
+    elif problem == "selection":
+        state["body"] = state["body"].replace("- [x]", "- [ ]")
+    elif problem == "lease":
+        state["lease_race"] = True
+    elif problem == "bad-report":
+        (artifact / "result.md").write_text("Unbound forged validation success")
+    with pytest.raises((ValueError, subprocess.CalledProcessError)):
+        REPAIR["publish"](expected, artifact)
+    assert remote_head() == state.get("concurrent_commit", previous)
+    assert not state["updates"] and not marker.exists()
+    summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert "No repair push was attempted" in summary or "inspect the branch" in summary
+    assert "were published" not in summary
+
+
+def test_publisher_reports_push_success_and_body_failure_as_partial(publisher_checkout):
+    root, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    state["edit_failure"] = True
+    original_body = state["body"]
+    with pytest.raises(subprocess.CalledProcessError):
+        REPAIR["publish"](expected, artifact)
+    assert (
+        remote_head() == REPAIR["git"]("rev-parse", "HEAD").strip() != expected["head"]
+    )
+    assert state["body"] == original_body and not state["updates"]
+    summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert "was published" in summary and "report update is incomplete" in summary
+    assert "No repair push was attempted" not in summary and not marker.exists()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_publication_body_preserves_platform_bytes_and_frozen_cumulative_rows(
+    cumulative_candidate, monkeypatch, newline
+):
+    _, _, _, _, _, report = cumulative_candidate
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    platform = (
+        "## Platform security\n\n✅ Node.js `24.21.0 → 24.22.1`.\n\n"
+        "| Security release | CVE summary |\n| --- | --- |\n"
+        "| 24.22.1 | [CVE list](https://nodejs.org/en/blog/release/v24.22.1/) |\n\n"
+    ).replace("\n", newline)
+    previous = (
+        platform + "## Package security" + newline + "FORGED OLD PACKAGE EVIDENCE"
+    )
+    body = REPAIR["publication_body"](
+        previous, report, repair_request(), "c" * 40, envelope()
+    )
+    assert body.startswith(platform)
+    assert "FORGED OLD PACKAGE EVIDENCE" not in body
+    assert "Historical evidence (attempt 1)" in body
+    assert "Not observed in the current audit" in body
+    assert "across 2 attempts" in body and "2 advisory/package pairs" in body
+    assert "GHSA-fresh-one1-test" in body
+    assert "node-audit-history:v1:" not in body
+    assert body.count("| Package |") == 1
+    assert "Selected repairs passed frozen installation" in body
+    assert CHOICES["revision_marker"]("c" * 40, repair_request()["base"]) in body
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [
+        "",
+        "## PLATFORM SECURITY\nUnknown format\n",
+        "## Platform security\nfirst\n## Platform security\nsecond\n",
+    ],
+)
+def test_publisher_refuses_missing_or_ambiguous_platform_before_push(
+    publisher_checkout, platform
+):
+    _, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    state["body"] = (
+        platform
+        + "## Package security\n"
+        + CHOICES["render"](
+            [ITEM], head=expected["head"], base=expected["base"]
+        ).replace("- [ ]", "- [x]")
+    )
+    with pytest.raises(ValueError, match="platform report"):
+        REPAIR["publish"](expected, artifact)
+    assert (
+        remote_head() == expected["head"]
+        and not state["updates"]
+        and not marker.exists()
+    )
+
+
+@pytest.mark.parametrize("problem", ["report-bytes", "before-proof", "missing-history"])
+def test_publisher_rejects_modified_or_incomplete_sealed_evidence(
+    publisher_checkout, problem
+):
+    _, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    if problem == "report-bytes":
+        path = artifact / "result.md"
+        path.write_bytes(
+            path.read_bytes().replace(
+                b"Historical evidence", b"Forged historical evidence", 1
+            )
+        )
+    elif problem == "before-proof":
+        state["record"]["attempts"][-1]["before"]["metadata"]["forged"] = (
+            "not original proof"
+        )
+    else:
+        record = state["record"]
+        record.pop("attempts")
+    with pytest.raises((ValueError, KeyError)):
+        REPAIR["publish"](expected, artifact)
+    assert (
+        remote_head() == expected["head"]
+        and not state["updates"]
+        and not marker.exists()
+    )
+
+
+def test_ambiguous_native_push_requires_inspection_without_retry(
+    publisher_checkout, monkeypatch
+):
+    _, artifact, expected, state, remote_head, _, _ = publisher_checkout
+    actual = subprocess.run
+    pushes = []
+
+    def uncertain(command, **kwargs):
+        if command[:4] == ["git", "-c", "core.hooksPath=/dev/null", "push"]:
+            pushes.append(command)
+            actual(command, **kwargs)
+            raise subprocess.TimeoutExpired(command, 1)
+        return actual(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", uncertain)
+    with pytest.raises(subprocess.TimeoutExpired):
+        REPAIR["publish"](expected, artifact)
+    assert len(pushes) == 1 and remote_head() != expected["head"]
+    assert not state["updates"]
+    summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert remote_head() in summary and "inspect the branch" in summary
+    assert "No repair push was attempted" not in summary
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [None, "artifact", "attempt", "duplicate", "job-url", "sibling", "missing-history"],
+)
+def test_publication_locator_requires_current_original_preparation(
+    repair_history_provider, monkeypatch, problem
+):
+    locator, repo, _, _, _, workflow, data, _ = repair_history_provider
+    monkeypatch.setenv("GITHUB_RUN_ID", "10")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.setenv("REPAIR_ARTIFACT_ID", "40")
+    monkeypatch.setenv("TRUSTED_WORKFLOW_SHA", workflow)
+    if problem == "artifact":
+        monkeypatch.setenv("REPAIR_ARTIFACT_ID", "41")
+    elif problem == "attempt":
+        data["actions/runs/10"]["run_attempt"] = 2
+    elif problem == "duplicate":
+        data["check-runs/30/annotations?per_page=100"] *= 2
+    elif problem == "job-url":
+        data["actions/jobs/20"]["check_run_url"] = "https://evil.invalid/30"
+    elif problem == "sibling":
+        data["actions/jobs/20"]["name"] = "Sibling forgery"
+    elif problem == "missing-history":
+        data["check-runs/30/annotations?per_page=100"] = []
+    if problem:
+        with pytest.raises(ValueError):
+            REPAIR["publication_locator"](repair_request())
+    else:
+        assert REPAIR["publication_locator"](repair_request()) == locator
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["head", "base", "body", "state", "head-ref", "base-ref", "head-repo", "base-repo"],
+)
+def test_publisher_retains_successful_push_when_pr_changes_before_body_edit(
+    publisher_checkout, monkeypatch, change
+):
+    _, artifact, expected, state, remote_head, _, _ = publisher_checkout
+    module = REPAIR["publish"].__globals__
+    original = module["gh"]
+
+    def changed(path, **kwargs):
+        value = original(path, **kwargs)
+        if (
+            path.endswith(f"/pulls/{expected['pr']}")
+            and not kwargs
+            and state["reads"] == 3
+        ):
+            value = json.loads(json.dumps(value))
+            if change == "head":
+                value["head"]["sha"] = "e" * 40
+            elif change == "base":
+                value["base"]["sha"] = "e" * 40
+            elif change == "body":
+                value["body"] += "Maintainer edit after push"
+            elif change == "state":
+                value["state"] = "closed"
+            elif change.endswith("-ref"):
+                value[change.split("-")[0]]["ref"] = "different-branch"
+            else:
+                value[change.split("-")[0]]["repo"]["id"] = 2
+        return value
+
+    monkeypatch.setitem(module, "gh", changed)
+    monkeypatch.setattr(
+        module["time"], "sleep", lambda _: pytest.fail("Waited on changed PR")
+    )
+    with pytest.raises(ValueError, match="PR state differs after repair push"):
+        REPAIR["publish"](expected, artifact)
+    assert remote_head() != expected["head"] and not state["updates"]
+    summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert remote_head() in summary and "report update is incomplete" in summary
+
+
+@pytest.mark.parametrize("stale_reads", [1, 3, 4])
+def test_publisher_waits_only_for_exact_pre_push_view_without_another_push(
+    publisher_checkout, monkeypatch, stale_reads
+):
+    _, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    module = REPAIR["publish"].__globals__
+    original_api = module["gh"]
+    original_run = module["subprocess"].run
+    delays, pushes = [], []
+
+    def api(path, **kwargs):
+        value = original_api(path, **kwargs)
+        if (
+            path.endswith(f"/pulls/{expected['pr']}")
+            and not kwargs
+            and 3 <= state["reads"] <= 2 + stale_reads
+        ):
+            value["head"]["sha"] = expected["head"]
+        return value
+
+    def run(arguments, *args, **kwargs):
+        if arguments[0] == "git" and "push" in arguments:
+            pushes.append(arguments)
+        return original_run(arguments, *args, **kwargs)
+
+    monkeypatch.setitem(module, "gh", api)
+    monkeypatch.setattr(module["time"], "sleep", delays.append)
+    monkeypatch.setattr(module["subprocess"], "run", run)
+    if stale_reads < 4:
+        commit = REPAIR["publish"](expected, artifact)
+        assert remote_head() == commit and len(state["updates"]) == 1
+    else:
+        with pytest.raises(ValueError, match="PR state differs after repair push"):
+            REPAIR["publish"](expected, artifact)
+        assert not state["updates"]
+        summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+        assert remote_head() in summary and "report update is incomplete" in summary
+    assert len(pushes) == 1 and remote_head() != expected["head"]
+    assert delays == ([1] if stale_reads == 1 else [1, 2, 4])
+    assert (
+        len(
+            REPAIR["git"](
+                "rev-list", f"{expected['head']}..{remote_head()}"
+            ).splitlines()
+        )
+        == 1
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "problem", ["demoted-headings", "controls-in-platform", "missing-package-boundary"]
+)
+def test_publisher_rejects_unrecognized_platform_boundary_before_native_push(
+    publisher_checkout, problem
+):
+    _, artifact, expected, state, remote_head, _, marker = publisher_checkout
+    body = state["body"]
+    if problem == "demoted-headings":
+        body = body.replace("## Package security\n", "### Package security\n").replace(
+            "## Choose fixes to try\n", "### Choose fixes to try\n"
+        )
+    elif problem == "missing-package-boundary":
+        body = body.replace("## Package security\n", "")
+    else:
+        platform = body.split("## Package security\n", 1)[0]
+        choices = CHOICES["render"](
+            [ITEM], head=expected["head"], base=expected["base"]
+        ).replace("- [ ]", "- [x]")
+        body = (
+            platform
+            + choices.replace("## Choose fixes to try", "### Choose fixes to try")
+            + "\n## Package security\nOld packages\n"
+        )
+    state["body"] = body
+    assert REPAIR["guard"](expected)["body"] == body
+    with pytest.raises(ValueError, match="platform report"):
+        REPAIR["publish"](expected, artifact)
+    assert remote_head() == expected["head"]
+    assert not state["updates"] and not marker.exists()
+    summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert "No repair push was attempted" in summary
