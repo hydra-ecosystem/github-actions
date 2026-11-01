@@ -47,6 +47,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      actions: read
+      checks: read
     uses: hydra-ecosystem/github-actions/.github/workflows/node-repair.yml@REVIEWED_REF
     with:
       request-id: ${{ inputs.request-id }}
@@ -106,3 +108,17 @@ Do not start the cumulative repair consumer from focused/local fixture tests.
 The required local full review, regular PR approval/CI and this hosted mapping
 and forgery gate must all pass first. This gate does not claim cumulative repair
 reporting, dependency publication or full repair acceptance is complete.
+
+For cumulative preparation acceptance, use the private demo repository. Retain
+an initial normal-audit receipt and exercise two subsequent repair attempts.
+Verify the original advisory row survives a later audit that omits it, then use
+the second attempt's sealed `result.md` as the third attempt's seed. Keep current
+unresolved findings distinct from historical outcomes. Record all three native
+source/dependency bindings and exact run/job/Check/artifact IDs and digests.
+
+After the reviewed source passes CI, verify a real preparation upload precedes
+separate validation. A distinct read-only run must accept the genuine producer
+and reject an identical sibling-job copy. Grant only Actions/Checks read access
+to the consumer. Preserve the existing demo PR and restore the complete fixture
+file tree after the bounded test. No Hydra mutation, dependency publication or
+source merge is included in this preparation slice.

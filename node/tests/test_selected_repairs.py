@@ -815,6 +815,7 @@ def test_preparation_seals_only_three_members_without_validation(
         lambda: (project, {"minimumReleaseAge": 14400}, before),
     )
     monkeypatch.setitem(module, "verified_targets", lambda *a, **kw: repair_audit())
+    monkeypatch.setitem(module, "native_history", lambda *a: normal_history(before))
     monkeypatch.setitem(module, "export_patch", lambda paths: b"sealed patch\n")
     status = []
 
@@ -917,6 +918,7 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
     assert checkout["with"] == {
         "ref": "${{ inputs.expected-head }}",
         "persist-credentials": False,
+        "fetch-depth": 0,
     }
     assert "candidate-artifact-id" in prepare["outputs"]
     upload = next(
@@ -929,7 +931,9 @@ def test_repair_workflow_keeps_preparation_separate_from_read_only_validation():
     ]
     validation = workflow["jobs"]["validate"]
     assert validation["needs"] == "prepare"
-    assert validation["steps"][0]["with"] == checkout["with"]
+    assert validation["steps"][0]["with"] == {
+        k: v for k, v in checkout["with"].items() if k != "fetch-depth"
+    }
     assert (
         validation["steps"][1]["with"]["candidate-artifact-id"]
         == "${{ needs.prepare.outputs.candidate-artifact-id }}"
@@ -1217,3 +1221,669 @@ def test_validation_fails_closed_and_never_reseals_candidate(
     assert not (evidence / "candidate.patch").exists()
     assert {p.name: p.read_bytes() for p in original.iterdir()} == original_bytes
     assert REPAIR["git"]("rev-parse", "HEAD").strip() == expected["head"]
+
+
+def normal_history(snapshot):
+    audit = repair_audit()
+    return dict(
+        version=1,
+        repository=repair_request()["repository"],
+        source="c" * 40,
+        project=".",
+        manager="pnpm",
+        before_state=ENGINE["dependency_state"](snapshot),
+        candidate_state=ENGINE["dependency_state"](snapshot),
+        before=audit,
+        after=audit,
+        fixed_ids=[],
+        package_report=ENGINE["format_audit_summary"](
+            audit, audit, "pnpm", fixed_ids=set(), locks=(snapshot[3], snapshot[3])
+        ),
+    )
+
+
+@pytest.fixture
+def cumulative_candidate(tmp_path, monkeypatch):
+    root = tmp_path / "source"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    before = repair_files(root)
+    initial = normal_history(before)
+    after = repair_files(root, ITEM["to"])
+    proof = repair_audit()
+    # The original advisory disappeared from the registry. Only fresh evidence
+    # for another advisory can establish this attempt's selected repair.
+    for detail in (
+        proof["advisories"]["1"],
+        proof["vulnerabilities"][ITEM["name"]]["via"][0],
+    ):
+        detail["url"] = "https://github.com/advisories/GHSA-fresh-one1-test"
+    report = REPAIR["cumulative_report"](
+        initial,
+        repair_request(),
+        root,
+        {},
+        before,
+        after,
+        proof,
+        empty_audit(),
+        {"https://github.com/advisories/GHSA-fresh-one1-test"},
+    )
+    return root, before, after, initial, proof, report
+
+
+def test_three_attempt_history_retains_original_inventory(cumulative_candidate):
+    root, before, after, initial, proof, report = cumulative_candidate
+    record = ENGINE["history_record"](report.encode())
+    assert record["attempts"][0] == initial
+    original_url = repair_audit()["advisories"]["1"]["url"]
+    assert original_url in report
+    assert "Historical evidence (attempt 1)" in report
+    assert "Cumulative evidence: 2 advisory/package pairs across 2 attempts" in report
+    assert report.count("| Package |") == 1
+    final = repair_files(root, "2.14.3")
+    fresh = repair_audit()
+    raw = fresh["advisories"]["1"]
+    raw["findings"][0]["version"] = ITEM["to"]
+    detail = fresh["vulnerabilities"][ITEM["name"]]["via"][0]
+    detail["nodes"] = [ITEM["name"] + "@" + ITEM["to"]]
+    detail["_verifiedVulnerableVersions"] = [ITEM["to"]]
+    detail["_verifiedRepairVersions"] = ["2.14.3"]
+    for item in (raw, detail):
+        item["url"] = "https://github.com/advisories/GHSA-fresh-two2-test"
+    request = dict(
+        repair_request(),
+        head="d" * 40,
+        selections=[dict(ITEM, **{"from": ITEM["to"], "to": "2.14.3"})],
+    )
+    third = REPAIR["cumulative_report"](
+        record, request, root, {}, after, final, fresh, empty_audit(), {detail["url"]}
+    )
+    third_record = ENGINE["history_record"](third.encode())
+    assert third_record["attempts"][:2] == record["attempts"]
+    assert len(third_record["attempts"]) == 3
+    assert original_url in third and raw["url"] in third
+    assert "Cumulative evidence: 3 advisory/package pairs across 3 attempts" in third
+    assert third.count("| Package |") == 1
+    assert third.count("| `launch-editor`") == 3
+    assert "Historical evidence (attempt 2)" in third
+    assert "Current attempt" in third
+    # Original normalized and raw CVE evidence is carried, not regenerated.
+    assert third_record["attempts"][0]["before"] == initial["before"]
+
+
+def test_history_absence_is_not_a_new_fix_claim(cumulative_candidate):
+    root, before, after, initial, proof, _ = cumulative_candidate
+    initial["before"] = initial["after"] = empty_audit()
+    # Preserve a historical upgraded package row even when both fresh audits
+    # omit that package entirely.
+    initial["package_report"] = (
+        "| `earlier` | `1.0.0` → `1.0.1` | High | 1 fixed | ✅ Fix proposed. Resolved. | [CVE-2026-1111](https://example.com/advisory) |"
+    )
+    report = REPAIR["cumulative_report"](
+        initial, repair_request(), root, {}, before, after, proof, empty_audit(), set()
+    )
+    assert (
+        "Historical evidence (attempt 1). Not observed in the current audit." in report
+    )
+    assert "withdrawn" not in report.lower()
+    # The payload keeps the full prior row independently of a fresh audit.
+    assert ENGINE["history_record"](report.encode())["attempts"][0] == initial
+
+
+def test_current_unresolved_takes_precedence_over_historical_success(
+    cumulative_candidate,
+):
+    root, before, after, initial, proof, _ = cumulative_candidate
+    initial["package_report"] = initial["package_report"].replace(
+        "🟡 Needs review.", "✅ Fix proposed. Resolved."
+    )
+    report = REPAIR["cumulative_report"](
+        initial,
+        repair_request(),
+        root,
+        {},
+        before,
+        after,
+        repair_audit(),
+        repair_audit(),
+        set(),
+    )
+    assert "Historical evidence (attempt 1). Current unresolved." in report
+    assert "Current attempt." in report
+
+
+@pytest.mark.parametrize(
+    "problem", ["chain", "identity", "missing-rows", "bad-audit", "oversized"]
+)
+def test_cumulative_seal_rejects_incomplete_history(cumulative_candidate, problem):
+    root, before, after, initial, proof, report = cumulative_candidate
+    if problem == "chain":
+        initial["candidate_state"]["pnpm-lock.yaml"] = "0" * 64
+    elif problem == "identity":
+        initial["repository"] = "different/repo"
+    elif problem == "missing-rows":
+        initial["package_report"] = "No findings"
+    elif problem == "bad-audit":
+        initial["before"] = "unavailable"
+    else:
+        initial["package_report"] += "\n" + "x" * 524288
+    with pytest.raises(ValueError):
+        REPAIR["cumulative_report"](
+            initial,
+            repair_request(),
+            root,
+            {},
+            before,
+            after,
+            proof,
+            empty_audit(),
+            set(),
+        )
+
+
+@pytest.fixture
+def repair_history_provider(cumulative_candidate, monkeypatch):
+    import hashlib
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    root, before, after, initial, proof, report = cumulative_candidate
+    record = ENGINE["history_record"](report.encode())
+    payload = dict(envelope(), before=proof)
+    stream = BytesIO()
+    with ZipFile(stream, "w") as bundle:
+        for name, data in {
+            "candidate.patch": b"actual sealed patch",
+            "audit.json": json.dumps(payload).encode(),
+            "result.md": report.encode(),
+        }.items():
+            bundle.writestr(name, data)
+    archive = stream.getvalue()
+    locator = dict(
+        run=10,
+        job=20,
+        check=30,
+        artifact=40,
+        archive_sha256=hashlib.sha256(archive).hexdigest(),
+        content_sha256=hashlib.sha256(report.encode()).hexdigest(),
+    )
+    repo = repair_request()["repository"]
+    trigger = "e" * 40
+    workflow = "f" * 40
+    name = "repair / Node repair preparation"
+    run = dict(
+        repository={"full_name": repo},
+        path=".github/workflows/fixture.yml",
+        head_sha=trigger,
+        event="workflow_dispatch",
+        run_attempt=1,
+        referenced_workflows=[
+            dict(
+                path="hydra-ecosystem/github-actions/.github/workflows/node-repair.yml@experiment/node-maintenance-repair",
+                sha=workflow,
+            )
+        ],
+    )
+    job = dict(
+        id=20,
+        run_id=10,
+        run_attempt=1,
+        head_sha=trigger,
+        name=name,
+        check_run_url=f"https://api.github.com/repos/{repo}/check-runs/30",
+        status="completed",
+        conclusion="success",
+        html_url=f"https://github.com/{repo}/actions/runs/10/job/20",
+        steps=[
+            {"name": s, "conclusion": "success"}
+            for s in (
+                "Prepare the selected candidate using trusted workflow code",
+                "Seal uploaded repair evidence",
+            )
+        ],
+    )
+    check = dict(
+        id=30,
+        head_sha=trigger,
+        app={"id": 15368},
+        details_url=job["html_url"],
+        output={"annotations_count": 1},
+    )
+    notice = dict(
+        title=REPAIR["REPAIR_HISTORY_TITLE"],
+        annotation_level="notice",
+        message=f"v1:40:{locator['archive_sha256']}:{locator['content_sha256']}",
+    )
+    metadata = dict(
+        id=40,
+        expired=False,
+        size_in_bytes=len(archive),
+        digest="sha256:" + locator["archive_sha256"],
+        workflow_run={"id": 10, "head_sha": trigger},
+    )
+    data = {
+        "actions/runs/10": run,
+        "actions/jobs/20": job,
+        "actions/runs/10/attempts/1/jobs?per_page=100": {
+            "total_count": 1,
+            "jobs": [job],
+        },
+        "check-runs/30": check,
+        "check-runs/30/annotations?per_page=100": [notice],
+        "actions/artifacts/40": metadata,
+        "actions/artifacts/40/zip": archive,
+        f"contents/.github/workflows/fixture.yml?ref={trigger}": encoded_workflow(
+            {"repair": {"uses": run["referenced_workflows"][0]["path"]}}
+        ),
+        f"contents/.github/workflows/node-repair.yml?ref={workflow}": encoded_workflow(
+            {"prepare": {"name": "Node repair preparation", "steps": []}}
+        ),
+    }
+
+    def api(repository, suffix, **kwargs):
+        assert repository in (repo, "hydra-ecosystem/github-actions")
+        return data[suffix]
+
+    monkeypatch.setitem(
+        REPAIR["verify_repair_history"].__globals__["ENGINE"], "history_api", api
+    )
+    return (
+        locator,
+        repo,
+        record["source"],
+        ".",
+        record["candidate_state"],
+        workflow,
+        data,
+        record,
+    )
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        None,
+        "sibling",
+        "forged-check",
+        "duplicate-notice",
+        "notice-level",
+        "notice-hash",
+        "wrong-workflow",
+        "job-failed",
+        "step-order",
+        "job-attempt",
+        "job-head",
+        "check-app",
+        "check-url",
+        "expired",
+        "artifact-head",
+        "artifact-digest",
+        "archive",
+        "source",
+        "dependency-state",
+    ],
+)
+def test_distinct_run_repair_history_requires_exact_producer(
+    repair_history_provider, problem
+):
+    locator, repo, source, project, state, workflow, data, record = (
+        repair_history_provider
+    )
+    if problem == "sibling":
+        data["actions/jobs/20"]["name"] = "sibling / copied bytes"
+    elif problem == "forged-check":
+        data["actions/jobs/20"]["check_run_url"] = (
+            f"https://api.github.com/repos/{repo}/check-runs/99"
+        )
+    elif problem == "duplicate-notice":
+        data["check-runs/30/annotations?per_page=100"] *= 2
+    elif problem == "notice-level":
+        data["check-runs/30/annotations?per_page=100"][0]["annotation_level"] = (
+            "warning"
+        )
+    elif problem == "notice-hash":
+        data["check-runs/30/annotations?per_page=100"][0]["message"] += "x"
+    elif problem == "wrong-workflow":
+        data["actions/runs/10"]["referenced_workflows"][0]["sha"] = "0" * 40
+    elif problem == "job-failed":
+        data["actions/jobs/20"]["conclusion"] = "failure"
+    elif problem == "step-order":
+        data["actions/jobs/20"]["steps"].reverse()
+    elif problem == "job-attempt":
+        data["actions/jobs/20"]["run_attempt"] = 2
+    elif problem == "job-head":
+        data["actions/jobs/20"]["head_sha"] = source
+    elif problem == "check-app":
+        data["check-runs/30"]["app"]["id"] = 1
+    elif problem == "check-url":
+        data["check-runs/30"]["details_url"] += "-forged"
+    elif problem == "expired":
+        data["actions/artifacts/40"]["expired"] = True
+    elif problem == "artifact-head":
+        data["actions/artifacts/40"]["workflow_run"]["head_sha"] = source
+    elif problem == "artifact-digest":
+        data["actions/artifacts/40"]["digest"] = "sha256:" + "0" * 64
+    elif problem == "archive":
+        data["actions/artifacts/40/zip"] += b"tampered"
+    elif problem == "source":
+        source = "0" * 40
+    elif problem == "dependency-state":
+        state = dict(state, **{"pnpm-lock.yaml": "0" * 64})
+    if problem:
+        with pytest.raises(ValueError):
+            REPAIR["verify_repair_history"](
+                locator, repo, source, project, state, workflow
+            )
+    else:
+        assert (
+            REPAIR["verify_repair_history"](
+                locator, repo, source, project, state, workflow
+            )
+            == record
+        )
+
+
+def test_native_history_uses_commit_trailers_and_rejects_missing_receipt(
+    sealed_checkout, monkeypatch
+):
+    root, _, snapshot, expected = sealed_checkout
+    with pytest.raises(ValueError, match="No sealed historical evidence"):
+        REPAIR["native_history"](expected, root, snapshot)
+    locator = dict(
+        run=1,
+        job=2,
+        check=3,
+        artifact=4,
+        archive_sha256="a" * 64,
+        content_sha256="b" * 64,
+    )
+    trailers = (
+        "\n".join(f"Node-Audit-{k.replace('_', '-')}: {v}" for k, v in locator.items())
+        + "\nNode-Audit-Workflow-SHA: "
+        + "f" * 40
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Normal proposal\n\n" + trailers,
+        ],
+        check=True,
+    )
+    expected = dict(expected, head=REPAIR["git"]("rev-parse", "HEAD").strip())
+    module = REPAIR["native_history"].__globals__["ENGINE"]
+    monkeypatch.setitem(
+        module,
+        "history_api",
+        lambda *a, **kw: {"name": "audit / Node audit evidence (node-security)"},
+    )
+    monkeypatch.setitem(
+        REPAIR["native_history"].__globals__,
+        "producer_names",
+        lambda *args: ["audit / Node audit evidence (node-security)"],
+    )
+    calls = []
+
+    def verify(actual, **kwargs):
+        calls.append((actual, kwargs))
+        return normal_history(snapshot)
+
+    monkeypatch.setitem(module, "verify_history", verify)
+    REPAIR["native_history"](expected, root, snapshot)
+    assert calls[0][0] == locator
+    assert calls[0][1]["candidate_state"] == ENGINE["dependency_state"](snapshot)
+    assert calls[0][1]["source"] == REPAIR["git"]("rev-parse", "HEAD^").strip()
+
+
+def test_historical_html_rows_preserve_renderer_evidence_and_versions():
+    report = '<table><thead><tr><th>Package</th></tr></thead><tbody><tr><td><code>pkg</code></td><td><code>1.0.0</code> → <code>1.0.1</code></td><td>High</td><td>1 fixed</td><td>✅ Fix proposed. Resolved.</td><td><a href="https://example.com/GHSA-original">GHSA-original</a></td></tr><tr><td colspan="6"><details>pin assessment</details></td></tr></tbody></table>'
+    rows = REPAIR["report_rows"](report)
+    assert rows == [
+        [
+            "`pkg`",
+            "`1.0.0` → `1.0.1`",
+            "High",
+            "1 fixed",
+            "✅ Fix proposed. Resolved.",
+            "[GHSA-original](https://example.com/GHSA-original)",
+        ]
+    ]
+    assert REPAIR["report_rows"](
+        "| `pkg` | one | High | 1 | action | evidence |\r\n"
+    ) == [["`pkg`", "one", "High", "1", "action", "evidence"]]
+
+
+@pytest.mark.parametrize("html_origin", [False, True])
+def test_cumulative_table_keeps_range_pipes_inside_six_cells(
+    cumulative_candidate, html_origin
+):
+    root, before, after, initial, proof, _ = cumulative_candidate
+    audit = initial["before"]
+    affected = ">=1.0.0 <2.0.0 || >=3.0.0 <4.0.0"
+    audit["advisories"]["1"]["vulnerable_versions"] = affected
+    audit["vulnerabilities"][ITEM["name"]]["via"][0]["range"] = affected
+    initial["after"] = empty_audit()
+    report = ENGINE["format_audit_summary"](
+        audit,
+        initial["after"],
+        "pnpm",
+        fixed_ids=set(),
+        locks=(before[3], before[3]),
+        repair_options=[ITEM] if html_origin else None,
+    )
+    assert ("<table>" in report) == html_origin
+    initial["package_report"] = report
+    result = REPAIR["cumulative_report"](
+        initial, repair_request(), root, {}, before, after, proof, empty_audit(), set()
+    )
+    rows = [line for line in result.splitlines() if line.startswith("| `")]
+    assert rows and all(len(line[2:-2].split(" | ")) == 6 for line in rows)
+    historical = next(line for line in rows if "Historical evidence" in line)
+    assert "&#124;&#124;" in historical
+    assert len(historical.split("|")) == 8
+    cells = historical[2:-2].split(" | ")
+    assert "&#124;&#124;" in cells[4]
+    assert audit["advisories"]["1"]["url"] in cells[5]
+
+
+def test_documented_caller_covers_reusable_workflow_read_permissions():
+    text = (ROOT / "repair-app/pilot/README.md").read_text()
+    caller = yaml.safe_load(text.split("```yaml\n", 1)[1].split("```", 1)[0])
+    workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
+    job = caller["jobs"]["candidate"]
+    for reusable in workflow["jobs"].values():
+        for scope, level in reusable["permissions"].items():
+            assert level == "read" and job["permissions"][scope] == level
+    assert set(job["with"]) == set(workflow["on"]["workflow_call"]["inputs"])
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_selected_policy_edit_preserves_original_line_endings(newline):
+    original = (
+        "packages:\n  - .\noverrides:\n  launch-editor: 2.14.1 # retained comment\n"
+    ).replace("\n", newline)
+    updated = REPAIR["update_policy"](original, [ITEM])
+    assert updated == original.replace("2.14.1", '"2.14.2"')
+
+
+def test_preparation_upload_notice_is_after_immutable_upload():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
+    action = yaml.safe_load((ROOT / "node/repair/action.yml").read_text())
+    producer = workflow["jobs"]["prepare"]
+    assert producer["name"] == "Node repair preparation"
+    assert producer["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "checks": "read",
+    }
+    seal = producer["steps"][-1]
+    assert seal["name"] == "Seal uploaded repair evidence"
+    assert "Node repair evidence v1" in seal["run"]
+    assert (
+        seal["env"]["ARTIFACT_ID"]
+        == "${{ steps.prepare.outputs.candidate-artifact-id }}"
+    )
+    assert (
+        action["outputs"]["candidate-archive-sha256"]["value"]
+        == "${{ steps.candidate.outputs.artifact-digest }}"
+    )
+    steps = action["runs"]["steps"]
+    assert next(
+        i for i, s in enumerate(steps) if s.get("id") == "report-digest"
+    ) < next(i for i, s in enumerate(steps) if s.get("id") == "candidate")
+    assert workflow["jobs"]["validate"]["permissions"] == {"contents": "read"}
+
+
+def encoded_workflow(jobs):
+    import base64
+
+    return {
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode(yaml.safe_dump({"jobs": jobs}).encode()).decode(),
+    }
+
+
+@pytest.mark.parametrize(
+    "copied_name",
+    ["attacker / Node repair preparation", "repair / Node repair preparation"],
+)
+def test_sibling_cannot_copy_producer_names_and_steps(
+    repair_history_provider, copied_name
+):
+    locator, repo, source, project, state, workflow, data, record = (
+        repair_history_provider
+    )
+    candidate = data["actions/jobs/20"]
+    genuine = dict(candidate, id=21)
+    candidate["name"] = copied_name
+    data["actions/runs/10/attempts/1/jobs?per_page=100"] = {
+        "total_count": 2,
+        "jobs": [candidate, genuine],
+    }
+    data["contents/.github/workflows/fixture.yml?ref=" + "e" * 40] = encoded_workflow(
+        {
+            "repair": {
+                "uses": data["actions/runs/10"]["referenced_workflows"][0]["path"]
+            },
+            "attacker": {"name": copied_name, "steps": []},
+        }
+    )
+    with pytest.raises(ValueError):
+        REPAIR["verify_repair_history"](locator, repo, source, project, state, workflow)
+
+
+def test_same_package_history_qualifies_each_advisory_identity(cumulative_candidate):
+    root, before, after, initial, proof, report = cumulative_candidate
+    old_id = repair_audit()["advisories"]["1"]["url"].rsplit("/", 1)[-1]
+    old_row = next(
+        line
+        for line in report.splitlines()
+        if "Historical evidence (attempt 1)" in line
+    )
+    assert "Not observed in the current audit." in old_row
+    assert f"Advisories: `{old_id}`" in old_row
+    assert "Current unresolved." not in old_row
+    # Another current advisory for the same package is not old-advisory proof.
+    pending = REPAIR["cumulative_report"](
+        initial, repair_request(), root, {}, before, after, proof, proof, set()
+    )
+    old_row = next(
+        line
+        for line in pending.splitlines()
+        if "Historical evidence (attempt 1)" in line
+    )
+    assert "Not observed in the current audit." in old_row
+    assert "Current unresolved." not in old_row
+    # Reintroduction of the exact old identity is current unresolved evidence.
+    old = repair_audit()
+    reintroduced = REPAIR["cumulative_report"](
+        initial, repair_request(), root, {}, before, after, old, old, set()
+    )
+    old_row = next(
+        line
+        for line in reintroduced.splitlines()
+        if "Historical evidence (attempt 1)" in line
+    )
+    assert "Current unresolved." in old_row and "Not observed" not in old_row
+
+
+@pytest.mark.parametrize("extra_commit", [False, True])
+def test_full_checkout_resolves_native_receipt_at_or_below_head(
+    sealed_checkout, monkeypatch, tmp_path, extra_commit
+):
+    root, _, snapshot, expected = sealed_checkout
+    trailers = (
+        "\n".join(
+            f"Node-Audit-{k.replace('_', '-')}: {v}"
+            for k, v in dict(
+                run=1,
+                job=2,
+                check=3,
+                artifact=4,
+                archive_sha256="a" * 64,
+                content_sha256="b" * 64,
+            ).items()
+        )
+        + "\nNode-Audit-Workflow-SHA: "
+        + "f" * 40
+    )
+
+    def commit(message):
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                message,
+            ],
+            check=True,
+        )
+
+    commit("Receipt\n\n" + trailers)
+    receipt_parent = REPAIR["git"]("rev-parse", "HEAD^").strip()
+    if extra_commit:
+        commit("Unrelated maintainer commit")
+    clone = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", root.as_uri(), str(clone)], check=True
+    )
+    monkeypatch.chdir(clone)
+    assert REPAIR["git"]("rev-parse", "--is-shallow-repository").strip() == "true"
+    # actions/checkout fetch-depth:0 fetches the complete ancestry.
+    workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
+    assert workflow["jobs"]["prepare"]["steps"][0]["with"]["fetch-depth"] == 0
+    subprocess.run(["git", "fetch", "-q", "--unshallow", "origin"], check=True)
+    expected = dict(expected, head=REPAIR["git"]("rev-parse", "HEAD").strip())
+    module = REPAIR["native_history"].__globals__
+    monkeypatch.setitem(
+        module,
+        "producer_names",
+        lambda *args: ["audit / Node audit evidence (node-security)"],
+    )
+    monkeypatch.setitem(
+        module["ENGINE"],
+        "history_api",
+        lambda *args, **kw: {"name": "audit / Node audit evidence (node-security)"},
+    )
+    calls = []
+
+    def verify(locator, **kwargs):
+        calls.append(kwargs)
+        return normal_history(snapshot)
+
+    monkeypatch.setitem(module["ENGINE"], "verify_history", verify)
+    REPAIR["native_history"](expected, clone, snapshot)
+    assert calls[0]["source"] == receipt_parent
