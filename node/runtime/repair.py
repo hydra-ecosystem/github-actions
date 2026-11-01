@@ -1,4 +1,4 @@
-"""Prepare a sealed pnpm candidate and validate it without publication."""
+"""Prepare, validate and publish exactly one sealed selected pnpm candidate."""
 
 import argparse
 import base64
@@ -73,8 +73,13 @@ def request():
     )
 
 
-def gh(path):
-    return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+def gh(path, *, body=None):
+    arguments = ["gh", "api", path]
+    options = {}
+    if body is not None:
+        arguments += ["--method", "PATCH", "--input", "-"]
+        options["input"] = json.dumps(body)
+    return json.loads(subprocess.check_output(arguments, text=True, **options))
 
 
 def git(*args, **kwargs):
@@ -141,7 +146,7 @@ def project_path(root, name):
     return relative.as_posix()
 
 
-def project_context():
+def project_context(*, verify_runtime=True):
     root = Path.cwd().resolve()
     config_path = (
         Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "node-repair-config.json"
@@ -151,7 +156,8 @@ def project_context():
     name = project_path(root, configuration["directory"])
     if root / name != directory or selected["manager"] != "pnpm":
         raise ValueError("Repair attempts require a standalone pnpm project")
-    PROJECT["verify_runtime"](directory, selected)
+    if verify_runtime:
+        PROJECT["verify_runtime"](directory, selected)
     snapshot = ENGINE["valid_snapshot"](directory)
     if snapshot is None:
         raise ValueError("Invalid project snapshot")
@@ -1129,6 +1135,249 @@ def cumulative_report(
     return report
 
 
+def publication_locator(expected):
+    """Resolve the exact original preparation notice in this workflow attempt."""
+    run, attempt, artifact = (
+        os.environ[key]
+        for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "REPAIR_ARTIFACT_ID")
+    )
+    if any(
+        not re.fullmatch(r"[1-9][0-9]*", value) for value in (run, attempt, artifact)
+    ):
+        raise ValueError("Invalid preparation run, attempt or artifact ID")
+    repo = expected["repository"]
+    data = ENGINE["history_api"](repo, f"actions/runs/{run}")
+    if str(data.get("run_attempt")) != attempt:
+        raise ValueError("Preparation workflow attempt changed")
+    names = producer_names(
+        data,
+        repo,
+        "hydra-ecosystem/github-actions/.github/workflows/node-repair.yml",
+        os.environ["TRUSTED_WORKFLOW_SHA"],
+        "Node repair preparation",
+    )
+    jobs = ENGINE["history_api"](
+        repo, f"actions/runs/{run}/attempts/{attempt}/jobs?per_page=100"
+    )
+    matches = [j for j in jobs.get("jobs", []) if j.get("name") in names]
+    if jobs.get("total_count", 100) >= 100 or len(matches) != 1:
+        raise ValueError("Missing or ambiguous preparation producer")
+    job = matches[0]
+    check = job.get("check_run_url", "").removeprefix(
+        f"https://api.github.com/repos/{repo}/check-runs/"
+    )
+    if not re.fullmatch(r"[1-9][0-9]*", check):
+        raise ValueError("Invalid preparation Check URL")
+    notices = [
+        a
+        for a in ENGINE["history_api"](
+            repo, f"check-runs/{check}/annotations?per_page=100"
+        )
+        if a.get("title") == REPAIR_HISTORY_TITLE
+    ]
+    seal = (
+        re.fullmatch(
+            r"v1:([1-9][0-9]*):([a-f0-9]{64}):([a-f0-9]{64})",
+            notices[0].get("message", ""),
+        )
+        if len(notices) == 1
+        else None
+    )
+    if seal is None or seal[1] != artifact:
+        raise ValueError("Preparation notice does not bind the original artifact ID")
+    return dict(
+        run=int(run),
+        job=job["id"],
+        check=int(check),
+        artifact=int(artifact),
+        archive_sha256=seal[2],
+        content_sha256=seal[3],
+    )
+
+
+def publication_body(previous, report, expected, commit, envelope):
+    """Use sealed package evidence and retain the existing platform section."""
+    spans = list(
+        re.finditer(r"(?ms)^## Platform security\r?\n.*?(?=^## |\Z)", previous)
+    )
+    if (
+        len(spans) != 1
+        or len(re.findall(r"(?im)^##[^\r\n]*platform[^\r\n]*", previous)) != 1
+        or not re.match(r"## Package security\r?\n", previous[spans[0].end() :])
+        or "<!-- node-repair:" in spans[0].group()
+    ):
+        raise ValueError("Missing or ambiguous platform report; refusing publication")
+    platform = spans[0].group()
+    history = ENGINE["history_record"](report.encode("utf-8"))
+    validate_history(history)
+    if not isinstance(history.get("attempts"), list) or len(history["attempts"]) < 2:
+        raise ValueError("Preparation lacks complete cumulative history")
+    preparation = (
+        "Candidate preparation succeeded. Project validation has not run. "
+        "No dependency change has been published."
+    )
+    if not report.startswith("## Package security candidate\n\n" + preparation):
+        raise ValueError("Invalid sealed preparation report")
+    report = ENGINE["HISTORY_PATTERN"].sub("", report, count=1)
+    report = report.replace("## Package security candidate", "## Package security", 1)
+    report = report.replace(
+        preparation,
+        "Selected repairs passed frozen installation, configured project/local-patch "
+        "checks and a fresh audit, and were published to this PR. Human review is "
+        "still required; nothing merges automatically.",
+        1,
+    ).replace("Current attempt. ✅ Fix proposed.", "Current attempt. ✅ Upgraded.")
+    run = os.environ["GITHUB_RUN_ID"]
+    if not re.fullmatch(r"[1-9][0-9]*", run):
+        raise ValueError("Invalid workflow run ID")
+    choices = CHOICES["render"](
+        CHOICES["candidates"](envelope["candidate"]),
+        head=commit,
+        base=expected["base"],
+    )
+    marker = "" if choices else CHOICES["revision_marker"](commit, expected["base"])
+    body = (
+        platform + report.rstrip() + "\n\n"
+        f"[Validated repair run](https://github.com/{expected['repository']}/actions/runs/{run})"
+        f" · Repair commit `{commit}`\n\n" + choices + marker + "\n"
+    )
+
+    if len(body) > 65536:
+        raise ValueError("Cumulative PR report exceeds GitHub's body limit")
+    return body
+
+
+def publish(expected, artifact):
+    """Publish only the original preparation copy, without project execution."""
+    root = Path.cwd().resolve()
+    message = "No repair push was attempted."
+    try:
+        if (
+            git("rev-parse", "HEAD").strip() != expected["head"]
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            raise ValueError("Publication requires a clean expected-head checkout")
+        if artifact.resolve() != artifact or artifact.is_relative_to(root):
+            raise ValueError("Candidate artifacts must be outside the checkout")
+        guard(expected)
+        directory, _, snapshot = project_context(verify_runtime=False)
+        envelope, candidate = apply_candidate(expected, artifact, directory, snapshot)
+        locator = publication_locator(expected)
+        workflow = os.environ["TRUSTED_WORKFLOW_SHA"]
+        record = verify_repair_history(
+            locator,
+            expected["repository"],
+            expected["head"],
+            directory.relative_to(root).as_posix(),
+            ENGINE["dependency_state"](candidate),
+            workflow,
+        )
+        if not isinstance(record.get("attempts"), list) or len(record["attempts"]) < 2:
+            raise ValueError("Preparation lacks complete cumulative history")
+        report = (artifact / "result.md").read_bytes()
+        if (
+            hashlib.sha256(report).hexdigest() != locator["content_sha256"]
+            or record["attempts"][-1]["before"] != envelope["before"]
+            or record["attempts"][-1]["after"] != envelope["candidate"]
+        ):
+            raise ValueError(
+                "Local preparation copy differs from the original sealed candidate"
+            )
+        trailers = (
+            "\n".join(
+                f"Node-Repair-{key.replace('_', '-')}: {value}"
+                for key, value in locator.items()
+            )
+            + f"\nNode-Repair-Workflow-SHA: {workflow}"
+        )
+        # Stage exact bytes without invoking Git clean filters from attributes.
+        for name in ("pnpm-workspace.yaml", "pnpm-lock.yaml"):
+            path = (directory / name).relative_to(root).as_posix()
+            blob = git("hash-object", "-w", "--no-filters", "--", path).strip()
+            git("update-index", "--cacheinfo", "100644", blob, path)
+        commit = git(
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=github-actions[bot]",
+            "-c",
+            "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+            "commit-tree",
+            git("write-tree").strip(),
+            "-p",
+            expected["head"],
+            "-m",
+            "Repair selected dependency pins\n\nNode-Repair: validated-selected-pins-v1\n"
+            + trailers,
+        ).strip()
+        git(
+            "-c",
+            "core.hooksPath=/dev/null",
+            "update-ref",
+            "HEAD",
+            commit,
+            expected["head"],
+        )
+        current = guard(expected)
+        body = publication_body(
+            current["body"],
+            report.decode("utf-8"),
+            expected,
+            commit,
+            envelope,
+        )
+        token = base64.b64encode(
+            ("x-access-token:" + os.environ["GH_TOKEN"]).encode()
+        ).decode()
+        environment = dict(
+            os.environ,
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + token,
+            GIT_TERMINAL_PROMPT="0",
+        )
+        message = f"Repair push of commit {commit} attempted; inspect the branch before another attempt."
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "push",
+                f"--force-with-lease=refs/heads/maintenance/node-security:{expected['head']}",
+                "origin",
+                "HEAD:refs/heads/maintenance/node-security",
+            ],
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        message = (
+            f"Repair commit {commit} was published. The PR report update is incomplete; "
+            "inspect the branch before another attempt."
+        )
+        latest = gh(f"repos/{expected['repository']}/pulls/{expected['pr']}")
+        if (
+            latest.get("head", {}).get("sha") != commit
+            or latest.get("base", {}).get("sha") != expected["base"]
+            or latest.get("body") != current["body"]
+        ):
+            raise ValueError(
+                "PR changed after repair push; retain the commit and inspect the report"
+            )
+        gh(
+            f"repos/{expected['repository']}/pulls/{expected['pr']}",
+            body={"body": body},
+        )
+        message = f"Repair commit {commit} and its validated report were published. No merge occurred."
+        return commit
+    finally:
+        print(message)
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+                summary.write(message + "\n")
+
+
 def prepare(expected, artifact):
     with suppress_hooks():
         return prepare_candidate(expected, artifact)
@@ -1167,7 +1416,9 @@ def prepare_candidate(expected, artifact):
     }
     if not required <= fixed:
         raise ValueError("The candidate did not confirm every selected advisory fix")
-    ENGINE["describe_pnpm_fixes"](directory, after, candidate[1], [], deadline, {})
+    ENGINE["describe_pnpm_fixes"](
+        directory, after, candidate[1], [], deadline, {}, collect_proof=True
+    )
     if ENGINE["valid_snapshot"](directory) != candidate:
         raise ValueError("Audit lookup changed the candidate")
     paths = [
@@ -1216,7 +1467,9 @@ def prepare_candidate(expected, artifact):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("guard", "prepare", "validate"))
+    parser.add_argument(
+        "operation", choices=("guard", "prepare", "validate", "publish")
+    )
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
@@ -1224,11 +1477,13 @@ def main():
     if args.operation == "guard":
         guard(expected)
     elif args.artifact is None:
-        parser.error("prepare and validate require --artifact")
+        parser.error("prepare, validate and publish require --artifact")
     elif args.operation == "validate":
         if args.evidence is None:
             parser.error("validate requires --evidence")
         validate(expected, args.artifact, args.evidence)
+    elif args.operation == "publish":
+        publish(expected, args.artifact)
     else:
         prepare(expected, args.artifact)
 
