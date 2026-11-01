@@ -149,3 +149,21 @@ expected-head guards after the bounded test. No source merge, stable-tag update,
 Hydra change or App/Worker/D1 deployment is included. The deployed App's historical
 harmless-pilot wording must be corrected before general actual-repair use; this
 is an isolated publisher test, not general consumer rollout.
+
+## Isolated normal-audit preservation acceptance
+
+Use this slice's reviewed reusable workflow reference and keep the repair
+caller's five inputs unchanged. After a genuine validated repair is published,
+run normal security publication against that open PR and verify that its head,
+body, open state and draft status remain unchanged. Repeat with a later
+maintainer commit and with the preserved partial-publication fixture whose body
+is stale. Retain the original native repair receipts and actual run URLs.
+
+The normal publisher reads unmerged native commit trailers, not the PR body.
+Real Git controls must reject a forged body marker and a lookalike trailer,
+permit later publication after the repair is merged, and stop on unavailable
+history. A failed new audit must remain visible in Actions without drafting or
+rewriting the existing repaired PR. Restore the exact isolated fixture after
+verification. The complete G-REPAIR gate also requires a clean review of
+preparation, separate validation, publication and preservation together. No merge
+or consumer rollout follows from that gate alone.
