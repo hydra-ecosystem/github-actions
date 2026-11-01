@@ -19,7 +19,7 @@ name: Validate selected Node repairs
         required: true
     outputs:
       candidate-artifact-id:
-        description: Immutable preparation artifact ID in this run; validation never replaces it. No publication occurred.
+        description: Immutable preparation artifact ID in this run; validation and publication never replace it.
         value: ${{ jobs.prepare.outputs.candidate-artifact-id }}
 permissions:
   contents: read
@@ -102,3 +102,33 @@ jobs:
         set -euo pipefail
         [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARCHIVE_SHA256" =~ ^[a-f0-9]{64}$ && "$CONTENT_SHA256" =~ ^[a-f0-9]{64}$ ]]
         printf '::notice title=Node repair evidence v1::v1:%s:%s:%s\n' "$ARTIFACT_ID" "$ARCHIVE_SHA256" "$CONTENT_SHA256"
+  publish:
+    needs: [prepare, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: node-dependency-proposal-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+    env:
+      TRUSTED_WORKFLOW_SHA: ${{ job.workflow_sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.expected-head }}
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Publish the validated sealed candidate
+      uses: $/node/repair
+      with:
+        operation: publish
+        candidate-artifact-id: ${{ needs.prepare.outputs.candidate-artifact-id }}
+        request-id: ${{ inputs.request-id }}
+        pull-request: ${{ inputs.pull-request }}
+        expected-head: ${{ inputs.expected-head }}
+        expected-base: ${{ inputs.expected-base }}
+        selections: ${{ inputs.selections }}
