@@ -269,7 +269,8 @@ try {
     const row = await db.prepare('SELECT * FROM requests WHERE id = ?').bind(id).first();
     assert.equal(row.state, outcome);assert.equal(row.conclusion, outcome);
     assert.match(statusComment.body, new RegExp(`Workflow ${outcome === 'failure' ? 'failed' : 'cancelled'}`));
-    assert.match(statusComment.body, /pilot performs no dependency repair/);
+    assert.match(statusComment.body, /Review its validation and publication results before merging/);
+    assert.doesNotMatch(statusComment.body, /pilot|fixes were published|dependencies were upgraded/);
     assert.equal(idleChecks.length, index + 2);
   }
   assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM requests WHERE state IN ('reserved','dispatched','unknown')").first()).count, 0);

@@ -283,9 +283,46 @@ It also checks security and still obeys the cooldown and upgrade scope. It does
 not enable automatic upgrades. Nothing merges automatically. See
 [reports and PR behavior](../node/maintenance.md#reports-and-prs) for details.
 
-## Interactive repairs (unreleased)
+## Install interactive repairs
 
-The repair integration under development keeps selection and submission in the
+Release acceptance for this installation path is pending. The shared service
+operator must deploy the reviewed status-message update and record a successful
+fresh-consumer test before general rollout. The audit-only setup above remains
+available. See the [operator release gate](node-maintenance-operator.md#installation-release-gate).
+
+Interactive repairs support eligible exact pnpm overrides in a standalone
+project. npm projects can use audit-only maintenance. Repair does not migrate
+package managers, change unrelated pins, or merge a PR.
+
+1. Complete the project and configuration steps above. Use the
+   [coordinated audit caller](node-coordination.md#install-or-adopt-the-coordinated-caller)
+   so security proposals use `maintenance/node-security`. Set
+   `__CENTRAL_REVISION__` to reviewed full workflow revision
+   `2297871617c11e5a4404e73f569faf46967f159b`, rather than the older `v1` tag.
+2. Install [Security Maintenance by CLI.dev](https://github.com/apps/security-maintenance-by-cli-dev/installations/new)
+   on only the repository you intend to maintain. An organization owner may
+   need to approve installation. Repository users host no Worker or database
+   and store no App private key. The App reads repository metadata and contents,
+   writes PR replies and Checks, and dispatches the fixed repair workflow.
+3. Copy the [supported repair caller](../node/repair-caller.yml) from this
+   documentation revision to `.github/workflows/dependency-repair.yml` on the
+   default branch. Replace `__CENTRAL_REPOSITORY__` with
+   `hydra-ecosystem/github-actions` and `__CENTRAL_REVISION__` with the same full
+   revision as the audit caller. Keep the filename, five inputs and permissions.
+   No new repository secret is needed for repairs.
+4. Enable publication as described in step 4 above and run a **security** audit.
+   Review the resulting managed PR. Only current bound reports with a compatible
+   published fix offer an active repair choice. Rerun the audit for old unbound
+   reports; do not add markers by hand.
+
+The App supplies the fixed caller's inputs. Maintainers submit through the PR
+conversation rather than constructing a manual dispatch. Review shared-workflow
+updates and update both caller references together. Removing the repair caller
+or uninstalling the App disables requests without removing audit-only maintenance.
+
+### Request and inspect a repair
+
+Selection and submission stay in the
 PR's **Conversation** tab. Tick the fixes you allow in the PR description, then
 post a new comment containing only `/repair selected` using **Comment**. The App
 replies **Request accepted** with a link to the repair workflow page. It keeps
@@ -300,10 +337,10 @@ dependency files and cumulative report to the same PR. A failed validation
 publishes no repair. A push can succeed before the report update fails; inspect
 the recorded commit before requesting another attempt. Once completion is safely
 recorded, a new command can request another attempt. A failed status update
-requires operator recovery before the next attempt. The default pilot caller
-still validates inputs only; actual publication requires the reviewed workflow
-reference used by the isolated acceptance test. General installation remains
-unreleased. Nothing merges automatically.
+requires operator recovery before the next attempt. The supported caller invokes
+real preparation, separate validation and publication. A green workflow result
+is not approval to merge; inspect the report and native diff. Nothing merges
+automatically.
 See the [service reference](node-maintenance-operator.md) for current limits.
 
 Normal security audits retain an open PR containing an unmerged native
@@ -327,10 +364,9 @@ shows the published candidate, checked parent constraints and advisory links.
 not mean repair validation passed or that the dependency was upgraded.
 
 The report component can produce the exact selection block bound to a known PR
-head and base. Unbound audit reports do not offer an active repair command. The
-general caller integration remains unreleased. A harmless pilot's success does
-not change the package table to upgraded; the actual publisher does so only
-after successful separate validation and publication.
+head and base. Unbound audit reports do not offer an active repair command.
+Workflow status alone does not change a package row to upgraded; the publisher
+updates that evidence only after successful separate validation and publication.
 
 ## Toolchain selection
 

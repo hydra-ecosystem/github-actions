@@ -230,8 +230,8 @@ export function requestStatus(row, items = []) {
   if (row.selections_json) items = JSON.parse(row.selections_json);
   const outcome = row.conclusion && (row.conclusion === 'success' ? 'succeeded' : row.conclusion === 'cancelled' ? 'cancelled' : 'failed');
   const title = outcome ? `Workflow ${outcome}` : 'Request accepted';
-  const summary = outcome ? `[View workflow run](${row.html_url}). This pilot performs no dependency repair.` :
-    `[View repair workflows](https://github.com/${row.repository}/actions/workflows/${WORKFLOW}).\n\nWaiting for a verified completion result. This pilot performs no dependency repair.`;
+  const summary = outcome ? `[View workflow run](${row.html_url}). Review its validation and publication results before merging.` :
+    `[View repair workflows](https://github.com/${row.repository}/actions/workflows/${WORKFLOW}).\n\nWaiting for a verified completion result. Nothing merges automatically.`;
   const result = outcome ? `${summary}\n\nGitHub conclusion: \`${row.conclusion}\`.` : summary;
   return {title, summary: result, body: `<!-- node-repair:request:${row.id} -->\n### Dependency repair: ${title}\n\n` +
     (items.length ? items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') + '\n\n' : '') +
@@ -464,7 +464,7 @@ async function refreshSelectionCheck(token, repository, number, appID, signal, e
     title: !valid ? 'Repair selections need attention' : items.length ? `${items.length} selected fix${items.length === 1 ? '' : 'es'}` : 'No fixes selected',
     summary: !valid ? 'Use one valid selection block in the PR description. No run was started.' : items.length ?
       items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') +
-        (env.DB ? '\n\nPost `/repair selected` in the PR conversation to request these fixes. Only one request can be active per PR. The native Run selected fixes action is also available here. The pilot only validates inputs.' :
+        (env.DB ? '\n\nPost `/repair selected` in the PR conversation to request these fixes. Only one request can be active per PR. The native Run selected fixes action is also available here. Review the workflow results and proposed changes before merging.' :
           '\n\nSelections are displayed for review. Running fixes is not enabled yet.') :
       'Select the allowed fixes in the PR description. Editing checkboxes does not start a run.',
   };

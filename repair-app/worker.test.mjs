@@ -801,7 +801,8 @@ for (const conclusion of ['success', 'failure', 'cancelled', 'timed_out', 'neutr
     assert.equal(f.pr.body, description);assert.equal(f.comments.size, 1);
     assert.equal(row.status_comment_id, 600);assert.match(f.comments.get(600).body, /Workflow (succeeded|failed|cancelled)/);
     assert.match(f.comments.get(600).body, /actions\/runs\/900/);
-    assert.match(f.comments.get(600).body, /pilot performs no dependency repair/);
+    assert.match(f.comments.get(600).body, /Review its validation and publication results before merging/);
+    assert.doesNotMatch(f.comments.get(600).body, /pilot|fixes were published|dependencies were upgraded/);
     assert.equal(f.check.external_id, `node-repair-request:${delivery}`);
     assert.equal(f.check.status, 'completed');assert.equal(f.check.conclusion, 'neutral');
     assert.equal(f.idle.length, 1);assert.equal(f.idle[0].id, 78);

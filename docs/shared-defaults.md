@@ -9,7 +9,9 @@ inventory beside the defaults and run the separate [fleet setup checker](node-fl
 It reports broken setup centrally without running dependency maintenance.
 
 A source can be a regular file in **any public GitHub.com repository**. It needs
-no service, App, or registration here. The consuming repository may be private.
+no service, App, or registration to read these defaults. The consuming repository may be private.
+Optional [interactive repairs](node-maintenance.md#install-interactive-repairs)
+require the shared App and fixed caller; they do not change defaults inheritance.
 Use integration version **6** and the [setup guide](node-maintenance.md#set-it-up)
 for local project verification, the caller workflow, and publication permissions.
 

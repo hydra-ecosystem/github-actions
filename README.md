@@ -31,6 +31,12 @@ pushes and refreshes existing proposals after either PR merges. This new caller
 requires a workflow revision containing that interface; existing callers keep
 their combined-PR behavior.
 
+The [interactive setup](docs/node-maintenance.md#install-interactive-repairs)
+adds the shared App and [fixed repair caller](node/repair-caller.yml) for eligible
+exact pnpm pins. Users select fixes and submit `/repair selected` in the PR
+conversation; they host no service or App private key. Installation release
+acceptance remains pending. Audit-only maintenance remains available.
+
 | Maintenance setup | Automatic security checks | Automatic routine upgrades |
 | --- | --- | --- |
 | Basic setup in the guide | Weekly | Disabled; run upgrades manually |

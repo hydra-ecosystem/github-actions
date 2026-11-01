@@ -8,6 +8,36 @@ import yaml
 ROOT = Path(__file__).parents[2]
 
 
+def test_repair_caller_preserves_the_fixed_reusable_interface_and_authority():
+    caller = yaml.safe_load((ROOT / "node/repair-caller.yml").read_text())
+    shared = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
+    inputs = caller["on"]["workflow_dispatch"]["inputs"]
+    assert set(caller["on"]) == {"workflow_dispatch"}
+    assert set(inputs) == set(shared["on"]["workflow_call"]["inputs"])
+    assert all(
+        value["type"] == "string" and value["required"] for value in inputs.values()
+    )
+    assert caller["permissions"] == {"contents": "read"}
+    assert set(caller["jobs"]) == {"repair"}
+    job = caller["jobs"]["repair"]
+    assert job["uses"] == (
+        "__CENTRAL_REPOSITORY__/.github/workflows/node-repair.yml@__CENTRAL_REVISION__"
+    )
+    assert job["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "actions": "read",
+        "checks": "read",
+    }
+    assert set(job["with"]) == set(inputs)
+    for name in inputs:
+        assert job["with"][name] in {
+            "${{ inputs['" + name + "'] }}",
+            "${{ inputs." + name + " }}",
+        }
+    assert "secrets" not in job and "steps" not in job
+
+
 def test_caller_separates_audit_and_publisher_authority():
     caller = yaml.safe_load((ROOT / "node/caller.yml").read_text())
     audit = caller["jobs"]["audit"]
