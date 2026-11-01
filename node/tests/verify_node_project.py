@@ -298,7 +298,35 @@ def check_selected_validation(version):
             os.chdir(checkout)
             with patch.dict(os.environ, {"RUNNER_TEMP": str(root)}):
                 artifact = root / "prepared"
-                repair["prepare"](expected, artifact)
+                engine = repair["ENGINE"]
+                snapshot = engine["valid_snapshot"](checkout)
+                audit = engine["audit"](checkout)
+                history = dict(
+                    version=1,
+                    repository=expected["repository"],
+                    source=expected["head"],
+                    project=".",
+                    manager="pnpm",
+                    before_state=engine["dependency_state"](snapshot),
+                    candidate_state=engine["dependency_state"](snapshot),
+                    before=audit,
+                    after=audit,
+                    fixed_ids=[],
+                    package_report=engine["format_audit_summary"](
+                        audit,
+                        audit,
+                        "pnpm",
+                        fixed_ids=set(),
+                        locks=(snapshot[3], snapshot[3]),
+                    ),
+                )
+                # This fixture proves real pnpm preparation and validation;
+                # producer API/Check provenance has separate tests and a hosted gate.
+                with patch.dict(
+                    repair["prepare"].__globals__,
+                    {"native_history": lambda *args: history},
+                ):
+                    repair["prepare"](expected, artifact)
                 sealed = {p.name: p.read_bytes() for p in artifact.iterdir()}
                 for mode in ("pass", "fail", "drift", "tamper"):
                     subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], check=True)

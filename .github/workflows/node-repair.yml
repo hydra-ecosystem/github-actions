@@ -62,11 +62,14 @@ jobs:
         expected-base: ${{ inputs.expected-base }}
         selections: ${{ inputs.selections }}
   prepare:
+    name: Node repair preparation
     needs: guard
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
       contents: read
+      actions: read
+      checks: read
     env:
       npm_config_ignore_scripts: 'true'
       pnpm_config_ignore_scripts: 'true'
@@ -79,6 +82,7 @@ jobs:
       with:
         ref: ${{ inputs.expected-head }}
         persist-credentials: false
+        fetch-depth: 0
     - name: Prepare the selected candidate using trusted workflow code
       id: prepare
       uses: $/node/repair
@@ -89,3 +93,12 @@ jobs:
         expected-head: ${{ inputs.expected-head }}
         expected-base: ${{ inputs.expected-base }}
         selections: ${{ inputs.selections }}
+    - name: Seal uploaded repair evidence
+      env:
+        ARTIFACT_ID: ${{ steps.prepare.outputs.candidate-artifact-id }}
+        ARCHIVE_SHA256: ${{ steps.prepare.outputs.candidate-archive-sha256 }}
+        CONTENT_SHA256: ${{ steps.prepare.outputs.candidate-report-sha256 }}
+      run: |
+        set -euo pipefail
+        [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARCHIVE_SHA256" =~ ^[a-f0-9]{64}$ && "$CONTENT_SHA256" =~ ^[a-f0-9]{64}$ ]]
+        printf '::notice title=Node repair evidence v1::v1:%s:%s:%s\n' "$ARTIFACT_ID" "$ARCHIVE_SHA256" "$CONTENT_SHA256"
