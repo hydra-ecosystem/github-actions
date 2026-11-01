@@ -141,6 +141,10 @@ gh workflow run dependency-audit.yml --ref main -f audit-kind=upgrades
 Run the command for the kind you want. Replace `main` if your default branch has
 another name. Other dispatch branches are rejected.
 
+[Interactive selected repairs](node-maintenance.md#install-interactive-repairs)
+have no schedule. They require the App, fixed caller and a maintainer's new
+`/repair selected` comment. Audit schedules and checkbox edits start no repair.
+
 All kinds maintain the same `maintenance/dependency-audit` branch and open PR.
 A run without qualifying dependency changes leaves an existing proposal untouched;
 read the current run summary for its findings. After that PR is merged or closed,

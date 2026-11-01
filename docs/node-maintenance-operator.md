@@ -11,8 +11,37 @@ and post `/repair selected` in the Conversation tab. The App replies there with
 the request status and exact Actions link. The native Check action remains an
 optional secondary entry point. D1 retains the active request and returned Actions run
 identity. Completed runs update that same reply and release their own request
-lock. The current workflow remains a harmless fixture; dependency repairs belong
-to later slices.
+lock. The supported caller invokes preparation, separate validation and
+publication. The App reports workflow status and the exact run URL. The PR's
+published report and native diff establish which fixes actually landed.
+
+## Installation release gate
+
+Repository users follow the [main setup guide](node-maintenance.md#install-interactive-repairs).
+The existing shared App is
+[Security Maintenance by CLI.dev](https://github.com/apps/security-maintenance-by-cli-dev).
+Consumers copy `node/repair-caller.yml` to the fixed default-branch path
+`.github/workflows/dependency-repair.yml`. Keep its five inputs unchanged and
+use the same reviewed full workflow revision as the coordinated audit caller.
+Consumers need no service database or App private key.
+
+General installation acceptance is pending. Before announcing availability:
+
+1. Review and test the source, then deploy the exact reviewed Worker through
+   the service owner's normal process. This update replaces obsolete pilot
+   text; it changes no admission, permissions, dispatch or D1 logic. A green
+   caller PR does not authorize service deployment or a database migration.
+2. Follow the user guide in a fresh isolated repository. Install the App and
+   both callers, run an audit, and submit one eligible `/repair selected`
+   request. Verify actual preparation, separate validation, bounded publication,
+   truthful reply, original advisories and native evidence. A demo receipt does
+   not prove a fresh installation works.
+3. Record actual source/deployment revisions, App/installation/repository IDs,
+   caller hashes, request/Check/run/artifact IDs, PR URLs, outcomes and cleanup.
+   Record the consumer receipt after observation, never from planned values.
+   Store no token, private key or webhook body.
+4. Keep stable-tag changes and any Hydra pilot behind separate explicit
+   authority. Fresh-consumer success does not authorize either action.
 
 ## Check the selected batch
 
@@ -62,9 +91,8 @@ selection starts no run and produces a reply asking for a fresh command.
 Unrelated comments and edits are ignored. Missing or edited/deleted commands
 and unmanaged PRs do not authorize an attempt.
 
-For this unreleased integration, reports/pilot descriptions must include the
-revision line. Existing reports without it cannot authorize comment dispatch.
-The production report renderer is still a later slice; it is not deployed.
+The shared renderer includes the revision line in bound reports. Existing
+reports without it cannot authorize comment dispatch; rerun the security audit.
 
 ### Existing Check action
 
@@ -84,9 +112,9 @@ have its own selection Check, but the existing PR lock still blocks dispatch.
 Only `.github/workflows/dependency-repair.yml` on the current default branch is
 dispatched, with the five C2 inputs. The API must return HTTP 200 with the exact
 run ID and matching repository URLs. The known run link is saved in D1 and shown
-in the Check. The fixture in `repair-app/pilot/` validates those inputs without
-checking out code or changing dependency files. A successful pilot does not mean
-a dependency repair was published.
+in the Check. The supported caller invokes the real repair workflow. Workflow
+success alone does not identify published dependency changes; inspect its
+publication result, PR report and native branch history.
 
 Comment requests additionally retain the source comment ID, reply ID and exact
 selections. A unique source-comment index prevents the same comment from
@@ -105,12 +133,14 @@ verified completion. No request-status writes occur after dispatch except
 completion updates using the immutable verified outcome. An uncertain pending
 write prevents dispatch and retains the reservation for operator recovery. The reply
 says **Workflow succeeded**, **Workflow failed** or **Workflow cancelled** and
-retains the exact run link and selected versions. The dependency report is not
-rewritten: harmless success does not turn “needs review” into “upgraded”.
+retains the exact run link and selected versions. The App never rewrites the
+dependency report or infers an upgrade from workflow success. Only the trusted
+publisher updates that evidence after actual validation and publication.
 
-## Enable comment delivery after review
+## Existing service setup and migration
 
-This change is local and unreleased. Before testing the reviewed revision live:
+These steps are for service operators whose installation predates comment
+delivery. They are not extra setup for repository users:
 
 1. Add **Issues: read** and change **Pull requests** to **read/write** on the App.
    Subscribe to **Issue comment** events. Existing installations must accept the
@@ -121,7 +151,7 @@ This change is local and unreleased. Before testing the reviewed revision live:
    instead; do not apply both initial schema and migration to one database.
 3. Deploy the reviewed Worker. Put the correct revision marker and selections
    in the pilot description, then verify a real command, exact inputs, reply
-   link, replay and stale-command rejection against the harmless fixture.
+   link, replay and stale-command rejection in the isolated repository.
 
 No live permission, database, deployment or repository change is performed by
 these instructions. The local/native tests cannot replace that acceptance.

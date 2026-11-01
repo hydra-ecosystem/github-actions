@@ -1908,10 +1908,9 @@ def test_cumulative_table_keeps_range_pipes_inside_six_cells(
 
 
 def test_documented_caller_covers_reusable_workflow_permissions():
-    text = (ROOT / "repair-app/pilot/README.md").read_text()
-    caller = yaml.safe_load(text.split("```yaml\n", 1)[1].split("```", 1)[0])
+    caller = yaml.safe_load((ROOT / "node/repair-caller.yml").read_text())
     workflow = yaml.safe_load((ROOT / ".github/workflows/node-repair.yml").read_text())
-    job = caller["jobs"]["candidate"]
+    job = caller["jobs"]["repair"]
     for reusable in workflow["jobs"].values():
         for scope, level in reusable["permissions"].items():
             assert (

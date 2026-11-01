@@ -51,6 +51,12 @@ or branch-protection settings are required. Both caller styles are accepted by
 the fleet checker at a revision supporting this interface. Older fleet-checker
 releases must be updated before they can recognize a coordinated caller.
 
+For selected exact-pin repairs, add the shared App and fixed caller from the
+[interactive setup](node-maintenance.md#install-interactive-repairs), using the
+same reviewed full revision for both callers. Audit schedules and refreshes do
+not authorize selected repairs. Submit each attempt with a new `/repair selected`
+comment on the security PR.
+
 ## What runs and when
 
 | Trigger | Work |
