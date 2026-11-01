@@ -22,6 +22,187 @@ ITEM = {"name": "launch-editor", "from": "2.14.1", "to": "2.14.2"}
 REVISION = {"head": "a" * 40, "base": "b" * 40}
 
 
+@pytest.fixture
+def normal_publication(tmp_path):
+    """Run the actual normal publisher against a native remote and PR state."""
+    import shutil
+
+    remote, work, binary = (
+        tmp_path / "remote.git",
+        tmp_path / "work",
+        tmp_path / "bin",
+    )
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=work if work.exists() else tmp_path, text=True
+        ).strip()
+
+    git("init", "--bare", "-q", str(remote))
+    git("clone", "-q", str(remote), str(work))
+    git("config", "user.name", "Fixture")
+    git("config", "user.email", "fixture@example.com")
+    git("checkout", "-qb", "main")
+    project = work / "app"
+    project.mkdir()
+    (project / "package.json").write_text('{"name":"fixture"}\n')
+    (project / "pnpm-lock.yaml").write_text("baseline\n")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    git("push", "-q", "origin", "main")
+    base = git("rev-parse", "HEAD")
+    binary.mkdir()
+    commands = tmp_path / "commands.jsonl"
+    state = tmp_path / "pr.json"
+    state.write_text(json.dumps({"body": "Original report", "draft": False}))
+    (binary / "gh").write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\nfrom pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "with open(os.environ['COMMAND_LOG'],'a') as f: f.write(json.dumps(args)+'\\n')\n"
+        "path=Path(os.environ['PR_STATE']); state=json.loads(path.read_text())\n"
+        "if args[:2]==['pr','list']: print('1')\n"
+        "elif args[:2]==['pr','view']:\n"
+        " field=args[args.index('--json')+1]\n"
+        " print({'state':'OPEN','isDraft':str(state['draft']).lower(),'body':state['body'],'baseRefName':'main','title':'Original title'}[field])\n"
+        "else:\n"
+        " state['mutated']=True\n"
+        " if '--body-file' in args: state['body']=Path(args[args.index('--body-file')+1]).read_text()\n"
+        " path.write_text(json.dumps(state))\n"
+    )
+    (binary / "gh").chmod(0o755)
+    real_git = shutil.which("git")
+    (binary / "git").write_text(
+        f"#!{sys.executable}\nimport os,sys\n"
+        "if sys.argv[1]=='log' and os.environ.get('FAIL_HISTORY')=='true': raise SystemExit(73)\n"
+        f"os.execv({real_git!r},[{real_git!r},*sys.argv[1:]])\n"
+    )
+    (binary / "git").chmod(0o755)
+
+    def publish(history, candidate="changed"):
+        nonlocal base
+        git("checkout", "-qb", "maintenance/node-security")
+        (project / "pnpm-lock.yaml").write_text("selected repair\n")
+        git("add", ".")
+        trailer = (
+            "Node-Repair: validated-selected-pins-v1"
+            if history not in {"ordinary", "forged-body", "lookalike"}
+            else "Node-Repair: validated-selected-pins-v10"
+            if history == "lookalike"
+            else ""
+        )
+        git("commit", "-qm", "Selected repair\n\n" + trailer)
+        if history == "maintainer":
+            (work / "maintainer.md").write_text("Keep this maintainer change\n")
+            git("add", ".")
+            git("commit", "-qm", "Later maintainer change")
+        head = git("rev-parse", "HEAD")
+        git("push", "-q", "origin", "maintenance/node-security")
+        if history == "merged":
+            git("checkout", "main")
+            git("merge", "--ff-only", head)
+            git("push", "-q", "origin", "main")
+            base = head
+        git("checkout", "--detach", base)
+        if history == "missing-head":
+            git("update-ref", "-d", "refs/remotes/origin/maintenance/node-security")
+        if candidate != "unchanged":
+            (project / "pnpm-lock.yaml").write_text("new normal candidate\n")
+        if history == "stale-body":
+            state.write_text(
+                json.dumps({"body": "Stale pre-repair report", "draft": True})
+            )
+        elif history == "forged-body":
+            state.write_text(
+                json.dumps(
+                    {"body": "Node-Repair: validated-selected-pins-v1", "draft": False}
+                )
+            )
+        before = state.read_bytes()
+        (tmp_path / "dependency-audit-pr.md").write_text("New normal report\n")
+        result = subprocess.run(
+            ["bash", str(ROOT / "node/publish/publish.sh")],
+            cwd=work,
+            env={
+                **os.environ,
+                "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                "COMMAND_LOG": str(commands),
+                "PR_STATE": str(state),
+                "NPM_PROJECT": "app",
+                "BASE_BRANCH": "main",
+                "PROPOSAL_KIND": "security",
+                "AUDIT_SHA": base,
+                "VALIDATION_PASSED": str(candidate != "invalid").lower(),
+                "PROPOSAL_COMPLETE": "true",
+                "RUNNER_TEMP": str(tmp_path),
+                "PR_FOOTER": "Normal audit run",
+                "FAIL_HISTORY": str(history == "log-error").lower(),
+            },
+            capture_output=True,
+            text=True,
+        )
+        calls = [json.loads(line) for line in commands.read_text().splitlines()]
+        actual = git(
+            "ls-remote", "origin", "refs/heads/maintenance/node-security"
+        ).split()[0]
+        return (
+            result,
+            head,
+            actual,
+            before,
+            state.read_bytes(),
+            calls,
+            git("rev-parse", "HEAD"),
+            base,
+        )
+
+    return publish
+
+
+@pytest.mark.parametrize("history", ["repair", "maintainer", "stale-body"])
+@pytest.mark.parametrize("candidate", ["changed", "unchanged", "invalid"])
+def test_normal_audit_retains_unmerged_native_repair(
+    normal_publication, history, candidate
+):
+    result, head, actual, before, after, calls, checkout, base = normal_publication(
+        history, candidate
+    )
+    assert result.returncode == int(candidate == "invalid"), (
+        result.stdout + result.stderr
+    )
+    assert actual == head
+    assert before == after
+    assert checkout == base
+    assert all(call[:2] == ["pr", "list"] for call in calls)
+    assert "unmerged validated repair" in result.stdout
+
+
+@pytest.mark.parametrize("history", ["ordinary", "forged-body", "lookalike", "merged"])
+def test_normal_audit_requires_unmerged_exact_native_repair(
+    normal_publication, history
+):
+    result, head, actual, _, _, calls, _, _ = normal_publication(history)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert actual != head
+    assert "unmerged validated repair" not in result.stdout
+    assert any(call[:2] == ["pr", "edit"] for call in calls)
+
+
+@pytest.mark.parametrize("history", ["missing-head", "log-error"])
+def test_normal_audit_fails_closed_when_repair_history_unavailable(
+    normal_publication, history
+):
+    result, head, actual, before, after, calls, checkout, base = normal_publication(
+        history
+    )
+    assert result.returncode != 0
+    assert actual == head
+    assert before == after
+    assert checkout == base
+    assert all(call[:2] == ["pr", "list"] for call in calls)
+    assert "Unable to inspect unmerged repair history" in result.stderr
+
+
 @pytest.mark.parametrize("override", ["2.14.1", "2.14.2", "^2.14.1", None])
 def test_security_candidate_cannot_bypass_retained_exact_direct_pin(tmp_path, override):
     manifest = {

@@ -294,13 +294,24 @@ link. It does not show live progress. Checkbox edits alone
 start no work. The Checks tab is optional for this flow.
 
 This requires an installed repair App, a current report that supports comment
-requests, and the fixed repair workflow. The current pilot only validates inputs;
-it changes no dependencies. Its existing reply reports success, failure or
-cancellation and links to the run. Once completion is safely recorded, a new
-command can request another attempt. A failed status update requires operator
-recovery before the next attempt. Production repair and report integration
-remain later delivery slices. Nothing merges automatically.
+requests, and the fixed repair workflow. The implemented workflow prepares exact
+selected pins, validates them on a separate runner, and publishes the validated
+dependency files and cumulative report to the same PR. A failed validation
+publishes no repair. A push can succeed before the report update fails; inspect
+the recorded commit before requesting another attempt. Once completion is safely
+recorded, a new command can request another attempt. A failed status update
+requires operator recovery before the next attempt. The default pilot caller
+still validates inputs only; actual publication requires the reviewed workflow
+reference used by the isolated acceptance test. General installation remains
+unreleased. Nothing merges automatically.
 See the [service reference](node-maintenance-operator.md) for current limits.
+
+Normal security audits retain an open PR containing an unmerged native
+`Node-Repair: validated-selected-pins-v1` commit. They leave its head, report,
+open state and draft status unchanged, including after a later maintainer commit
+or an incomplete repair report update. Editable PR text cannot establish this
+protection. A failed new audit still reports failure in Actions. Once the repair
+is merged into the audited default branch, normal publication can continue.
 
 ### Reading repair choices
 
@@ -317,8 +328,9 @@ not mean repair validation passed or that the dependency was upgraded.
 
 The report component can produce the exact selection block bound to a known PR
 head and base. Unbound audit reports do not offer an active repair command. The
-published caller integration and actual dependency repair remain unreleased;
-the harmless pilot's success does not change the package table to upgraded.
+general caller integration remains unreleased. A harmless pilot's success does
+not change the package table to upgraded; the actual publisher does so only
+after successful separate validation and publication.
 
 ## Toolchain selection
 

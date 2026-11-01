@@ -116,6 +116,17 @@ if [ "$REFRESH_ONLY" = true ] && { [ -z "${EXPECTED_PR:-}" ] || [ "$pr_number" !
   echo 'The original proposal is no longer open; refresh will not create or replace a PR.'
   exit 0
 fi
+if [ "$PROPOSAL_KIND" = security ] && [ -n "$pr_number" ]; then
+  if [ -z "$expected_head" ] || ! repair_trailers=$(git log --format='%(trailers:key=Node-Repair,valueonly)' "$AUDIT_SHA..$expected_head"); then
+    echo '::error::Unable to inspect unmerged repair history; refusing publication.' >&2
+    exit 1
+  fi
+  if grep -Fx 'validated-selected-pins-v1' <<< "$repair_trailers" >/dev/null; then
+    echo 'The open security PR contains an unmerged validated repair; its branch, report and review state are retained. See the Actions summary for this audit.'
+    validation_status
+    exit 0
+  fi
+fi
 git checkout -B "$PR_BRANCH"
 git add -- "$NPM_PROJECT/package.json"
 for file in package-lock.json pnpm-lock.yaml pnpm-workspace.yaml; do
