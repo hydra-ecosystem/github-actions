@@ -457,8 +457,16 @@ def test_shared_time_budget_stops_commands_and_writes_partial_report(
     assert "time budget was exhausted" in report
 
 
-def test_command_timeout_respects_remaining_shared_budget(npm_project, monkeypatch):
+@pytest.mark.parametrize("gnu_timeout", [None, "/usr/bin/gnutimeout"])
+def test_command_timeout_respects_remaining_shared_budget(
+    npm_project, monkeypatch, gnu_timeout
+):
     observed = []
+    monkeypatch.setattr(
+        audit_module["shutil"],
+        "which",
+        lambda name: gnu_timeout if name == "gnutimeout" else None,
+    )
 
     def invoke(command, **kwargs):
         observed.append(command[:4])
@@ -467,7 +475,7 @@ def test_command_timeout_respects_remaining_shared_budget(npm_project, monkeypat
     monkeypatch.setattr(subprocess, "run", invoke)
     monkeypatch.setattr(audit_module["time"], "monotonic", lambda: 100)
     run(npm_project, "ci", deadline=130)
-    assert observed == [["timeout", "--signal=KILL", "30s", "npm"]]
+    assert observed == [[gnu_timeout or "timeout", "--signal=KILL", "30s", "npm"]]
 
 
 def test_timeout_terminates_child_before_it_can_modify_files(npm_project, monkeypatch):
