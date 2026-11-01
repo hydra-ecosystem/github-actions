@@ -354,5 +354,21 @@ leaves an explicit partial result. The report is edited only after the expected
 published head and unchanged remaining PR state are observed.
 An uncertain push reports the attempted commit
 and requires branch inspection before another attempt. Nothing merges
-automatically. Normal-audit preservation and full live repair acceptance remain
-required before general rollout.
+automatically.
+
+## Retain an unmerged repair during normal audits
+
+Before checkout, staging or PR edits, the normal security publisher reads native
+commit trailers in the maintenance head's history that is not reachable from the
+audited default branch. An exact `Node-Repair: validated-selected-pins-v1`
+trailer retains the existing PR head, report, open state and draft status. It also
+protects a repair below a later maintainer commit and a published repair whose
+report update failed. A marker in the editable body supplies no authority.
+
+Missing branch history or a failed Git inspection stops publication. A failed
+new audit still fails its Actions job while leaving the repaired PR intact.
+The repair must be reviewed or handled by a maintainer; there is no automatic
+reset or replacement. Repairs already reachable from the audited default branch
+do not block later publication. Upgrade and legacy proposals keep their existing
+publication behavior. Complete live repair acceptance remains required before
+general rollout.
