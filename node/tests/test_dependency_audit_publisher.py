@@ -547,13 +547,38 @@ def test_history_rejects_mismatched_trigger_or_checkout(sealed_history, mismatch
         engine["verify_history"](locator, **arguments)
 
 
+@pytest.mark.parametrize("with_choices", [False, True])
+@pytest.mark.parametrize("verification_failure", [False, True])
 def test_locate_history_omits_opaque_record_from_human_report(
-    sealed_history, tmp_path, monkeypatch
+    sealed_history, tmp_path, monkeypatch, with_choices, verification_failure
 ):
     import hashlib
     from pathlib import Path
 
     engine, record, sealed, locator, _, _ = sealed_history
+    expected_choices = [{"name": "child", "from": "1.0.0", "to": "1.0.1"}]
+    if with_choices:
+        import base64
+
+        record["after"] = {
+            "package_manager": "pnpm",
+            "vulnerabilities": {
+                "child": {
+                    "via": [
+                        {
+                            "_verifiedPatchedVersions": ["1.0.1"],
+                            "_verifiedRepairVersions": ["1.0.1"],
+                            "_repairFrom": "1.0.0",
+                        }
+                    ]
+                }
+            },
+        }
+        sealed = (
+            b"<!-- node-audit-history:v1:"
+            + base64.b64encode(engine["canonical_history"](record))
+            + b" -->"
+        )
     project = tmp_path / "app"
     project.mkdir()
     (project / "package.json").write_text('{"name":"app"}\n')
@@ -574,6 +599,8 @@ def test_locate_history_omits_opaque_record_from_human_report(
 
     def locate(actual, directory, **kwargs):
         located.append((actual, directory, kwargs))
+        if verification_failure:
+            raise ValueError("Untrusted producer evidence")
         return published_locator
 
     monkeypatch.chdir(tmp_path)
@@ -598,6 +625,12 @@ def test_locate_history_omits_opaque_record_from_human_report(
             str(envfile),
         ],
     )
+    if verification_failure:
+        with pytest.raises(ValueError, match="Untrusted producer evidence"):
+            engine["main"]()
+        assert not envfile.exists()
+        assert report.read_bytes() == original
+        return
     engine["main"]()
 
     assert located == [
@@ -615,6 +648,125 @@ def test_locate_history_omits_opaque_record_from_human_report(
     assert "Node-Audit-content-sha256: " + published_locator["content_sha256"] in (
         envfile.read_text()
     )
+    choices_line = next(
+        line
+        for line in envfile.read_text().splitlines()
+        if line.startswith("NODE_AUDIT_REPAIR_CHOICES=")
+    )
+    assert json.loads(choices_line.partition("=")[2]) == (
+        expected_choices if with_choices else []
+    )
+
+
+@pytest.mark.parametrize(
+    "rejection", [None, "cross-minor", "duplicate-marker", "oversized"]
+)
+def test_normal_security_publisher_binds_choices_to_actual_native_head(
+    tmp_path, rejection
+):
+    import runpy
+    from pathlib import Path
+
+    root = Path(__file__).parents[2]
+    choices = runpy.run_path(str(root / "node/runtime/repair_choices.py"))
+    remote, work = tmp_path / "remote.git", tmp_path / "work"
+
+    def git(*args, cwd=None):
+        return subprocess.check_output(
+            ["git", *args], cwd=cwd or work, text=True
+        ).strip()
+
+    git("init", "--bare", str(remote), cwd=tmp_path)
+    git("clone", str(remote), str(work), cwd=tmp_path)
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.org")
+    git("checkout", "-b", "main")
+    (work / "app").mkdir()
+    for name in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
+        (work / "app" / name).write_text("baseline\n")
+    git("add", ".")
+    git("commit", "-m", "baseline")
+    git("push", "origin", "main")
+    base = git("rev-parse", "HEAD")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    gh = binary / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "a=sys.argv[1:]; p=Path(os.environ['PR_STATE'])\n"
+        "s=json.loads(p.read_text()) if p.exists() else {}\n"
+        "if a[:2]==['pr','list']: print('42' if s else '')\n"
+        "elif a[:2]==['pr','view']:\n"
+        " key=a[a.index('--json')+1]\n"
+        " print(s.get(key, {'state':'OPEN','baseRefName':'main','isDraft':'false'}.get(key,'')))\n"
+        "elif a[:2] in (['pr','create'],['pr','edit']):\n"
+        " if '--body-file' in a: s['body']=Path(a[a.index('--body-file')+1]).read_text()\n"
+        " if '--title' in a: s['title']=a[a.index('--title')+1]\n"
+        " p.write_text(json.dumps(s))\n"
+    )
+    gh.chmod(0o755)
+    options = [{"name": "minimist", "from": "1.2.5", "to": "1.2.8"}]
+    if rejection == "cross-minor":
+        options[0]["to"] = "1.3.0"
+    env = {
+        **os.environ,
+        "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+        "PR_STATE": str(tmp_path / "pr.json"),
+        "NPM_PROJECT": "app",
+        "BASE_BRANCH": "main",
+        "PR_BRANCH": "maintenance/node-security",
+        "AUDIT_SHA": base,
+        "PROPOSAL_KIND": "security",
+        "VALIDATION_PASSED": "true",
+        "RUNNER_TEMP": str(tmp_path),
+        "PR_FOOTER": "workflow",
+        "GITHUB_ACTION_PATH": str(root / "node/publish"),
+        "NODE_AUDIT_REPAIR_CHOICES": json.dumps(options),
+    }
+    observed = []
+    for version in (
+        ["candidate"] if rejection else ["candidate", "candidate", "new-candidate"]
+    ):
+        git("reset", "--hard", "origin/main")
+        git("checkout", "-B", "audit-input", "origin/main")
+        (work / "app/pnpm-lock.yaml").write_text(version + "\n")
+        body = "**1 dependency update · 0 security fixes · Validation passed**\nOriginal CVE-2026-12345\n"
+        body += "Additional verified audit detail\n" if observed else ""
+        if rejection == "duplicate-marker":
+            body += choices["START"] + "\n" + choices["END"] + "\n"
+        if rejection == "oversized":
+            body += "x" * (65500 - len(body))
+        (tmp_path / "dependency-audit-pr.md").write_text(body)
+        result = subprocess.run(
+            ["bash", "-e", "-c", PUBLISH["run"]],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if rejection:
+            assert result.returncode != 0
+            assert not (tmp_path / "pr.json").exists()
+            assert not git(
+                "ls-remote", "origin", "refs/heads/maintenance/node-security"
+            )
+            return
+        assert result.returncode == 0, result.stderr
+        published = git(
+            "--git-dir",
+            str(remote),
+            "rev-parse",
+            "refs/heads/maintenance/node-security",
+        )
+        report = json.loads((tmp_path / "pr.json").read_text())["body"]
+        assert choices["revision_marker"](published, base) in report
+        assert choices["parse"](report) == []
+        assert report.count(choices["START"]) == 1
+        assert "Allow `minimist` `1.2.5 → 1.2.8`" in report
+        assert "Original CVE-2026-12345" in report
+        observed.append(published)
+    assert observed[0] == observed[1] != observed[2]
 
 
 @pytest.mark.parametrize(
