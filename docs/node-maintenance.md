@@ -297,8 +297,9 @@ package managers, change unrelated pins, or merge a PR.
 1. Complete the project and configuration steps above. Use the
    [coordinated audit caller](node-coordination.md#install-or-adopt-the-coordinated-caller)
    so security proposals use `maintenance/node-security`. Set
-   `__CENTRAL_REVISION__` to reviewed full workflow revision
-   `2297871617c11e5a4404e73f569faf46967f159b`, rather than the older `v1` tag.
+   `__CENTRAL_REVISION__` to the full 40-character SHA of your reviewed workflow
+   revision, rather than the older `v1` tag. Use the installation guide and both
+   caller templates from that same revision.
 2. Install [Security Maintenance by CLI.dev](https://github.com/apps/security-maintenance-by-cli-dev/installations/new)
    on only the repository you intend to maintain. An organization owner may
    need to approve installation. Repository users host no Worker or database

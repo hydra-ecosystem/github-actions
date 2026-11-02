@@ -418,7 +418,9 @@ def test_describe_retains_common_same_minor_patch_across_advisories(
 
     fn = ENGINE["describe_pnpm_fixes"]
     monkeypatch.setitem(fn.__globals__, "run", run)
-    monkeypatch.setitem(fn.__globals__, "valid_snapshot", lambda directory: object())
+    monkeypatch.setitem(
+        fn.__globals__, "valid_snapshot", lambda directory: (b"{}", files, {}, {})
+    )
     monkeypatch.setitem(fn.__globals__, "restore_invalid_state", lambda *a, **k: False)
     fn(tmp_path, data, files, [], float("inf"), {})
     assert CHOICES["candidates"](data) == [
@@ -498,7 +500,9 @@ def test_only_verified_compatible_exact_pins_receive_candidate_evidence(
         )
 
     monkeypatch.setitem(module, "run", run)
-    monkeypatch.setitem(module, "valid_snapshot", lambda directory: object())
+    monkeypatch.setitem(
+        module, "valid_snapshot", lambda directory: (b"{}", files, {}, {})
+    )
     monkeypatch.setitem(module, "restore_invalid_state", lambda *args, **kwargs: False)
     fn(tmp_path, data, files, [], 999999999999, {})
     assert CHOICES["candidates"](data) == ([] if problem else [ITEM])
