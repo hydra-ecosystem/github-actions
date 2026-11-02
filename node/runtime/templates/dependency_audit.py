@@ -4358,8 +4358,9 @@ def main() -> None:
             r"[a-f0-9]{40}", args.trusted_workflow_sha
         ):
             parser.error("An immutable trusted producer source is required")
+        sealed_report = args.report.read_bytes()
         locator = locate_current_history(
-            args.report.read_bytes(),
+            sealed_report,
             directory,
             trusted_workflow_sha=args.trusted_workflow_sha,
             prefix=args.artifact_prefix,
@@ -4373,7 +4374,11 @@ def main() -> None:
             output.write(
                 f"NODE_AUDIT_HISTORY_TRAILERS<<NODE_HISTORY_END\n{trailers}\nNODE_HISTORY_END\n"
             )
-        text = HISTORY_PATTERN.sub("", args.report.read_text(), count=1)
+            choices = REPAIR_CHOICES["candidates"](
+                history_record(sealed_report)["after"]
+            )
+            output.write(f"NODE_AUDIT_REPAIR_CHOICES={json.dumps(choices)}\n")
+        text = HISTORY_PATTERN.sub("", sealed_report.decode(), count=1)
         heading, separator, tail = text.partition("\n")
         passed = os.environ.get("VALIDATION_PASSED") == "true"
         outcome = "Passed." if passed else "Not confirmed: separate validation failed."

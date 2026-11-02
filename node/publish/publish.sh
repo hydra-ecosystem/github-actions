@@ -38,6 +38,26 @@ report_content() {
   # Run timestamps and the workflow link change even for the same result.
   sed -E '/^Run: [0-9]{4}-[0-9]{2}-[0-9]{2}T/d; /^\[Workflow run\]\(/d; /^[[:space:]]*$/d' "$1"
 }
+bind_repair_choices() {
+  if [ "$PROPOSAL_KIND" != security ] || [ "${NODE_AUDIT_REPAIR_CHOICES:-[]}" = '[]' ]; then return; fi
+  python3 -I - "$body_file" "$1" "$AUDIT_SHA" "$GITHUB_ACTION_PATH/../runtime/repair_choices.py" <<'PY'
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+
+choices = runpy.run_path(sys.argv[4])
+path = Path(sys.argv[1])
+text = path.read_bytes().decode()
+if any(marker in text for marker in (choices['START'], choices['END'], '<!-- node-repair:revision:')):
+    raise SystemExit('Refusing an already-bound or ambiguous producer report')
+text += choices['render'](json.loads(os.environ['NODE_AUDIT_REPAIR_CHOICES']), head=sys.argv[2], base=sys.argv[3])
+if len(text) > 65536:
+    raise SystemExit('Bound PR body exceeds 65536 characters')
+path.write_bytes(text.encode())
+PY
+}
 proposal_title() {
   if [ -n "${NODE_UPDATE_VERSION:-}" ]; then
     printf 'Node: runtime security update to %s\n' "$NODE_UPDATE_VERSION"
@@ -157,6 +177,7 @@ else
     if git diff --cached --quiet "$expected_head" -- . && { [ "$PROPOSAL_KIND" = legacy ] || git merge-base --is-ancestor "$AUDIT_SHA" "$expected_head"; }; then
       echo 'The open dependency PR already contains this proposal; no dependency push needed. See the current run summary for the audit report.'
       pr_base=$(gh pr view "$pr_number" --json baseRefName --jq .baseRefName)
+      bind_repair_choices "$expected_head"
       existing_body="$RUNNER_TEMP/dependency-audit-existing-pr.md"
       gh pr view "$pr_number" --json body --jq .body > "$existing_body"
       if [ "$VALIDATION_PASSED" != true ] || [ "$pr_base" != "$BASE_BRANCH" ] || ! diff -q <(report_content "$existing_body") <(report_content "$body_file") >/dev/null; then
@@ -184,6 +205,7 @@ else
   commit_args=(-m 'Node dependency audit and upgrades')
   if [ -n "${NODE_AUDIT_HISTORY_TRAILERS:-}" ]; then commit_args+=(-m "$NODE_AUDIT_HISTORY_TRAILERS"); fi
   git commit "${commit_args[@]}"
+  bind_repair_choices "$(git rev-parse HEAD)"
   current_base
   if [ "$PROPOSAL_KIND" != legacy ] && [ -n "$pr_number" ] && ! still_open; then
     echo 'The proposal was closed or merged during the audit; no branch update published.'
