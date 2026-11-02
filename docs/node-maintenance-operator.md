@@ -25,7 +25,14 @@ Consumers copy `node/repair-caller.yml` to the fixed default-branch path
 use the same reviewed full workflow revision as the coordinated audit caller.
 Consumers need no service database or App private key.
 
-General installation acceptance is pending. Before announcing availability:
+The [fresh-consumer receipt](../repair-app/pilot/consumer-receipt.json) records
+successful installation acceptance for workflow source
+`42fe6d163e7f3152b8ef55ed3b0a842a999564a9` and Worker version
+`309baf0d-f485-4e69-bb9b-cf2bba604ee1`. It covers the existing organization-wide
+App installation, an isolated private consumer, and the real Conversation flow.
+It does not establish a new installation permission grant or Hydra acceptance.
+
+Before announcing a later installation revision:
 
 1. Review and test the source, then deploy the exact reviewed Worker through
    the service owner's normal process. This update replaces obsolete pilot
