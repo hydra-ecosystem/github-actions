@@ -34,8 +34,10 @@ their combined-PR behavior.
 The [interactive setup](docs/node-maintenance.md#install-interactive-repairs)
 adds the shared App and [fixed repair caller](node/repair-caller.yml) for eligible
 exact pnpm pins. Users select fixes and submit `/repair selected` in the PR
-conversation; they host no service or App private key. Installation release
-acceptance remains pending. Audit-only maintenance remains available.
+conversation; they host no service or App private key. The reviewed installation
+passed a [fresh-consumer acceptance](repair-app/pilot/consumer-receipt.json).
+Audit-only maintenance remains available. Stable-tag changes and Hydra rollout
+require separate authorization.
 
 | Maintenance setup | Automatic security checks | Automatic routine upgrades |
 | --- | --- | --- |
