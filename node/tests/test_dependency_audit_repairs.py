@@ -723,6 +723,76 @@ def test_security_resolution_uses_verified_published_patch(
     ) < next(i for i, args in enumerate(commands) if args[0] == "install")
 
 
+@pytest.mark.parametrize("fix_exit", [0, 1])
+def test_repair_metadata_survives_automatic_fix_bypassing_an_exact_pin(
+    project, monkeypatch, fix_exit
+):
+    workspace = project / "pnpm-workspace.yaml"
+    policy = yaml.safe_load(workspace.read_bytes())
+    policy["overrides"] = {"child": "1.0.0"}
+    workspace.write_text(yaml.safe_dump(policy))
+    manifest = project / "package.json"
+    package = json.loads(manifest.read_bytes())
+    package["dependencies"]["child"] = "^1.0.0"
+    manifest.write_text(json.dumps(package))
+    lockfile = project / "pnpm-lock.yaml"
+    lock = yaml.safe_load(lockfile.read_bytes())
+    lock["importers"]["."] = {
+        "dependencies": {"child": {"specifier": "1.0.0", "version": "1.0.0"}}
+    }
+    lockfile.write_text(yaml.safe_dump(lock))
+    original = module["valid_snapshot"](project)
+    audit_response = {
+        "metadata": {"vulnerabilities": {"high": 1}},
+        "advisories": {
+            "example": {
+                "module_name": "child",
+                "severity": "high",
+                "title": "Example vulnerability",
+                "url": "https://github.com/advisories/example",
+                "vulnerable_versions": "<=1.0.0",
+                "patched_versions": ">=1.0.1",
+                "findings": [{"version": "1.0.0"}],
+            }
+        },
+    }
+    responses = {
+        "child@<=1.0.0": ["1.0.0"],
+        "child@>=1.0.1": ["1.0.1"],
+        "parent@1.0.0": {"dependencies": {"child": "^1.0.0"}},
+        "child@^1.0.0 >=1.0.1": ["1.0.1"],
+        "child@1.0.0 >=1.0.1": [],
+    }
+
+    def invoke(command, **kwargs):
+        args = command[5:]
+        if args[:2] == ["audit", "--json"]:
+            return subprocess.CompletedProcess(
+                command, 1, json.dumps(audit_response), ""
+            )
+        if args[:2] == ["audit", "--fix=update"]:
+            upgraded = yaml.safe_load(original[1]["pnpm-lock.yaml"])
+            upgraded["importers"]["."]["dependencies"]["child"]["version"] = "1.0.1"
+            lockfile.write_text(yaml.safe_dump(upgraded))
+            return subprocess.CompletedProcess(command, fix_exit, "", "")
+        if args[0] in {"install", "run"}:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        assert args[0] == "view"
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(responses.get(args[1], [])), ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", invoke)
+    report = module["prepare"](
+        project, maintenance_mode="security-only", validation_script="build"
+    )
+    assert module["valid_snapshot"](project) == original
+    assert "Pin repair assessment for child" in report
+    assert "A compatible published patch was found: <code>1.0.1</code>" in report
+    assert "https://github.com/advisories/example" in report
+    assert "bypassed an exact pin" in report
+
+
 @pytest.mark.parametrize("constraint", ["1.0.0", "^1.0.0", ">=2.0.0", "unavailable"])
 def test_report_identifies_preserved_local_override_blocker(
     project, monkeypatch, constraint

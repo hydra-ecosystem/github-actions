@@ -239,6 +239,14 @@ def direct_dependency_regressed(
     return False
 
 
+def bypassed_pnpm_pin(snapshot):
+    pins = yaml.safe_load(snapshot[1]["pnpm-workspace.yaml"]).get("overrides", {})
+    return isinstance(pins, dict) and any(
+        stable_version(pins.get(name)) not in (None, version)
+        for (_, name), version in direct_versions(snapshot).items()
+    )
+
+
 def restore_invalid_state(
     directory: Path,
     snapshot: tuple[bytes, dict[str, bytes], dict, dict],
@@ -297,12 +305,7 @@ def restore_invalid_state(
             return False
         policy = yaml.safe_load(current[1]["pnpm-workspace.yaml"])
         reference = yaml.safe_load(snapshot[1]["pnpm-workspace.yaml"])
-        pins = reference.get("overrides", {})
-        bypassed_pin = isinstance(pins, dict) and any(
-            stable_version(pins.get(name)) not in (None, version)
-            for (_, name), version in direct_versions(current).items()
-        )
-        if direct_dependency_regressed(snapshot, current) or bypassed_pin:
+        if direct_dependency_regressed(snapshot, current) or bypassed_pnpm_pin(current):
             restore_snapshot(directory, snapshot)
             notes.append(
                 f"{operation} changed protected pnpm policy, bypassed an exact pin or lowered a known direct "
@@ -1104,6 +1107,8 @@ def describe_pnpm_fixes(
         key = (package, fields)
         if key not in cache:
             snapshot = valid_snapshot(directory)
+            if snapshot is None or bypassed_pnpm_pin(snapshot):
+                return None
             result = run(
                 directory, "view", package, *fields, "--json", deadline=deadline
             )
@@ -3699,7 +3704,15 @@ def prepare(
         for name, current in initial_snapshot[2].get(section, {}).items()
         if (final := after_snapshot[2].get(section, {}).get(name)) != current
     ]
-    describe_pnpm_fixes(directory, before, initial_snapshot[1], notes, deadline, cache)
+    describe_pnpm_fixes(
+        directory,
+        before,
+        initial_snapshot[1],
+        notes,
+        deadline,
+        cache,
+        collect_proof=True,
+    )
     describe_pnpm_fixes(directory, after, after_snapshot[1], notes, deadline, cache)
     native_locks = [
         yaml.safe_load(snapshot[1]["pnpm-lock.yaml"])
