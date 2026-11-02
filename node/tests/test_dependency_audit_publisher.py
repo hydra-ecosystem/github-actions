@@ -732,6 +732,7 @@ def test_normal_security_publisher_binds_choices_to_actual_native_head(
         git("checkout", "-B", "audit-input", "origin/main")
         (work / "app/pnpm-lock.yaml").write_text(version + "\n")
         body = "**1 dependency update · 0 security fixes · Validation passed**\nOriginal CVE-2026-12345\n"
+        body += "\n<ul><li>Retained parent constraint</li></ul>\n\n- Original audit detail\n"
         body += "Additional verified audit detail\n" if observed else ""
         if rejection == "duplicate-marker":
             body += choices["START"] + "\n" + choices["END"] + "\n"
@@ -761,6 +762,8 @@ def test_normal_security_publisher_binds_choices_to_actual_native_head(
         )
         report = json.loads((tmp_path / "pr.json").read_text())["body"]
         assert choices["revision_marker"](published, base) in report
+        # GitHub counts rendered HTML lists when locating checkbox edits.
+        assert report.startswith("## Choose fixes to try\n")
         assert choices["parse"](report) == []
         assert report.count(choices["START"]) == 1
         assert "Allow `minimist` `1.2.5 → 1.2.8`" in report

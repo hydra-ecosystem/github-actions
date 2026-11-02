@@ -2328,23 +2328,34 @@ def test_publisher_reports_push_success_and_body_failure_as_partial(publisher_ch
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("with_choices", [False, True])
 def test_publication_body_preserves_platform_bytes_and_frozen_cumulative_rows(
-    cumulative_candidate, monkeypatch, newline
+    cumulative_candidate, monkeypatch, newline, with_choices
 ):
     _, _, _, _, _, report = cumulative_candidate
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
     platform = (
         "## Platform security\n\n✅ Node.js `24.21.0 → 24.22.1`.\n\n"
+        "<ul><li>Original platform advisory evidence</li></ul>\n\n"
         "| Security release | CVE summary |\n| --- | --- |\n"
         "| 24.22.1 | [CVE list](https://nodejs.org/en/blog/release/v24.22.1/) |\n\n"
     ).replace("\n", newline)
     previous = (
         platform + "## Package security" + newline + "FORGED OLD PACKAGE EVIDENCE"
     )
+    candidate = envelope()
+    if with_choices:
+        candidate["candidate"] = findings()
     body = REPAIR["publication_body"](
-        previous, report, repair_request(), "c" * 40, envelope()
+        previous, report, repair_request(), "c" * 40, candidate
     )
-    assert body.startswith(platform)
+    assert platform in body
+    if with_choices:
+        assert body.startswith("## Choose fixes to try\n")
+        assert body.index(CHOICES["START"]) < body.index("<ul>")
+        assert CHOICES["parse"](body) == []
+    else:
+        assert body.startswith(platform)
     assert "FORGED OLD PACKAGE EVIDENCE" not in body
     assert "Historical evidence (attempt 1)" in body
     assert "Not observed in the current audit" in body

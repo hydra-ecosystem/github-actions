@@ -1236,10 +1236,14 @@ def publication_body(previous, report, expected, commit, envelope):
         base=expected["base"],
     )
     marker = "" if choices else CHOICES["revision_marker"](commit, expected["base"])
+    # Keep checkbox indexes independent of HTML lists in the retained report.
     body = (
-        platform + report.rstrip() + "\n\n"
+        (choices.lstrip("\n") + "\n" if choices else "")
+        + platform
+        + report.rstrip()
+        + "\n\n"
         f"[Validated repair run](https://github.com/{expected['repository']}/actions/runs/{run})"
-        f" · Repair commit `{commit}`\n\n" + choices + marker + "\n"
+        f" · Repair commit `{commit}`\n\n" + marker + "\n"
     )
 
     if len(body) > 65536:

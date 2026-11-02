@@ -52,7 +52,9 @@ path = Path(sys.argv[1])
 text = path.read_bytes().decode()
 if any(marker in text for marker in (choices['START'], choices['END'], '<!-- node-repair:revision:')):
     raise SystemExit('Refusing an already-bound or ambiguous producer report')
-text += choices['render'](json.loads(os.environ['NODE_AUDIT_REPAIR_CHOICES']), head=sys.argv[2], base=sys.argv[3])
+# HTML report lists shift GitHub's checkbox indexes; keep the controls first.
+controls = choices['render'](json.loads(os.environ['NODE_AUDIT_REPAIR_CHOICES']), head=sys.argv[2], base=sys.argv[3])
+text = controls.lstrip('\n') + '\n' + text
 if len(text) > 65536:
     raise SystemExit('Bound PR body exceeds 65536 characters')
 path.write_bytes(text.encode())
