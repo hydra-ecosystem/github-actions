@@ -33,18 +33,32 @@ claimed. The exact original demo tree, PR head and description were restored.
 These historical implementation results do not attest a later source change,
 Worker deployment or fresh consumer installation.
 
-## Installation acceptance still required
+## Completed fresh-consumer installation acceptance
 
-Follow the [operator release gate](../../docs/node-maintenance-operator.md#installation-release-gate).
-After source review and CI, the operator deploys the exact reviewed status-message
-update. Then install the App and callers in a fresh isolated repository using
-only the user guide. Repository users host no service and store no App key.
+The [consumer receipt](consumer-receipt.json) records the 2026-11-02 run using
+workflow source `42fe6d163e7f3152b8ef55ed3b0a842a999564a9` and the deployed
+reviewed Worker. A new private repository reused the existing organization-wide
+App installation and copied both supported callers. It hosted no service and
+stored no App key. This verifies the consumer flow under that installation;
+it does not exercise a new App permission grant.
 
-Retain the actual source/deployment, installation/repository, caller hashes,
-request, run, Check, producer artifact/digests, published PR/diff and cleanup.
-Create `consumer-receipt.json` only after observing the result. Current source
-changes and planned values are not a passed receipt. Keep selection and
-`/repair selected` in the main PR conversation and preserve original CVEs.
+The real PR contained generated choices and a head/base revision binding.
+One `minimist` selection and a new `/repair selected` comment triggered
+[run 41394558474](https://github.com/hydra-ecosystem/node-maintenance-installation-acceptance-20261102/actions/runs/41394558474).
+Preparation, separate validation and bounded publication passed. The native
+repair changed only its selected override and lockfile. The unselected
+`launch-editor` pin, all four original advisory identities and the platform
+section remained. The same App reply reported the actual final run result.
+
+An earlier fixture used incompatible exact direct manifest constraints; the
+repair correctly rejected it before publication. The corrected fixture used
+compatible direct ranges with identical vulnerable overrides and lockfile bytes.
+Both attempts and their native evidence are retained. After acceptance, the
+two fixture workflows were disabled; its private PR and history were preserved.
+
+For later revisions, follow the
+[operator release gate](../../docs/node-maintenance-operator.md#installation-release-gate)
+and record fresh evidence before claiming acceptance.
 
 A fresh-consumer result does not authorize a Hydra pilot, stable-tag update,
 source merge, new service permissions, database mutation or broad rollout.

@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "status": "PASS_FRESH_CONSUMER_ACCEPTANCE",
+  "observed_date": "2026-11-02",
+  "slice": "node-maintenance-repair/10",
+  "workflow_source": "42fe6d163e7f3152b8ef55ed3b0a842a999564a9",
+  "worker": {
+    "name": "cli-dev-security-maintenance",
+    "source": "c25326f41b3a838499986ea2fda625430fb2f590",
+    "version_id": "309baf0d-f485-4e69-bb9b-cf2bba604ee1",
+    "deployment_id": "fb26e674-5634-44c1-b336-82aa9dfb06c8",
+    "traffic_percent": 100
+  },
+  "app": {
+    "id": 5438132,
+    "slug": "security-maintenance-by-cli-dev",
+    "installation_id": 174393610,
+    "installation_selection": "existing organization-wide installation; no new permission grant tested"
+  },
+  "consumer": {
+    "repository": "hydra-ecosystem/node-maintenance-installation-acceptance-20261102",
+    "repository_id": 1442443231,
+    "private": true,
+    "base": "218c2f957030509191449f4346600c8e35573e62",
+    "pr_url": "https://github.com/hydra-ecosystem/node-maintenance-installation-acceptance-20261102/pull/1",
+    "pre_repair_head": "2041e3a12db4ac37b2f4cf9a878871fb4a49c841",
+    "repair_head": "1c457dec32f538ee1087f11d894e4cc1afbc97b4",
+    "app_keys_stored": false,
+    "service_hosted": false,
+    "repository_secret_names": [],
+    "callers": {
+      ".github/workflows/dependency-audit.yml": {
+        "revision": "218c2f957030509191449f4346600c8e35573e62",
+        "sha256": "ab55a44b4aacff22d1d20ee4b78d5c17387c308769b17cdb1d00f7952739ac9f"
+      },
+      ".github/workflows/dependency-repair.yml": {
+        "revision": "218c2f957030509191449f4346600c8e35573e62",
+        "sha256": "73a56c534654a73eae9a81e298686680da0a26bd0e97a6a98e4a824075e2e2f5"
+      }
+    }
+  },
+  "producer": {
+    "run": 41394127053,
+    "job": 125111801849,
+    "check": 125111801849,
+    "artifact": 13118023956,
+    "archive_sha256": "b56a72294dab9923aaced592ec7ee808c27b6061e11be8664624bc438967a7a3",
+    "content_sha256": "9b01f0a1e0532eea7649e4a01bd18df11ee327b629377c8a58c509435eef0b0e"
+  },
+  "repair": {
+    "request_id": "b109f840-d67e-11f1-9797-753aa5664067",
+    "selection": [
+      {
+        "name": "minimist",
+        "from": "1.2.5",
+        "to": "1.2.8"
+      }
+    ],
+    "command_comment_id": 6569875166,
+    "status_comment_id": 6569876377,
+    "check_id": 125112909699,
+    "run_id": 41394558474,
+    "run_url": "https://github.com/hydra-ecosystem/node-maintenance-installation-acceptance-20261102/actions/runs/41394558474",
+    "jobs": {
+      "repair / guard": {
+        "id": 125112982982,
+        "conclusion": "success"
+      },
+      "repair / Node repair preparation": {
+        "id": 125113024361,
+        "conclusion": "success"
+      },
+      "repair / validate": {
+        "id": 125113185552,
+        "conclusion": "success"
+      },
+      "repair / publish": {
+        "id": 125113274687,
+        "conclusion": "success"
+      }
+    },
+    "producer_locator": {
+      "run": 41394558474,
+      "job": 125113024361,
+      "check": 125113024361,
+      "artifact": 13118990933,
+      "archive_sha256": "0eb047236bda6bade2d435fb57dffb0675392fc39695ddf527ae93b9491e2409",
+      "content_sha256": "8e85403de1f817500c60fea88975dca79f04676f80fe3e109579a0d6dde8eb4a"
+    },
+    "validation_artifact": {
+      "id": 13119230215,
+      "sha256": "d544989d4c6c6ba3c283a4affe4203a2623bda3394f2375479a1011bf1b710ac"
+    },
+    "request_state": "success",
+    "request_inspection_rows_written": 0
+  },
+  "verified": {
+    "native_files": [
+      "app/pnpm-workspace.yaml",
+      "app/pnpm-lock.yaml"
+    ],
+    "manifest_unchanged": true,
+    "minimist": "1.2.5 -> 1.2.8",
+    "unselected_launch_editor": "2.14.1 unchanged",
+    "original_sealed_attempt": "exact complete record retained as first of two cumulative attempts",
+    "original_advisory_ids": [
+      "GHSA-xvch-5gv4-984h",
+      "GHSA-698v-4r3x-3vcv",
+      "GHSA-r825-w8mm-5pxw",
+      "GHSA-587h-7wmj-h5pm"
+    ],
+    "fresh_remaining_advisories": 3,
+    "fresh_critical_advisories": 0,
+    "platform_section": "byte-for-byte retained",
+    "published_report": "exact shared publisher output from original sealed preparation report",
+    "same_app_reply": "actual workflow success and exact run URL"
+  },
+  "negative_fixture": {
+    "request_id": "782c6ef0-d67d-11f1-843b-57e29c917a9c",
+    "run_id": 41393707747,
+    "result": "Rejected exact direct manifest constraints before publication; corrected fixture ranges retained identical exact overrides and lockfile. No guard or source change."
+  },
+  "cleanup": {
+    "workflow_states": [
+      {
+        "id": 404073424,
+        "path": ".github/workflows/dependency-audit.yml",
+        "state": "disabled_manually"
+      },
+      {
+        "id": 404073425,
+        "path": ".github/workflows/dependency-repair.yml",
+        "state": "disabled_manually"
+      }
+    ],
+    "repository_and_pr_history": "retained private and unmerged",
+    "source_merge": false,
+    "stable_tag_changed": false,
+    "hydra_pilot_run": false
+  },
+  "limitations": [
+    "Hosted acceptance applies to the exact workflow and Worker identities above.",
+    "Existing App installation was reused; new installation approval flow was not tested.",
+    "This receipt is not merge, stable-tag or Hydra authorization."
+  ]
+}

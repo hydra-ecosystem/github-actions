@@ -285,14 +285,21 @@ not enable automatic upgrades. Nothing merges automatically. See
 
 ## Install interactive repairs
 
-Release acceptance for this installation path is pending. The shared service
-operator must deploy the reviewed status-message update and record a successful
-fresh-consumer test before general rollout. The audit-only setup above remains
-available. See the [operator release gate](node-maintenance-operator.md#installation-release-gate).
+The reviewed shared service and caller passed a
+[fresh-consumer acceptance](../repair-app/pilot/consumer-receipt.json) on
+2026-11-02. The receipt identifies the exact tested workflow and deployment.
+Stable-tag changes and Hydra rollout remain separate operator decisions.
+The audit-only setup above remains available. See the
+[operator release gate](node-maintenance-operator.md#installation-release-gate).
 
 Interactive repairs support eligible exact pnpm overrides in a standalone
 project. npm projects can use audit-only maintenance. Repair does not migrate
 package managers, change unrelated pins, or merge a PR.
+
+Direct manifest and parent constraints must already allow the selected patch.
+For example, `package.json` can declare `^1.2.5` while an exact workspace
+override retains `1.2.5`. An exact manifest declaration of `1.2.5` forbids a
+repair to `1.2.8`: repairs preserve `package.json` and do not override its constraints.
 
 1. Complete the project and configuration steps above. Use the
    [coordinated audit caller](node-coordination.md#install-or-adopt-the-coordinated-caller)
