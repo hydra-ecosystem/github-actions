@@ -1130,7 +1130,7 @@ def cumulative_report(
     )
     encoded = base64.b64encode(ENGINE["canonical_history"](record)).decode("ascii")
     report += f"\n\n<!-- node-audit-history:v1:{encoded} -->\n"
-    if len(encoded) > 524288 or len(report.encode()) > 1048576:
+    if len(report.encode()) > 1048576:
         raise ValueError("Cumulative history exceeds its bound; no artifact sealed")
     return report
 
@@ -1493,7 +1493,7 @@ def prepare_candidate(expected, artifact):
     (artifact / "audit.json").write_text(
         json.dumps(envelope, ensure_ascii=False) + "\n"
     )
-    (artifact / "result.md").write_text(report + "\n")
+    (artifact / "result.md").write_text(report)
     if set(p.name for p in artifact.iterdir()) != {
         "candidate.patch",
         "audit.json",

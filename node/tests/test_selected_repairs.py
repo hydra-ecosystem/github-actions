@@ -1000,7 +1000,10 @@ def test_preparation_seals_only_three_members_without_validation(
         lambda: (project, {"minimumReleaseAge": 14400}, before),
     )
     monkeypatch.setitem(module, "verified_targets", lambda *a, **kw: repair_audit())
-    monkeypatch.setitem(module, "native_history", lambda *a: normal_history(before))
+    history = normal_history(before)
+    findings = history["before"]["advisories"]["1"]["findings"]
+    findings[0]["paths"] = [".>parent>launch-editor"] * 12_000
+    monkeypatch.setitem(module, "native_history", lambda *a: history)
     monkeypatch.setitem(module, "export_patch", lambda paths: b"sealed patch\n")
     status = []
 
@@ -1050,6 +1053,9 @@ def test_preparation_seals_only_three_members_without_validation(
             == result
         )
         assert "Project validation has not run" in (artifact / "result.md").read_text()
+        report = (artifact / "result.md").read_bytes()
+        assert report.endswith(b"-->\n")
+        assert ENGINE["history_record"](report)["attempts"][0] == history
     import os
 
     assert os.environ["npm_config_ignore_pnpmfile"] == "false"
@@ -1585,7 +1591,7 @@ def test_cumulative_seal_rejects_incomplete_history(cumulative_candidate, proble
     elif problem == "bad-audit":
         initial["before"] = "unavailable"
     else:
-        initial["package_report"] += "\n" + "x" * 524288
+        initial["package_report"] += "\n" + "x" * 1048576
     with pytest.raises(ValueError):
         REPAIR["cumulative_report"](
             initial,
