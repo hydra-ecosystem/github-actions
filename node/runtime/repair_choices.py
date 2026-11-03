@@ -173,7 +173,7 @@ def render(items, *, head, base):
     if not items:
         return ""
     return (
-        "\n## Choose fixes to try\n\n"
+        "\n## Upgrades requiring your authorization\n\n"
         "These patches appear compatible with the checked parent constraints. "
         "Repair validation has not run. Selecting a fix permits one attempt; "
         "it does not approve merging.\n\n"
@@ -187,9 +187,41 @@ def render(items, *, head, base):
         + END
         + "\n"
         + marker
+        + "\n\n| Package | Proposed upgrade | Why authorization is needed |\n"
+        "| --- | --- | --- |\n"
+        + "\n".join(
+            f"| `{item['name']}` | `{item['from']} → {item['to']}` | "
+            "An explicit project pin prevents the automatic upgrade. "
+            "The patch fits the checked parent constraints; repair validation has not run. |"
+            for item in items
+        )
         + "\n\n### Run selected fixes\n\n"
-        "Select the fixes above, then post a **new comment** containing only "
-        "`/repair selected` and click GitHub's **Comment** button. "
-        "The bot acknowledges the request and updates the same reply with the result. "
-        "Checkbox edits alone start no work. Nothing merges automatically.\n"
+        "Select the upgrades above, then tick **Run selected fixes** below. "
+        "Package selections alone start no work.\n\n"
+        "<!-- node-repair:run:v1 -->\n"
+        "- [ ] Run selected fixes.\n"
+        "<!-- /node-repair:run -->\n\n"
+        "The App replies with the accepted count and workflow status. "
+        "Only one repair can be active. The App does not reset this checkbox; "
+        "to submit another request after completion, untick and re-tick it.\n\n"
+        "Alternatively, post a **new comment** containing only `/repair selected` "
+        "and click GitHub's **Comment** button. Use either method once. "
+        "Nothing merges automatically.\n"
+    )
+
+
+def layout(report, controls):
+    """Keep the summary and native task lists ahead of all detailed HTML lists."""
+    platform = re.search(r"(?m)^## Platform security\r?\n", report)
+    summary, details = (
+        (report[: platform.start()], report[platform.start() :])
+        if platform
+        else ("", report)
+    )
+    return (
+        (summary.rstrip() + "\n\n" if summary else "")
+        + controls.lstrip("\n")
+        + "\n<details>\n<summary>Full security report and validation evidence</summary>\n\n"
+        + details.rstrip()
+        + "\n\n</details>\n"
     )

@@ -763,7 +763,7 @@ def test_normal_security_publisher_binds_choices_to_actual_native_head(
         report = json.loads((tmp_path / "pr.json").read_text())["body"]
         assert choices["revision_marker"](published, base) in report
         # GitHub counts rendered HTML lists when locating checkbox edits.
-        assert report.startswith("## Choose fixes to try\n")
+        assert report.startswith("## Upgrades requiring your authorization\n")
         assert choices["parse"](report) == []
         assert report.count(choices["START"]) == 1
         assert "Allow `minimist` `1.2.5 → 1.2.8`" in report
