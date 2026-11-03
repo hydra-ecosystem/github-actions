@@ -325,8 +325,9 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   if (!env.DB || (!conversation && !clickedMatch)) return;
   const installation = payload.installation.id;
   // A retained delivery is never another dispatch attempt, even after a crash.
-  const replay = await env.DB.prepare('SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND (id = ? OR comment_id = ?)')
-    .bind(installation, repository.id, delivery, isComment ? payload.comment.id : null).first();
+  const replay = await env.DB.prepare(`SELECT * FROM requests WHERE id = ? AND installation_id = ? AND repository_id = ?
+    UNION ALL SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND comment_id = ? LIMIT 1`)
+    .bind(delivery, installation, repository.id, installation, repository.id, isComment ? payload.comment.id : null).first();
   if (replay) return;
   const prefix = `/repos/${repository.full_name}`;
   const actor = payload.sender?.login;
@@ -439,7 +440,7 @@ async function descriptionSelection(token, repository, payload, env, signal) {
     workflowInputs(pr, items);
   } catch { return rejection; }
   const fingerprint = await selectionFingerprint(pr, items);
-  const check = await findSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
+  const check = await requestSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
   return check ? {check, fingerprint, trigger_key} : {
     rejection: 'No run started: the selection control is not ready. Wait for the Dependency repair Check, then untick and re-tick Run selected fixes.',
   };
@@ -476,12 +477,46 @@ async function commentSelection(token, repository, payload, env, signal) {
     workflowInputs(pr, items);
   } catch { return rejection; }
   const fingerprint = await selectionFingerprint(pr, items);
-  const check = await findSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
+  const check = await requestSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
   if (!check) return rejection;
   return {check, fingerprint};
 }
 
+async function rememberSelectionCheck(env, installation, repository, pr, check) {
+  if (!env.DB) return;
+  if (!ownedCheck(check, env.APP_ID, pr.head.sha) || selectionCheck(check, env.APP_ID)?.[1] !== String(pr.number)) throw new Error('Invalid selection control');
+  await env.DB.prepare(`INSERT INTO selection_controls (installation_id, repository_id, pr, head, external_id, check_id)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (installation_id, repository_id) DO UPDATE SET
+    pr = excluded.pr, head = excluded.head, external_id = excluded.external_id, check_id = excluded.check_id`)
+    .bind(installation, repository.id, pr.number, pr.head.sha, check.external_id, check.id).run();
+}
+
+async function requestSelectionCheck(token, repository, pr, appID, external, signal, env, installation) {
+  // A locator is only a hint. Repair stale or missing controls on an explicit
+  // request, without requiring another description edit or scanning old Checks.
+  const check = await findSelectionCheck(token, repository, pr, appID, external, signal, env, installation);
+  if (check || !env.DB) return check;
+  const saved = await env.DB.prepare('SELECT pr FROM selection_controls WHERE installation_id = ? AND repository_id = ?')
+    .bind(installation, repository.id).first();
+  if (saved?.pr !== pr.number) return;
+  return refreshSelectionCheck(token, repository, pr.number, appID, signal, env, installation, pr.head.sha, external);
+}
+
 async function findSelectionCheck(token, repository, pr, appID, external, signal, env = {}, installation) {
+  if (env.DB) {
+    const saved = await env.DB.prepare('SELECT * FROM selection_controls WHERE installation_id = ? AND repository_id = ?')
+      .bind(installation, repository.id).first();
+    if (saved) {
+      if (saved.pr !== pr.number || saved.head !== pr.head.sha || saved.external_id !== external) return;
+      const candidate = await api(token, `/repos/${repository.full_name}/check-runs/${saved.check_id}`, 'GET', undefined, signal)
+        .catch(error => { if (error.status === 404) return null; throw error; });
+      // The locator is only a hint. GitHub identity and admission history remain authoritative.
+      if (candidate?.id !== saved.check_id || !ownedCheck(candidate, appID, pr.head.sha) || candidate.external_id !== external) return;
+      if (candidate.status !== 'completed') throw new Error('Repair Check is not idle');
+      return await retainedCheck(env, installation, repository.id, candidate.id) ? undefined : candidate;
+    }
+  }
+  // Discover pre-migration controls once. Thereafter edits use the direct locator.
   let check, total, read = 0;
   for (let page = 1; ; page++) {
     const list = await api(token, `/repos/${repository.full_name}/commits/${pr.head.sha}/check-runs?check_name=Dependency%20repair&app_id=${appID}&filter=all&per_page=100&page=${page}`, 'GET', undefined, signal);
@@ -498,11 +533,14 @@ async function findSelectionCheck(token, repository, pr, appID, external, signal
       if (!check || candidate.id > check.id) check = candidate;
     }
     read += list.check_runs.length;
-    if (read === total) return check;
+    if (read === total) {
+      if (check) await rememberSelectionCheck(env, installation, repository, pr, check);
+      return check;
+    }
   }
 }
 
-async function refreshSelectionCheck(token, repository, number, appID, signal, env = {}, installation, expectedHead) {
+async function refreshSelectionCheck(token, repository, number, appID, signal, env = {}, installation, expectedHead, expectedExternal) {
   const prefix = `/repos/${repository.full_name}`;
   const pr = await api(token, `${prefix}/pulls/${number}`, 'GET', undefined, signal);
   if (!managedPR(pr, repository, number) || (expectedHead && pr.head.sha !== expectedHead)) return;
@@ -511,8 +549,10 @@ async function refreshSelectionCheck(token, repository, number, appID, signal, e
   let items = [], valid = true;
   try { items = selections(pr.body); workflowInputs(pr, items); } catch { valid = false; items = []; }
   const external = `node-repair:${number}:${await selectionFingerprint(pr, items)}`;
+  if (expectedExternal && external !== expectedExternal) return;
   // An exposed control may already be admitted when this read returns. Never PATCH it.
-  if (await findSelectionCheck(token, repository, pr, appID, external, signal, env, installation)) return;
+  const existing = await findSelectionCheck(token, repository, pr, appID, external, signal, env, installation);
+  if (existing) return existing;
   const output = {
     title: !valid ? 'Repair selections need attention' : items.length ? `${items.length} selected fix${items.length === 1 ? '' : 'es'}` : 'No fixes selected',
     summary: !valid ? 'Use one valid selection block in the PR description. No run was started.' : items.length ?
@@ -521,11 +561,13 @@ async function refreshSelectionCheck(token, repository, number, appID, signal, e
           '\n\nSelections are displayed for review. Running fixes is not enabled yet.') :
       'Select the allowed fixes in the PR description. Editing checkboxes does not start a run.',
   };
-  await api(token, `${prefix}/check-runs`, 'POST', {
+  const check = await api(token, `${prefix}/check-runs`, 'POST', {
     name: CHECK, head_sha: pr.head.sha, external_id: external,
     status: 'completed', conclusion: 'neutral', output,
     actions: valid && items.length && env.DB ? [ACTION] : [],
   }, signal);
+  await rememberSelectionCheck(env, installation, repository, pr, check);
+  return check;
 }
 
 async function completeRequest(payload, env, signal) {

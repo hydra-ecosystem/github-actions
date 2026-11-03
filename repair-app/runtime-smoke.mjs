@@ -237,6 +237,9 @@ try {
   const commentRows = (await db.prepare('SELECT * FROM requests').all()).results;
   assert.equal(commentRows.length, 1);assert.equal(commentRows[0].comment_id, 501);
   assert.equal(commentRows[0].status_comment_id, 600);assert.equal(commentRows[0].run_id, 900);
+  const requestCheck = [nativeCheck, ...idleChecks].find(check => check.id === commentRows[0].check_id);
+  const previousIdleCount = idleChecks.length;
+  const historyReads = nativeCalls.filter(c => c.path.includes('/commits/')).length;
   assert.match(statusComment.body, /Request accepted/);assert.match(statusComment.body, /launch-editor/);
   assert.match(statusComment.body, /actions\/workflows\/dependency-repair\.yml/);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 3);
@@ -259,8 +262,8 @@ try {
   assert.equal((await complete(900)).status, 200);
   assert.equal((await db.prepare('SELECT state FROM requests WHERE id = ?').bind(commandID).first()).state, 'success');
   assert.match(statusComments.get(600).body, /Workflow succeeded/);
-  assert.equal(nativeCheck.output.title, 'Workflow succeeded');assert.equal(idleChecks.length, 1);
-  assert.equal((await complete(900)).status, 200);assert.equal(idleChecks.length, 1);
+  assert.equal(requestCheck.output.title, 'Workflow succeeded');assert.equal(idleChecks.length, previousIdleCount + 1);
+  assert.equal((await complete(900)).status, 200);assert.equal(idleChecks.length, previousIdleCount + 1);
 
   for (const [index, outcome] of ['failure', 'cancelled'].entries()) {
     nativeRunID = 901 + index;commandComment.id = 502 + index;
@@ -272,11 +275,12 @@ try {
     assert.match(statusComment.body, new RegExp(`Workflow ${outcome === 'failure' ? 'failed' : 'cancelled'}`));
     assert.match(statusComment.body, /Review its validation and publication results before merging/);
     assert.doesNotMatch(statusComment.body, /pilot|fixes were published|dependencies were upgraded/);
-    assert.equal(idleChecks.length, index + 2);
+    assert.equal(idleChecks.length, previousIdleCount + index + 2);
   }
   assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM requests WHERE state IN ('reserved','dispatched','unknown')").first()).count, 0);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 5);
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 3);
+  assert.equal(nativeCalls.filter(c => c.path.includes('/commits/')).length, historyReads);
   assert.match(statusComments.get(600).body, /Workflow succeeded/);
   console.log('Native completion passed: actual D1 retains the lock after reply failure; canonical redelivery completes it; isolated success/failure/cancellation update the same replies and admit fresh commands without SQL recovery. GitHub responses are intercepted local fixtures, not live evidence.');
   nativePR.updated_at = '2026-11-03T05:00:00Z';
