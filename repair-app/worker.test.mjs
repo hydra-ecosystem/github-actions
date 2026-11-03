@@ -641,6 +641,7 @@ async function commentMock(t, options = {}) {
   const f = await actionMock(t, {...options, async onCall(call, context) {
     const intercepted = await options.onCall?.(call, {...context, comments, command});
     if (intercepted) return intercepted;
+    if (call.path === `/repos/fixture/repo/issues/comments/${command.id}/reactions`) return json({id: 700, content: '+1'});
     if (call.path === '/repos/fixture/repo/issues/comments/501' ||
         call.path === `/repos/fixture/repo/issues/comments/${command.id}`) return json(command);
     if (call.path === '/repos/fixture/repo/issues/12/comments' && call.method === 'POST') {
@@ -662,6 +663,126 @@ async function commentMock(t, options = {}) {
     {'x-github-delivery': id}), f.environment);
   return {...f, command, comments, commentEvent: event, submit};
 }
+
+async function descriptionMock(t, options = {}) {
+  const f = await commentMock(t, options);
+  f.pr.updated_at = '2026-11-03T05:00:00Z';
+  f.pr.body += '\n<!-- node-repair:run:v1 -->\n- [ ] Run selected fixes.\n<!-- /node-repair:run -->';
+  const before = f.pr.body;
+  f.pr.body = before.replace('- [ ] Run selected fixes.', '- [x] Run selected fixes.');
+  const event = {...payload, number: 12, action: 'edited', pull_request: structuredClone(f.pr),
+    changes: {body: {from: before}}, sender: {id: 9, login: 'maintainer', type: 'User'}};
+  const run = (id = delivery, value = event) => worker.fetch(signed(value, 'pull_request', {'x-github-delivery': id}), f.environment);
+  return {...f, descriptionEvent: event, run};
+}
+
+test('a description run toggle admits one exact batch and replies without editing the description', async t => {
+  const f = await descriptionMock(t), before = f.pr.body;
+  assert.equal((await f.run()).status, 200);
+  assert.equal(f.rows().length, 1);assert.equal(f.dispatches().length, 1);
+  assert.match(f.rows()[0].trigger_key, /^[a-f0-9]{64}$/);
+  assert.equal(f.rows()[0].comment_id, null);assert.equal(f.rows()[0].status_comment_id, 600);
+  assert.match(f.comments.get(600).body, /1 selected fix\./);
+  assert.match(f.comments.get(600).body, /⏳ Request active/);
+  assert.equal(f.pr.body, before);
+  assert.ok(f.calls.every(c => !(c.path.endsWith('/pulls/12') && c.method !== 'GET')));
+  assert.equal(f.calls.filter(c => c.path.endsWith('/reactions')).length, 0);
+  assert.equal((await f.run()).status, 200);
+  assert.equal((await f.run('a4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
+  f.db.sql.prepare("UPDATE requests SET state = 'success' WHERE id = ?").run(delivery);
+  assert.equal((await f.run('b4e535a5-2a7d-491d-858a-3df51ce211df')).status, 200);
+  assert.equal(f.dispatches().length, 1);
+});
+
+for (const [name, mutate] of [
+  ['selection changed since the event', f => {f.pr.body = f.pr.body.replace('2.14.2', '2.14.3');}],
+  ['new head', f => {f.pr.head.sha = 'c'.repeat(40);}],
+  ['new base', f => {f.pr.base.sha = 'c'.repeat(40);}],
+  ['later edit with identical body', f => {f.pr.updated_at = '2026-11-03T05:00:01Z';}],
+  ['unmanaged PR', f => {f.pr.user.type = 'User';}],
+  ['missing revision', f => {f.pr.body = f.pr.body.replace(/<!-- node-repair:revision:[^\n]+/, '');f.descriptionEvent.pull_request.body = f.pr.body;f.descriptionEvent.changes.body.from = f.pr.body.replace('- [x] Run selected fixes.', '- [ ] Run selected fixes.');}],
+]) {
+  test(`description request rejects ${name}`, async t => {
+    const f = await descriptionMock(t);mutate(f);
+    assert.equal((await f.run()).status, 200);
+    assert.equal(f.rows().length, 0);assert.equal(f.dispatches().length, 0);
+    if (name === 'missing revision') assert.match(f.comments.get(600).body, /No run started/);
+    else assert.equal(f.comments.size, 0);
+  });
+}
+
+test('package toggles and edits while the run checkbox stays checked do not submit', async t => {
+  const f = await descriptionMock(t);
+  f.descriptionEvent.changes.body.from = f.pr.body;
+  assert.equal((await f.run()).status, 200);
+  assert.equal(f.rows().length, 0);assert.equal(f.dispatches().length, 0);
+});
+
+test('description submission requires current maintainer permission', async t => {
+  const f = await descriptionMock(t, {permission: 'read'});
+  assert.equal((await f.run()).status, 200);
+  assert.equal(f.rows().length, 0);assert.equal(f.comments.size, 0);
+});
+
+test('an empty description batch gets a clear rejection without dispatch', async t => {
+  const f = await descriptionMock(t);
+  f.pr.body = f.pr.body.replace('- [x] Allow', '- [ ] Allow');
+  f.descriptionEvent.pull_request.body = f.pr.body;
+  f.descriptionEvent.changes.body.from = f.pr.body.replace('- [x] Run selected fixes.', '- [ ] Run selected fixes.');
+  assert.equal((await f.run()).status, 200);
+  assert.equal(f.rows().length, 0);assert.match(f.comments.get(600).body, /select at least one/);
+});
+
+test('the accepted reply counts the exact two-item batch', async t => {
+  const f = await descriptionMock(t);
+  f.pr.body = f.pr.body.replace('<!-- /node-repair:selection -->', '- [x] Allow `body-parser` `1.20.6 → 1.20.9` by updating its explicit pin.\n<!-- /node-repair:selection -->');
+  f.descriptionEvent.pull_request.body = f.pr.body;
+  f.descriptionEvent.changes.body.from = f.pr.body.replace('- [x] Run selected fixes.', '- [ ] Run selected fixes.');
+  f.check.external_id = `node-repair:12:${await selectionFingerprint(f.pr, selections(f.pr.body))}`;
+  assert.equal((await f.run()).status, 200);
+  assert.match(f.comments.get(600).body, /2 selected fixes\./);
+  assert.equal(JSON.parse(f.dispatches()[0].body.inputs.selections).length, 2);
+});
+
+test('concurrent description deliveries reserve and dispatch once', async t => {
+  const f = await descriptionMock(t);
+  assert.deepEqual((await Promise.all([f.run(), f.run('a4e535a5-2a7d-491d-858a-3df51ce211df')])).map(r => r.status), [200, 200]);
+  assert.equal(f.rows().length, 1);assert.equal(f.dispatches().length, 1);assert.equal(f.comments.size, 1);
+});
+
+test('a cleared run control during final validation cannot dispatch', async t => {
+  let reads = 0;
+  const f = await descriptionMock(t, {onCall(call, {pr}) {
+    if (call.path.endsWith('/pulls/12') && ++reads === 2) pr.body = pr.body.replace('- [x] Run selected fixes.', '- [ ] Run selected fixes.');
+  }});
+  assert.equal((await f.run()).status, 200);assert.equal(f.rows().length, 0);assert.equal(f.dispatches().length, 0);
+});
+
+test('a canonical maintainer comment gets a receipt reaction before admission', async t => {
+  const f = await commentMock(t);
+  assert.equal((await f.submit()).status, 200);
+  const reaction = f.calls.findIndex(c => c.path.endsWith('/reactions'));
+  assert.ok(reaction >= 0);assert.deepEqual(f.calls[reaction].body, {content: '+1'});
+  assert.ok(reaction < f.calls.findIndex(c => c.path.endsWith('/dispatches')));
+});
+
+for (const kind of ['forbidden', 'lost response', 'timeout']) {
+  test(`a ${kind} receipt reaction does not prevent a valid repair`, async t => {
+    const f = await commentMock(t, {onCall(call) {
+      if (!call.path.endsWith('/reactions')) return;
+      if (kind === 'forbidden') return new Response(null, {status: 403});
+      if (kind === 'lost response') throw Error('lost cosmetic receipt');
+      return new Promise((resolve, reject) => call.signal.addEventListener('abort', () => reject(Error('receipt timeout')), {once: true}));
+    }});
+    assert.equal((await f.submit()).status, 200);assert.equal(f.dispatches().length, 1);
+  });
+}
+
+test('unauthorized and edited canonical comments get no reaction', async t => {
+  const f = await commentMock(t, {permission: 'read'});
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/reactions')).length, 0);
+});
 
 async function completionMock(t, {native = false, admit = true, onCall} = {}) {
   const app = {id: 42, slug: 'fixture-maintenance'};
@@ -875,7 +996,7 @@ for (const target of ['Check', 'reply']) {
     armed = true;assert.equal((await f.complete()).status, 500);
     assert.equal(f.rows()[0].state, 'dispatched');assert.equal(f.rows()[0].conclusion, 'success');
     // Its saved outcome still holds the same active-index lock.
-    assert.throws(() => f.db.sql.prepare("INSERT INTO requests SELECT 'other', installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, NULL, state, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM requests").run(), /UNIQUE/);
+    assert.throws(() => f.db.sql.prepare("INSERT INTO requests SELECT 'other', installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, NULL, state, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM requests").run(), /UNIQUE/);
     armed = false;assert.equal((await f.complete()).status, 200);assert.equal(f.rows()[0].state, 'success');
     assert.equal(f.comments.size, 1);assert.equal(f.dispatches().length, 1);
   });
@@ -1019,7 +1140,7 @@ test('a conversation command submits description selections and updates one App-
   assert.equal((await f.submit()).status, 200);
   assert.equal(f.dispatches().length, 1);assert.equal(f.rows().length, 1);
   assert.equal(f.rows()[0].comment_id, 501);assert.equal(f.rows()[0].status_comment_id, 600);
-  assert.deepEqual(f.calls[0].body.permissions, {contents: 'read', pull_requests: 'write', checks: 'write', actions: 'write', issues: 'read'});
+  assert.deepEqual(f.calls[0].body.permissions, {contents: 'read', pull_requests: 'write', checks: 'write', actions: 'write', issues: 'write'});
   assert.match(f.comments.get(600).body, /Request accepted/);
   assert.match(f.comments.get(600).body, /launch-editor.*2\.14\.1 → 2\.14\.2/);
   assert.match(f.comments.get(600).body, /actions\/workflows\/dependency-repair\.yml/);
@@ -1205,13 +1326,17 @@ test('existing slice-3 rows survive the one-time comment migration', () => {
   const db = new DatabaseSync(':memory:');
   try {
     const oldSchema = readFileSync(new URL('./schema.sql', import.meta.url), 'utf8')
-      .replace(/,\n  comment_id[\s\S]*?selections_json TEXT/, '').replace(/CREATE UNIQUE INDEX IF NOT EXISTS one_comment_request[\s\S]*/, '');
+      .replace(/,\n  comment_id[\s\S]*?trigger_key TEXT/, '').replace(/CREATE UNIQUE INDEX IF NOT EXISTS one_comment_request[\s\S]*/, '');
     db.exec(oldSchema);
     db.exec("INSERT INTO requests (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state) VALUES ('old', 3, 7, 'fixture/repo', 12, 'head', 'base', 'main', 'fingerprint', 77, 'maintainer', 1, 'unknown')");
     db.exec(readFileSync(new URL('./migrations/0001_comment_requests.sql', import.meta.url), 'utf8'));
     const row = db.prepare('SELECT * FROM requests').get();
     assert.equal(row.state, 'unknown');assert.equal(row.comment_id, null);
     assert.equal(row.status_comment_id, null);assert.equal(row.selections_json, null);
+    db.exec(readFileSync(new URL('./migrations/0002_description_requests.sql', import.meta.url), 'utf8'));
+    assert.equal(db.prepare('SELECT * FROM requests').get().trigger_key, null);
+    db.exec("UPDATE requests SET trigger_key = 'signed-edit'");
+    assert.throws(() => db.exec("INSERT INTO requests SELECT 'new', installation_id, repository_id, repository, 13, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, completed_at, state, run_id, run_url, html_url, conclusion, comment_id, status_comment_id, selections_json, trigger_key FROM requests"), /UNIQUE/);
   } finally { db.close(); }
 });
 

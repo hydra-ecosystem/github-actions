@@ -15,7 +15,21 @@ const TERMINAL = "state IN ('success', 'failure', 'cancelled')";
 const CONCLUSIONS = new Set(['success', 'failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale', 'startup_failure']);
 const MAX_INPUT_CHARS = 65_535;
 const COMMAND = '/repair selected';
+const RUN_START = '<!-- node-repair:run:v1 -->';
+const RUN_END = '<!-- /node-repair:run -->';
+const RUN_LINE = '- [ ] Run selected fixes.';
 const positiveID = value => Number.isSafeInteger(value) && value > 0;
+const conversationRequest = row => Boolean(row.comment_id || row.trigger_key);
+
+function descriptionRequest(payload) {
+  const before = payload.changes?.body?.from, after = payload.pull_request?.body;
+  if (payload.action !== 'edited' || payload.sender?.type !== 'User' || !positiveID(payload.sender.id) ||
+      typeof before !== 'string' || typeof after !== 'string') return false;
+  const newline = before.includes('\r\n') ? '\r\n' : '\n';
+  const block = [RUN_START, RUN_LINE, RUN_END].join(newline);
+  return before.split(RUN_START).length === 2 && before.split(RUN_END).length === 2 &&
+    before.includes(block) && before.replace(block, block.replace('- [ ]', '- [x]')) === after;
+}
 
 function repairComment(payload) {
   return payload.action === 'created' && positiveID(payload.issue?.number) &&
@@ -184,8 +198,10 @@ async function readRepository(payload, env, signal, delivery) {
   const hasPR = Number.isSafeInteger(number) && number > 0;
   const isAction = delivery !== undefined;
   const isComment = isAction && repairComment(payload);
+  const isDescription = isAction && descriptionRequest(payload);
   const permissions = hasPR || isAction ? {contents: 'read', pull_requests: 'read', checks: 'write',
-    ...(isAction ? {actions: 'write'} : {}), ...(isComment ? {pull_requests: 'write', issues: 'read'} : {})} : {contents: 'read'};
+    ...(isAction ? {actions: 'write'} : {}),
+    ...(isComment || isDescription ? {pull_requests: 'write', issues: isComment ? 'write' : 'read'} : {})} : {contents: 'read'};
   const token = await installationToken(env, payload.installation?.id, repository.id, signal, permissions);
   const current = await api(token, `/repos/${repository.full_name}`, 'GET', undefined, signal);
   if (current?.id !== repository.id || current.full_name?.toLowerCase() !== repository.full_name.toLowerCase()) {
@@ -231,15 +247,15 @@ export function requestStatus(row, items = []) {
   const outcome = row.conclusion && (row.conclusion === 'success' ? 'succeeded' : row.conclusion === 'cancelled' ? 'cancelled' : 'failed');
   const title = outcome ? `Workflow ${outcome}` : 'Request accepted';
   const summary = outcome ? `[View workflow run](${row.html_url}). Review its validation and publication results before merging.` :
-    `[View repair workflows](https://github.com/${row.repository}/actions/workflows/${WORKFLOW}).\n\nWaiting for a verified completion result. Nothing merges automatically.`;
+    `[View repair workflows](https://github.com/${row.repository}/actions/workflows/${WORKFLOW}).\n\n⏳ Request active. Waiting for a verified completion result. Nothing merges automatically.`;
   const result = outcome ? `${summary}\n\nGitHub conclusion: \`${row.conclusion}\`.` : summary;
   return {title, summary: result, body: `<!-- node-repair:request:${row.id} -->\n### Dependency repair: ${title}\n\n` +
     (items.length ? items.map(item => `- \`${item.name}\` \`${item.from} → ${item.to}\``).join('\n') + '\n\n' : '') +
-    `${result}\n\nSelections remain in the PR description. No merge is authorized by this request.`};
+    `${items.length} selected fix${items.length === 1 ? '' : 'es'}.\n\n${result}\n\nSelections remain in the PR description. No merge is authorized by this request.`};
 }
 
 async function requestReply(token, repository, row, env, signal) {
-  if (!row.comment_id || !row.status_comment_id) return null;
+  if (!conversationRequest(row) || !row.status_comment_id) return null;
   const prefix = `/repos/${repository.full_name}/issues`;
   const comment = await api(token, `${prefix}/comments/${row.status_comment_id}`, 'GET', undefined, signal)
     .catch(error => { if (row.conclusion && error.status === 404) return null; throw error; });
@@ -256,7 +272,7 @@ async function showRequest(token, repository, row, signal, env, items = [], crea
     external_id: `node-repair-request:${row.id}`, status: 'completed', conclusion: 'neutral', actions: [],
     output: {title, summary},
   }, signal).catch(error => { if (!row.conclusion || error.status !== 404) throw error; }) : Promise.resolve();
-  if (!row.comment_id || !env) { await checkWrite; return; }
+  if (!conversationRequest(row) || !env) { await checkWrite; return; }
   const prefix = `/repos/${repository.full_name}/issues`;
   if (row.status_comment_id) {
     const writes = await Promise.allSettled([checkWrite, (async () => {
@@ -304,8 +320,9 @@ async function publishCompletion(token, repository, row, env, signal) {
 
 async function requestRepair(token, repository, payload, env, delivery, signal) {
   const isComment = repairComment(payload);
+  const isDescription = descriptionRequest(payload), conversation = isComment || isDescription;
   let clicked = payload.check_run, clickedMatch = selectionCheck(clicked, env.APP_ID);
-  if (!env.DB || (!isComment && !clickedMatch)) return;
+  if (!env.DB || (!conversation && !clickedMatch)) return;
   const installation = payload.installation.id;
   // A retained delivery is never another dispatch attempt, even after a crash.
   const replay = await env.DB.prepare('SELECT * FROM requests WHERE installation_id = ? AND repository_id = ? AND (id = ? OR comment_id = ?)')
@@ -317,15 +334,21 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   // These reads are independent. Both must finish before any reply or admission.
   const [permission, candidate] = await Promise.all([
     api(token, `${prefix}/collaborators/${actor}/permission`, 'GET', undefined, signal),
-    isComment ? commentSelection(token, repository, payload, env, signal) : undefined,
+    isComment ? commentSelection(token, repository, payload, env, signal) :
+      isDescription ? descriptionSelection(token, repository, payload, env, signal) : undefined,
   ]);
   if (!['write', 'maintain', 'admin'].includes(permission?.permission) || permission.user?.login?.toLowerCase() !== actor.toLowerCase()) return;
   const submitted = candidate;
-  if (isComment) {
+  if (conversation) {
     if (!submitted) return;
+    if (isComment) {
+      // Receipt only. A cosmetic reaction must not exhaust the repair deadline.
+      await api(token, `${prefix}/issues/comments/${payload.comment.id}/reactions`, 'POST', {content: '+1'},
+        AbortSignal.any([signal, AbortSignal.timeout(1_000)])).catch(() => {});
+    }
     if (submitted.active) return;
     if (submitted.rejection) {
-      await api(token, `${prefix}/issues/${payload.issue.number}/comments`, 'POST', {body: submitted.rejection}, signal);
+      await api(token, `${prefix}/issues/${isComment ? payload.issue.number : payload.number}/comments`, 'POST', {body: submitted.rejection}, signal);
       return;
     }
     clicked = submitted.check;
@@ -347,12 +370,13 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   const fingerprint = await selectionFingerprint(pr, items);
   const current = await api(token, `${prefix}/check-runs/${check.id}`, 'GET', undefined, signal);
   if (!items.length || (submitted && fingerprint !== submitted.fingerprint) ||
+      (isDescription && (pr.body !== payload.pull_request.body || pr.updated_at !== payload.pull_request.updated_at)) ||
       !sameCheckIdentity(current, clicked) || !ownedCheck(current, env.APP_ID, pr.head.sha) ||
       current.status !== 'completed' || current.conclusion !== 'neutral' ||
       current.external_id !== `node-repair:${number}:${fingerprint}`) {
     await refreshSelectionCheck(token, repository, number, env.APP_ID, signal, env, installation);
-    if (isComment) await api(token, `${prefix}/issues/${number}/comments`, 'POST', {
-      body: 'No run started: the report or PR revision changed. Review the refreshed selections and post `/repair selected` again.',
+    if (conversation) await api(token, `${prefix}/issues/${number}/comments`, 'POST', {
+      body: 'No run started: the report or PR revision changed. Review the refreshed selections and submit a new request.',
     }, signal);
     return;
   }
@@ -360,10 +384,11 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
   const row = {id: delivery, installation_id: installation, repository_id: repository.id, repository: repository.full_name,
     pr: number, head: pr.head.sha, base: pr.base.sha, dispatched_ref: repository.default_branch, fingerprint,
     check_id: current.id, actor_login: actor, created_at: Date.now(), state: 'reserved',
-    comment_id: isComment ? payload.comment.id : null, selections_json: JSON.stringify(items)};
+    comment_id: isComment ? payload.comment.id : null, selections_json: JSON.stringify(items),
+    trigger_key: submitted?.trigger_key ?? null};
   const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO requests
-    (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state, comment_id, selections_json)
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state, comment_id, selections_json, trigger_key)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     WHERE NOT EXISTS (SELECT 1 FROM requests WHERE installation_id = ? AND repository_id = ? AND check_id = ?)`)
     .bind(...Object.values(row), installation, repository.id, current.id).run();
   if (inserted.meta?.changes !== 1) {
@@ -371,7 +396,7 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
     return;
   }
   // Failure here retains reserved state, so redelivery cannot repeat the POST.
-  await showRequest(token, repository, row, signal, env, items, isComment);
+  await showRequest(token, repository, row, signal, env, items, conversation);
   signal.throwIfAborted();
   try {
     const run = await api(token, `${prefix}/actions/workflows/${WORKFLOW}/dispatches`, 'POST', {
@@ -390,6 +415,34 @@ async function requestRepair(token, repository, payload, env, delivery, signal) 
       .bind(delivery, installation, repository.id).run();
     throw new Error('Dispatch requires inspection');
   }
+}
+
+async function descriptionSelection(token, repository, payload, env, signal) {
+  const number = payload.number, observed = payload.pull_request;
+  if (!positiveID(number) || !managedPR(observed, repository, number)) return;
+  const pr = await api(token, `/repos/${repository.full_name}/pulls/${number}`, 'GET', undefined, signal);
+  if (!managedPR(pr, repository, number) || pr.head.sha !== observed.head.sha || pr.base.sha !== observed.base.sha ||
+      pr.body !== observed.body || pr.updated_at !== observed.updated_at || !Number.isFinite(Date.parse(observed.updated_at))) return;
+  const bytes = encoder.encode(JSON.stringify([number, observed.head.sha, observed.base.sha,
+    observed.updated_at, observed.body, payload.sender.id]));
+  const trigger_key = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+  const retained = await env.DB.prepare('SELECT id FROM requests WHERE installation_id = ? AND repository_id = ? AND trigger_key = ?')
+    .bind(payload.installation.id, repository.id, trigger_key).first();
+  if (retained || await activeRequest(env, payload.installation.id, repository.id, number)) return;
+  const rejection = {rejection: 'No run started: select at least one eligible upgrade from a current report, then untick and re-tick Run selected fixes.'};
+  let items;
+  try {
+    items = selections(pr.body);
+    const markers = pr.body.split(/\r?\n/).filter(line => line.includes('<!-- node-repair:revision:'));
+    if (!items.length || markers.length !== 1 || markers[0] !== `<!-- node-repair:revision:v1 ${pr.head.sha} ${pr.base.sha} -->`) return rejection;
+    workflowInputs(pr, items);
+  } catch { return rejection; }
+  const fingerprint = await selectionFingerprint(pr, items);
+  const check = await findSelectionCheck(token, repository, pr, env.APP_ID, `node-repair:${number}:${fingerprint}`, signal, env, payload.installation.id);
+  return check ? {check, fingerprint, trigger_key} : {
+    rejection: 'No run started: the selection control is not ready. Wait for the Dependency repair Check, then untick and re-tick Run selected fixes.',
+  };
 }
 
 async function commentSelection(token, repository, payload, env, signal) {
@@ -486,8 +539,8 @@ async function completeRequest(payload, env, signal) {
   const prefix = `/repos/${row.repository}`;
   const [token, app] = await Promise.all([
     installationToken(env, installation, repository.id, signal, {contents: 'read',
-      pull_requests: row.comment_id ? 'write' : 'read', checks: 'write', actions: 'read',
-      ...(row.comment_id ? {issues: 'read'} : {})}),
+      pull_requests: conversationRequest(row) ? 'write' : 'read', checks: 'write', actions: 'read',
+      ...(conversationRequest(row) ? {issues: 'read'} : {})}),
     appJWT(env).then(jwt => api(jwt, '/app', 'GET', undefined, signal)),
   ]);
   const [run, currentRepository] = await Promise.all([
@@ -546,7 +599,8 @@ export default {
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid payload');
       const event = request.headers.get('x-github-event');
       if (event === 'pull_request' && PR_ACTIONS.includes(payload.action)) {
-        await readRepository(payload, env, controller.signal);
+        await readRepository(payload, env, controller.signal,
+          descriptionRequest(payload) ? request.headers.get('x-github-delivery') : undefined);
       } else if (event === 'check_run' && payload.action === 'requested_action' &&
           payload.requested_action?.identifier === ACTION.identifier && String(payload.check_run?.app?.id) === String(env.APP_ID)) {
         await readRepository(payload, env, controller.signal, request.headers.get('x-github-delivery'));

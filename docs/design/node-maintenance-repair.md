@@ -76,8 +76,9 @@ operator's secret storage. They are never repository files or evidence fields.
 
 Use one public App and one shared Worker/D1 service. Install it on selected
 repositories in an organization or personal account. App permissions are
-Contents read, Pull requests write, Issues read, Checks write and Actions write;
-Metadata read is implicit. Issues read admits canonical source-comment reads;
+Contents read, Pull requests write, Issues write, Checks write and Actions write;
+Metadata read is implicit. Issues write admits canonical source-comment reads and
+receipt reactions under the approved 2026-11-03 extension;
 Pull requests write updates App-owned replies on the PR. GitHub scopes Actions write to the selected repository, so the
 fixed workflow restriction below is enforced by this service. There is no
 contents-write App permission. Narrow each installation token to the event's
@@ -166,7 +167,7 @@ The PR contains exactly one pair of these markers, in this order:
 ```
 
 Every line between the markers must match that exact grammar. Accept `x` or
-`X` as checked; an empty selection hides the action. Reject duplicate packages,
+`X` as checked; an empty selection hides the native Check action. Reject duplicate packages,
 extra marker pairs, malformed lines and non-stable versions. Select 1–20
 distinct packages. Each item is exactly `{name, from, to}`, with string values;
 `to` is a larger patch in the same major and minor. Names use lowercase npm
@@ -176,9 +177,10 @@ JavaScript and Python share fixtures for valid and invalid inputs.
 The idle Check external ID is `node-repair:<pr_number>:<fingerprint>`.
 The fingerprint is SHA-256 of UTF-8 compact JSON
 `[pr_number, head_sha, base_sha, sorted_items]`. Construct each item in the
-key order `name`, `from`, `to` so the two runtimes hash identical bytes. Neither
-checkbox editing nor a PR webhook authorizes dispatch. A stale request starts
-no run and asks the user to review the current report and submit again.
+key order `name`, `from`, `to` so the two runtimes hash identical bytes. Package
+selection edits alone do not submit. Only the separate run-control transition
+described in C6 is a description command, subject to the same admission guards.
+A stale request starts no run and asks the user to submit the current selection again.
 
 The report includes one hidden revision marker outside the selection block
 (replace the placeholders with the exact 40-character lowercase revisions):
@@ -423,11 +425,13 @@ completed validation may say tests passed. Failed attempts link the run and
 leave selections available for a deliberate later attempt after recovery.
 
 The shared renderer emits the C1 revision marker and selections in the PR
-description. Instructions use the normal GitHub **Comment** button with
-`/repair selected`; no checkbox acts as a submit control. The App-owned reply
-stays “Request accepted” with a workflow-page link until verified completion
-replaces it with the result and exact run link. It does not show live progress.
-These messages do not change
+description, followed by a separate **Run selected fixes** checkbox. Its exact
+unchecked-to-checked edit submits the batch. A new `/repair selected` comment
+and the native Check action remain supported alternatives. The App-owned reply
+shows the accepted count and active-request indicator until verified completion
+supplies the result and exact run link. This is request activity, not live job
+progress. The App does not rewrite selections, reset the trigger or update an
+inline count while users edit the description. These messages do not change
 “needs review” into “upgraded” without a validated published repair and updated
 audit evidence.
 
@@ -813,3 +817,24 @@ its title-based completion correlation with the known-run-ID contract and
 validate its per-delivery deduplication against this design's concurrent-click
 requirement. The archived patch and stop record remain under
 `.awd/reports/node-security-previews/`. Do not resume its old review cycle.
+# Approved description controls and summary layout
+
+The 2026-11-03 UI extension keeps the package-advisory summary and authorization
+controls above detailed evidence in both publishers. The summary separates
+confirmed package fixes from platform-release CVEs. A table explains each
+explicit-pin upgrade; native checkboxes remain outside table cells.
+
+A separate Run selected fixes checkbox submits one exact selected batch. Only
+an authenticated maintainer's exact unchecked-to-checked edit is a command.
+Canonical body, edit time, head/base, revision marker and Check identity must
+still match. Retain a scoped unique fingerprint of the signed edit so redelivery
+cannot become a new attempt after its original request completes.
+
+Count and active-request status live in an App-owned reply, not description
+rewrites. The trigger stays checked until a user clears it or the reviewed
+publisher replaces the report. Existing active-request and Check-use locks
+remain authoritative. Support the existing comment and native Check entry points
+for installed callers; comment receipts use a bounded best-effort thumbs-up.
+Issues write is approved for that reaction, but live permission changes,
+database migration, deployment and acceptance remain separate delivery actions.
+

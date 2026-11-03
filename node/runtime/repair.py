@@ -1237,13 +1237,25 @@ def publication_body(previous, report, expected, commit, envelope):
     )
     marker = "" if choices else CHOICES["revision_marker"](commit, expected["base"])
     # Keep checkbox indexes independent of HTML lists in the retained report.
-    body = (
-        (choices.lstrip("\n") + "\n" if choices else "")
-        + platform
-        + report.rstrip()
-        + "\n\n"
+    attempts = history_attempts(history)
+    initial = {
+        identity
+        for identity, _, _ in ENGINE["audit_entries"](attempts[0]["before"], "pnpm")
+    }
+    remaining = {
+        identity
+        for identity, _, _ in ENGINE["audit_entries"](attempts[-1]["after"], "pnpm")
+    }
+    confirmed = set().union(*(set(attempt["fixed_ids"]) for attempt in attempts))
+    summary = (
+        f"**Fixes {len((initial & confirmed) - remaining)} of {len(initial)} original package advisories.** "
+        f"{len(remaining)} advisories remain. Platform security updates are reported separately.\n\n"
+    )
+    body = CHOICES["layout"](
+        summary + platform + report.rstrip() + "\n\n"
         f"[Validated repair run](https://github.com/{expected['repository']}/actions/runs/{run})"
-        f" · Repair commit `{commit}`\n\n" + marker + "\n"
+        f" · Repair commit `{commit}`\n\n" + marker + "\n",
+        choices,
     )
 
     if len(body) > 65536:

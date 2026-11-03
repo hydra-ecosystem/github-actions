@@ -7,7 +7,8 @@ The receiver verifies signed webhook deliveries and reads canonical repository
 metadata with a token restricted to one repository. For managed PRs it also
 reads the canonical PR and displays the selected package versions in the App's
 **Dependency repair** Check. A maintainer can select fixes in the PR description
-and post `/repair selected` in the Conversation tab. The App replies there with
+and tick **Run selected fixes**, or post `/repair selected` in the Conversation
+tab. The App replies there with
 the request status and exact Actions link. The native Check action remains an
 optional secondary entry point. D1 retains the active request and returned Actions run
 identity. Completed runs update that same reply and release their own request
@@ -34,10 +35,11 @@ It does not establish a new installation permission grant or Hydra acceptance.
 
 Before announcing a later installation revision:
 
-1. Review and test the source, then deploy the exact reviewed Worker through
-   the service owner's normal process. This update replaces obsolete pilot
-   text; it changes no admission, permissions, dispatch or D1 logic. A green
-   caller PR does not authorize service deployment or a database migration.
+1. Review and test the source. Before deploying this description-trigger
+   revision, obtain Issues-write installation consent and apply migration 0002
+   after 0001 through the service owner's authorized process. Deploy the exact
+   reviewed Worker before releasing workflow reports that offer the new trigger.
+   A green caller PR alone authorizes none of these live actions.
 2. Follow the user guide in a fresh isolated repository. Install the App and
    both callers, run an audit, and submit one eligible `/repair selected`
    request. Verify actual preparation, separate validation, bounded publication,
@@ -69,9 +71,12 @@ Malformed or missing selections produce a Check that asks for attention.
 Editing selections or changing the PR head refreshes the Check from canonical
 GitHub data. The Check displays the exact selected versions, bound to the PR
 number, head and base. With D1 configured, a nonempty valid batch shows
-**Run selected fixes**. Checkbox edits do not start a run. PR-event tokens grant
-only Contents read, Pull requests read and Checks write. Action-event tokens
-also grant Actions write, restricted to the same repository. The service never
+**Run selected fixes** as a native Check action. Package-selection edits only
+refresh that Check; the separate description run toggle submits a request.
+Refresh tokens grant Contents read, Pull requests read and Checks write.
+Submission tokens also grant Actions write; conversation submissions need Pull
+requests write and Issues read, or Issues write for comment receipts. All tokens
+are restricted to the same repository. The service never
 updates another App's Check.
 
 ## Request the selected batch from the PR conversation
@@ -83,11 +88,20 @@ selection block (replace these illustrative hashes with the exact PR revisions):
 <!-- node-repair:revision:v1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->
 ```
 
-Tick the allowed fixes in the PR description, then post a new comment containing
-only `/repair selected`. Use GitHub's normal **Comment** button to submit it.
-Neither ticking a checkbox nor editing an existing comment starts an attempt.
-There is no need to visit Checks. Request status appears in an App-owned reply;
-supporting Check details remain available separately.
+Tick the allowed package upgrades in the PR description, then tick the separate
+**Run selected fixes** checkbox. Package selections alone start no work. The App
+replies with the accepted batch count, an active-request indicator and the final
+verified workflow result. Nothing merges automatically.
+
+The App does not rewrite the description to reset the run checkbox or update a
+counter: GitHub has no conditional body update that protects concurrent checkbox
+edits. After completion, untick and re-tick the run checkbox to submit another
+request if eligible upgrades remain. An active request prevents another dispatch.
+
+Alternatively, post a new comment containing only `/repair selected` using
+GitHub's **Comment** button. A 👍 on that comment means the App received it;
+the reply determines whether it was accepted. The reaction is best effort and
+cannot block a valid repair. Existing native Check actions remain supported.
 
 The receiver accepts only a newly created human comment on a managed PR. It
 re-fetches the comment and verifies its author, exact body, PR association and
@@ -97,6 +111,12 @@ binding, and the current canonical PR/Check fingerprint. A stale report or
 selection starts no run and produces a reply asking for a fresh command.
 Unrelated comments and edits are ignored. Missing or edited/deleted commands
 and unmanaged PRs do not authorize an attempt.
+
+The description trigger accepts only the exact unchecked-to-checked run-control
+edit by a current maintainer. It verifies the signed PR head/base, exact body,
+edit timestamp, revision marker and canonical selection Check. A retained edit
+fingerprint deduplicates the same signed edit even with a new delivery ID and
+after completion. No App status path edits the PR description or audit evidence.
 
 The shared renderer includes the revision line in bound reports. Existing
 reports without it cannot authorize comment dispatch; rerun the security audit.
@@ -149,13 +169,17 @@ publisher updates that evidence after actual validation and publication.
 These steps are for service operators whose installation predates comment
 delivery. They are not extra setup for repository users:
 
-1. Add **Issues: read** and change **Pull requests** to **read/write** on the App.
+1. Set **Issues** and **Pull requests** to **read/write** on the App.
    Subscribe to **Issue comment** events. Existing installations must accept the
    new permissions. Keep Contents read, Checks write and Actions write.
 2. For an existing slice-3 database, apply
    `repair-app/migrations/0001_comment_requests.sql` exactly once. It preserves
    all existing request rows and active locks. New databases use `schema.sql`
    instead; do not apply both initial schema and migration to one database.
+   Before deploying description-trigger support, apply
+   `repair-app/migrations/0002_description_requests.sql` once after migration
+   0001. It adds the nullable edit fingerprint and unique index without changing
+   existing request rows or locks. Every request path needs the updated schema.
 3. Deploy the reviewed Worker. Put the correct revision marker and selections
    in the pilot description, then verify a real command, exact inputs, reply
    link, replay and stale-command rejection in the isolated repository.
