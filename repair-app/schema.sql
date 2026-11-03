@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS requests (
   conclusion TEXT,
   comment_id INTEGER CHECK (comment_id > 0),
   status_comment_id INTEGER CHECK (status_comment_id > 0),
-  selections_json TEXT
+  selections_json TEXT,
+  trigger_key TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_request
   ON requests (installation_id, repository_id, pr)
@@ -27,3 +28,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_request
 CREATE UNIQUE INDEX IF NOT EXISTS one_comment_request
   ON requests (installation_id, repository_id, comment_id)
   WHERE comment_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS one_description_request
+  ON requests (installation_id, repository_id, trigger_key)
+  WHERE trigger_key IS NOT NULL;
