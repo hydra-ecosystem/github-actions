@@ -115,6 +115,7 @@ const admissionService = new Miniflare(convertV4MiniflareOptions({
     if (path === '/repos/fixture/repo') return Response.json({id: 7, full_name: 'fixture/repo', default_branch: 'main'});
     if (path === '/repos/fixture/repo/pulls/12') return Response.json(nativePR);
     if (path === '/repos/fixture/repo/collaborators/maintainer/permission') return Response.json({permission: 'maintain', user: {login: 'maintainer'}});
+    if (path === `/repos/fixture/repo/issues/comments/${commandComment.id}/reactions`) return Response.json({id: 700, content: '+1'});
     if (path === `/repos/fixture/repo/issues/comments/${commandComment.id}`) return Response.json(commandComment);
     if (path === '/repos/fixture/repo/issues/12/comments' && request.method === 'POST') {
       statusComment = {id: 600 + statusComments.size, ...body, performed_via_github_app: {id: 42}, issue_url: commandComment.issue_url};
@@ -278,6 +279,27 @@ try {
   assert.equal(nativeCalls.filter(c => c.path.endsWith('/12/comments') && c.method === 'POST').length, 3);
   assert.match(statusComments.get(600).body, /Workflow succeeded/);
   console.log('Native completion passed: actual D1 retains the lock after reply failure; canonical redelivery completes it; isolated success/failure/cancellation update the same replies and admit fresh commands without SQL recovery. GitHub responses are intercepted local fixtures, not live evidence.');
+  nativePR.updated_at = '2026-11-03T05:00:00Z';
+  const beforeDescription = nativePR.body + '\n<!-- node-repair:run:v1 -->\n- [ ] Run selected fixes.\n<!-- /node-repair:run -->';
+  nativePR.body = beforeDescription.replace('- [ ] Run selected fixes.', '- [x] Run selected fixes.');
+  const descriptionEvent = {action: 'edited', number: 12, installation: {id: 3},
+    repository: {id: 7, full_name: 'fixture/repo'}, pull_request: structuredClone(nativePR),
+    changes: {body: {from: beforeDescription}}, sender: commandComment.user};
+  const submitDescription = id => {
+    const input = signed(descriptionEvent, 'pull_request');input.headers['x-github-delivery'] = id;
+    return admissionService.dispatchFetch('https://worker.test/webhook', input);
+  };
+  nativeRunID = 903;
+  const descriptionID = randomUUID();
+  assert.deepEqual((await Promise.all([submitDescription(descriptionID), submitDescription(randomUUID())])).map(r => r.status), [200, 200]);
+  const descriptionRow = await db.prepare('SELECT * FROM requests WHERE id = ?').bind(descriptionID).first();
+  assert.match(descriptionRow.trigger_key, /^[a-f0-9]{64}$/);assert.equal(descriptionRow.comment_id, null);
+  assert.match(statusComment.body, /1 selected fix\./);assert.match(statusComment.body, /⏳ Request active/);
+  assert.equal((await complete(903)).status, 200);assert.match(statusComment.body, /Workflow succeeded/);
+  assert.equal((await submitDescription(randomUUID())).status, 200);
+  assert.equal(nativeCalls.filter(c => c.path.endsWith('/dispatches')).length, 6);
+  assert.ok(nativeCalls.every(c => c.path !== '/repos/fixture/repo/pulls/12' || c.method === 'GET'));
+  console.log('Native description trigger passed: real D1 deduplicates concurrent and post-completion replay; same-App reply records count, activity and verified completion without a PR-body write.');
 } finally {
   await admissionService.dispose();
 }

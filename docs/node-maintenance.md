@@ -332,11 +332,13 @@ or uninstalling the App disables requests without removing audit-only maintenanc
 
 Selection and submission stay in the
 PR's **Conversation** tab. Tick the fixes you allow in the PR description, then
-post a new comment containing only `/repair selected` using **Comment**. The App
+tick **Run selected fixes** in the PR description. Alternatively, post a new
+comment containing only `/repair selected` using **Comment**. The App
 replies **Request accepted** with a link to the repair workflow page. It keeps
 that message until verified completion supplies the final result and exact run
-link. It does not show live progress. Checkbox edits alone
-start no work. The Checks tab is optional for this flow.
+link. It shows request activity, not live job progress. Package-selection edits
+alone start no work; the separate run checkbox submits the request. The Checks
+tab is optional for this flow.
 
 This requires an installed repair App, a current report that supports comment
 requests, and the fixed repair workflow. The implemented workflow prepares exact
@@ -344,7 +346,7 @@ selected pins, validates them on a separate runner, and publishes the validated
 dependency files and cumulative report to the same PR. A failed validation
 publishes no repair. A push can succeed before the report update fails; inspect
 the recorded commit before requesting another attempt. Once completion is safely
-recorded, a new command can request another attempt. A failed status update
+recorded, a new request can start another attempt. A failed status update
 requires operator recovery before the next attempt. The supported caller invokes
 real preparation, separate validation and publication. A green workflow result
 is not approval to merge; inspect the report and native diff. Nothing merges

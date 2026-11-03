@@ -3894,6 +3894,18 @@ def prepare(
             review_count=package_metrics.get("review_count", 0),
             passed=check_status == "Passed.",
             routine_only=routine_only,
+        ).replace(
+            "## Platform security\n",
+            (
+                f"**Fixes {fixed_count} of {len(initial_ids)} original package advisories.** "
+                f"{remaining_count} advisories remain. Platform security updates are reported separately.\n\n"
+                if initial_ids is not None
+                and remaining_ids is not None
+                and package_manager == "pnpm"
+                else ""
+            )
+            + "## Platform security\n",
+            1,
         )
         + (
             "## Security audit incomplete\n\n"

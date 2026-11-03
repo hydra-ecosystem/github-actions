@@ -2272,9 +2272,8 @@ def test_publisher_commits_only_sealed_files_without_project_execution(
     assert not REPAIR["git"]("status", "--porcelain").strip()
     assert len(state["updates"]) == 1
     body = state["updates"][0]
-    assert body.startswith(
-        "## Platform security\n\nNode upgrade evidence stays unchanged.\n\n"
-    )
+    assert body.startswith("**Fixes 1 of 1 original package advisories.**")
+    assert "## Platform security\n\nNode upgrade evidence stays unchanged.\n\n" in body
     assert "✅ Upgraded." in body and "Historical evidence (attempt 1)" in body
     assert "Project validation has not run" not in body
     assert "actions/runs/123" in body and commit in body
@@ -2350,19 +2349,23 @@ def test_publication_body_preserves_platform_bytes_and_frozen_cumulative_rows(
         previous, report, repair_request(), "c" * 40, candidate
     )
     assert platform in body
+    assert "Fixes 0 of 1 original package advisories" in body
     if with_choices:
-        assert body.startswith("## Choose fixes to try\n")
+        assert body.startswith("**Fixes ")
+        assert body.index("## Upgrades requiring your authorization") < body.index(
+            "<ul>"
+        )
         assert body.index(CHOICES["START"]) < body.index("<ul>")
         assert CHOICES["parse"](body) == []
     else:
-        assert body.startswith(platform)
+        assert body.startswith("**Fixes ")
     assert "FORGED OLD PACKAGE EVIDENCE" not in body
     assert "Historical evidence (attempt 1)" in body
     assert "Not observed in the current audit" in body
     assert "across 2 attempts" in body and "2 advisory/package pairs" in body
     assert "GHSA-fresh-one1-test" in body
     assert "node-audit-history:v1:" not in body
-    assert body.count("| Package |") == 1
+    assert body.count("| Package |") == (2 if with_choices else 1)
     assert "Selected repairs passed frozen installation" in body
     assert CHOICES["revision_marker"]("c" * 40, repair_request()["base"]) in body
 
@@ -2582,7 +2585,8 @@ def test_publisher_rejects_unrecognized_platform_boundary_before_native_push(
     body = state["body"]
     if problem == "demoted-headings":
         body = body.replace("## Package security\n", "### Package security\n").replace(
-            "## Choose fixes to try\n", "### Choose fixes to try\n"
+            "## Upgrades requiring your authorization\n",
+            "### Upgrades requiring your authorization\n",
         )
     elif problem == "missing-package-boundary":
         body = body.replace("## Package security\n", "")
@@ -2593,7 +2597,10 @@ def test_publisher_rejects_unrecognized_platform_boundary_before_native_push(
         ).replace("- [ ]", "- [x]")
         body = (
             platform
-            + choices.replace("## Choose fixes to try", "### Choose fixes to try")
+            + choices.replace(
+                "## Upgrades requiring your authorization",
+                "### Upgrades requiring your authorization",
+            )
             + "\n## Package security\nOld packages\n"
         )
     state["body"] = body
