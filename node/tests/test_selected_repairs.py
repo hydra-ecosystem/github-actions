@@ -285,6 +285,24 @@ def test_render_is_exact_consent_and_needs_real_revision_context():
             CHOICES["render"]([ITEM], head=bad, base=REVISION["base"])
 
 
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_repair_controls_offer_each_upgrade_once_or_no_action(count):
+    items = [ITEM, {"name": "minimist", "from": "1.2.5", "to": "1.2.8"}][:count]
+    body = CHOICES["render"](items, **REVISION)
+    if not items:
+        assert body == ""
+        return
+    assert body.count("- [ ] Allow ") == count
+    assert body.count("- [ ] Run selected fixes.") == 1
+    assert "| Package |" not in body
+    for item in items:
+        assert body.count(f"`{item['name']}` `{item['from']} → {item['to']}`") == 1
+    assert CHOICES["parse"](body) == []
+    assert CHOICES["parse"](body.replace("- [ ] Allow ", "- [x] Allow ")) == sorted(
+        items, key=lambda item: item["name"]
+    )
+
+
 def test_fingerprint_binds_all_consent_fields_and_canonical_key_order():
     fingerprint = CHOICES["fingerprint"](12, **REVISION, items=[ITEM])
     assert fingerprint == CHOICES["fingerprint"](
@@ -2371,7 +2389,7 @@ def test_publication_body_preserves_platform_bytes_and_frozen_cumulative_rows(
     assert "across 2 attempts" in body and "2 advisory/package pairs" in body
     assert "GHSA-fresh-one1-test" in body
     assert "node-audit-history:v1:" not in body
-    assert body.count("| Package |") == (2 if with_choices else 1)
+    assert body.count("| Package |") == 1
     assert "Selected repairs passed frozen installation" in body
     assert CHOICES["revision_marker"]("c" * 40, repair_request()["base"]) in body
 
