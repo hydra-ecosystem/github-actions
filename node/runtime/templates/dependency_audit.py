@@ -910,7 +910,15 @@ def package_paths(lock: dict, name: str, package_manager: str) -> dict[str, str]
                 or package.get("name") == name
             )
         }
-    paths = {}
+    return {
+        path: version
+        for package, path, version in pnpm_locations(lock)
+        if package == name
+    }
+
+
+def pnpm_locations(lock):
+    """Walk native locations once, retaining aliases and exact peer contexts."""
     for group in ("packages", "snapshots", "importers"):
         entries = lock.get(group, {})
         if not isinstance(entries, dict):
@@ -919,8 +927,12 @@ def package_paths(lock: dict, name: str, package_manager: str) -> dict[str, str]
             if not isinstance(node, str):
                 continue
             plain = node.split("(", 1)[0]
-            if group != "importers" and plain.rsplit("@", 1)[0] == name:
-                paths[f"{group}/{node}"] = plain.rsplit("@", 1)[-1]
+            if group != "importers":
+                yield (
+                    plain.rsplit("@", 1)[0],
+                    f"{group}/{node}",
+                    plain.rsplit("@", 1)[-1],
+                )
             if group == "packages" or not isinstance(entry, dict):
                 continue
             for section in ("dependencies", "devDependencies", "optionalDependencies"):
@@ -933,12 +945,18 @@ def package_paths(lock: dict, name: str, package_manager: str) -> dict[str, str]
                         if isinstance(reference, dict)
                         else reference
                     )
-                    if isinstance(version, str) and (
-                        dependency == name or version.startswith(f"{name}@")
-                    ):
-                        paths[f"{group}/{node}/{section}/{dependency}"] = (
-                            version.removeprefix(f"{name}@")
-                        )
+                    if isinstance(version, str):
+                        path = f"{group}/{node}/{section}/{dependency}"
+                        yield dependency, path, version.removeprefix(f"{dependency}@")
+                        alias = version.split("(", 1)[0].rsplit("@", 1)
+                        if len(alias) == 2 and alias[0] != dependency:
+                            yield alias[0], path, version.removeprefix(f"{alias[0]}@")
+
+
+def pnpm_path_index(lock):
+    paths = {}
+    for name, path, version in pnpm_locations(lock):
+        paths.setdefault(name, {})[path] = version
     return paths
 
 
@@ -1052,6 +1070,7 @@ def changed_pnpm_targets(before: dict[str, bytes], after: dict[str, bytes]) -> s
     """Include patches reused by changed paths as well as newly locked versions."""
     old_lock = yaml.safe_load(before["pnpm-lock.yaml"])
     new_lock = yaml.safe_load(after["pnpm-lock.yaml"])
+    old_index, new_index = pnpm_path_index(old_lock), pnpm_path_index(new_lock)
     targets = {key.split("(", 1)[0] for key in new_lock["packages"]} - {
         key.split("(", 1)[0] for key in old_lock["packages"]
     }
@@ -1072,8 +1091,7 @@ def changed_pnpm_targets(before: dict[str, bytes], after: dict[str, bytes]) -> s
 
     names = {key.split("(", 1)[0].rsplit("@", 1)[0] for key in new_lock["packages"]}
     for name in names:
-        old_paths = package_paths(old_lock, name, "pnpm")
-        new_paths = package_paths(new_lock, name, "pnpm")
+        old_paths, new_paths = old_index.get(name, {}), new_index.get(name, {})
         old_edges = edges(old_paths)
         for path, references in edges(new_paths).items():
             for version in references - old_edges.get(path, set()):
@@ -1102,6 +1120,15 @@ def describe_pnpm_fixes(
         return
     lock = yaml.safe_load(files["pnpm-lock.yaml"])
     overrides = yaml.safe_load(files["pnpm-workspace.yaml"]).get("overrides", {})
+    parents = {}
+    for parent, snapshot in lock.get("snapshots", {}).items():
+        edges = {
+            **snapshot.get("dependencies", {}),
+            **snapshot.get("optionalDependencies", {}),
+        }
+        for name, reference in edges.items():
+            if isinstance(reference, str):
+                parents.setdefault(name, []).append((parent, reference))
 
     def query(package: str, *fields: str) -> object:
         key = (package, fields)
@@ -1194,16 +1221,8 @@ def describe_pnpm_fixes(
             checked_parents = []
             unknown = False
             compatible_patches = None
-            for parent, snapshot in lock.get("snapshots", {}).items():
-                edges = {
-                    **snapshot.get("dependencies", {}),
-                    **snapshot.get("optionalDependencies", {}),
-                }
-                reference = edges.get(name)
-                if (
-                    not isinstance(reference, str)
-                    or f"{name}@{reference.split('(', 1)[0]}" not in detail["nodes"]
-                ):
+            for parent, reference in parents.get(name, []):
+                if f"{name}@{reference.split('(', 1)[0]}" not in detail["nodes"]:
                     continue
                 parent = parent.split("(", 1)[0]
                 metadata = query(parent, "dependencies", "optionalDependencies")
@@ -1483,11 +1502,15 @@ def confirmed_fixes(before, after, source, before_snapshot, after_snapshot):
         else snapshot[3]
         for snapshot in (before_snapshot, after_snapshot)
     ]
+    indexes = [pnpm_path_index(lock) for lock in locks] if source == "pnpm" else []
     # Registry withdrawals and changing audit responses are not dependency fixes.
     confirmed = set()
     for name, vulnerability in before.get("vulnerabilities", {}).items():
-        old_paths = package_paths(locks[0], name, source)
-        new_paths = package_paths(locks[1], name, source)
+        old_paths, new_paths = (
+            [index.get(name, {}) for index in indexes]
+            if indexes
+            else [package_paths(lock, name, source) for lock in locks]
+        )
         if old_paths == new_paths:
             continue
         new_versions = set(new_paths.values())
