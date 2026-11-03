@@ -4080,11 +4080,7 @@ def history_record(report):
         raise ValueError("Audit report exceeds its bound")
     text = report.decode("utf-8")
     matches = HISTORY_PATTERN.findall(text)
-    if (
-        len(matches) != 1
-        or text.count("node-audit-history:") != 1
-        or len(matches[0]) > 524288
-    ):
+    if len(matches) != 1 or text.count("node-audit-history:") != 1:
         raise ValueError("Missing or ambiguous sealed audit history")
     raw = base64.b64decode(matches[0], validate=True)
     record = json.loads(raw, object_pairs_hook=unique)
