@@ -313,7 +313,8 @@ function checkMock({changePR, list = {total_count: 0, check_runs: []}, failPath}
         const response = {...check}; delete response.actions; return response;
       })});
     }
-    if (path === '/repos/fixture/repo/check-runs' || path === '/repos/fixture/repo/check-runs/77' ||
+    if (path === '/repos/fixture/repo/check-runs' && options.method === 'POST') return json({id: 77, app: {id: 42}, ...body});
+    if (path === '/repos/fixture/repo/check-runs/77' ||
         path === '/repos/fixture/repo/check-runs/78') return json({id: 77});
     throw new Error(`Unexpected API path: ${path}`);
   });
@@ -1605,3 +1606,149 @@ for (const failure of ['incomplete page', 'changed total', 'failed page']) {
     assert.equal(checkWrites(calls).length, 0);
   });
 }
+
+test('current control lookup bypasses historical Checks on repeated edits and command admission', async t => {
+  let initialized = false;
+  const f = await commentMock(t, {onCall(call) {
+    if (initialized && call.path.includes('/commits/')) throw Error('History must not be read again');
+  }});
+  const refresh = () => worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment);
+  assert.equal((await refresh()).status, 200);
+  initialized = true;
+  for (let i = 0; i < 25; i++) assert.equal((await refresh()).status, 200);
+  assert.equal(f.calls.filter(c => c.path.includes('/commits/')).length, 1);
+  assert.equal(f.db.sql.prepare('SELECT COUNT(*) AS n FROM selection_controls').get().n, 1);
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.dispatches().length, 1);
+});
+
+for (const changed of ['fingerprint', 'head', 'PR', 'missing Check', 'foreign Check', 'admitted Check']) {
+  test(`a ${changed} replaces the control without scanning old Checks or dispatching`, async t => {
+    let initialized = false;
+    const f = await actionMock(t, {onCall(call, {check}) {
+      if (initialized && call.path.includes('/commits/')) throw Error('Unexpected history scan');
+      if (initialized && call.path.endsWith('/check-runs/77')) {
+        if (changed === 'missing Check') return new Response('', {status: 404});
+        if (changed === 'foreign Check') return json({...check, app: {id: 99}});
+      }
+    }});
+    const refresh = () => worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment);
+    assert.equal((await refresh()).status, 200);
+    initialized = true;
+    if (changed === 'fingerprint') f.pr.body = f.pr.body.replace('2.14.2', '2.14.3');
+    if (changed === 'head') f.pr.head.sha = 'c'.repeat(40);
+    if (changed === 'PR') f.db.sql.exec('UPDATE selection_controls SET pr = 11');
+    if (changed === 'admitted Check') {
+      assert.equal((await f.click()).status, 200);
+      f.db.sql.exec("UPDATE requests SET state = 'failure'");
+    }
+    const dispatches = f.dispatches().length;
+    assert.equal((await refresh()).status, 200);
+    assert.equal(f.dispatches().length, dispatches);
+    assert.equal(f.calls.filter(c => c.path.includes('/commits/')).length, 1);
+    assert.equal(f.db.sql.prepare('SELECT COUNT(*) AS n FROM selection_controls').get().n, 1);
+    assert.equal(f.db.sql.prepare('SELECT check_id FROM selection_controls').get().check_id, 78);
+    assert.equal(checkWrites(f.calls).filter(c => c.method === 'POST').length, 1);
+  });
+}
+
+test('a non-idle saved control fails closed and preserves its identity', async t => {
+  let initialized = false;
+  const f = await actionMock(t, {onCall(call, {check}) {
+    if (initialized && call.path.endsWith('/check-runs/77')) return json({...check, status: 'in_progress'});
+  }});
+  const refresh = () => worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment);
+  assert.equal((await refresh()).status, 200);initialized = true;
+  assert.equal((await refresh()).status, 500);
+  assert.equal(checkWrites(f.calls).length, 0);assert.equal(f.dispatches().length, 0);
+});
+
+test('scaling migration preserves requests and locks and indexes frequent lookups', async t => {
+  const db = requestDatabase();t.after(() => db.sql.close());
+  db.sql.exec("INSERT INTO requests (id, installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, state) VALUES ('saved', 3, 7, 'fixture/repo', 12, 'head', 'base', 'main', 'fingerprint', 77, 'maintainer', 1, 'unknown')");
+  const before = db.sql.prepare('SELECT * FROM requests').all();
+  for (const name of ['request_run', 'request_check', 'terminal_completion']) db.sql.exec(`DROP INDEX ${name}`);
+  db.sql.exec('DROP TABLE selection_controls');
+  const migration = readFileSync(new URL('./migrations/0003_lookup_indexes.sql', import.meta.url), 'utf8');
+  db.sql.exec(migration);db.sql.exec(migration);
+  assert.deepEqual(db.sql.prepare('SELECT * FROM requests').all(), before);
+  assert.throws(() => db.sql.exec("INSERT INTO requests SELECT 'other', installation_id, repository_id, repository, pr, head, base, dispatched_ref, fingerprint, check_id, actor_login, created_at, completed_at, state, run_id, run_url, html_url, conclusion, comment_id, status_comment_id, selections_json, trigger_key FROM requests"), /UNIQUE/);
+  for (const [query, index] of [
+    ['SELECT * FROM requests WHERE installation_id = 3 AND repository_id = 7 AND run_id = 900 LIMIT 2', 'request_run'],
+    ['SELECT * FROM requests WHERE installation_id = 3 AND repository_id = 7 AND check_id = 77 ORDER BY created_at DESC LIMIT 1', 'request_check'],
+    ["DELETE FROM requests WHERE state IN ('success', 'failure', 'cancelled') AND completed_at < 1", 'terminal_completion'],
+  ]) {
+    const plan = db.sql.prepare('EXPLAIN QUERY PLAN ' + query).all().map(r => r.detail).join('\n');
+    assert.match(plan, new RegExp(index));assert.doesNotMatch(plan, /SCAN requests|TEMP B-TREE/);
+  }
+});
+
+for (const issue of ['late Check creation', 'missing cached Check']) {
+  for (const route of ['comment', 'description']) {
+    test(`${issue} recovers current selections during ${route} admission`, {timeout: 3_000}, async t => {
+      const reached = Promise.withResolvers(), release = Promise.withResolvers(), checks = new Map();
+      t.after(release.resolve);
+      let armed = issue === 'late Check creation', nextID = 100;
+      const options = {async onCall(call) {
+        if (call.path.includes('/commits/')) return json(listOf(...checks.values()));
+        if (call.path.endsWith('/check-runs') && call.method === 'POST') {
+          const check = {id: nextID++, app: {id: 42}, ...call.body};
+          checks.set(check.id, check);
+          if (armed) { armed = false;reached.resolve();await release.promise; }
+          return json(check);
+        }
+        const match = call.path.match(/\/check-runs\/([0-9]+)$/);
+        if (match) {
+          const check = checks.get(Number(match[1]));
+          if (!check) return new Response('', {status: 404});
+          if (call.method === 'PATCH') Object.assign(check, call.body);
+          return json(check);
+        }
+      }};
+      const f = await (route === 'comment' ? commentMock(t, options) : descriptionMock(t, options));
+      const refresh = () => worker.fetch(signed({...payload, number: 12, action: 'edited'}, 'pull_request'), f.environment);
+      if (issue === 'late Check creation') {
+        const older = refresh();await reached.promise;
+        f.pr.body = f.pr.body.replace('2.14.2', '2.14.4');
+        assert.equal((await refresh()).status, 200);
+        release.resolve();assert.equal((await older).status, 200);
+      } else {
+        assert.equal((await refresh()).status, 200);checks.delete(100);
+      }
+      const expected = await selectionFingerprint(f.pr, selections(f.pr.body));
+      const scans = f.calls.filter(c => c.path.includes('/commits/')).length;
+      let response;
+      if (route === 'comment') {
+        f.commentEvent.issue.body = f.pr.body;response = await f.submit();
+      } else {
+        const before = f.pr.body.replace('- [x] Run selected fixes.', '- [ ] Run selected fixes.');
+        response = await f.run(delivery, {...f.descriptionEvent, pull_request: structuredClone(f.pr), changes: {body: {from: before}}});
+      }
+      assert.equal(response.status, 200);assert.equal(f.dispatches().length, 1);
+      assert.equal(f.rows()[0].fingerprint, expected);
+      assert.equal(f.rows()[0].check_id, f.db.sql.prepare('SELECT check_id FROM selection_controls').get().check_id);
+      assert.equal(f.calls.filter(c => c.path.includes('/commits/')).length, scans);
+    });
+  }
+}
+
+test('a request cannot initialize a control for a PR with no prior locator or Check', async t => {
+  const f = await commentMock(t, {onCall(call) {
+    if (call.path.includes('/commits/')) return json(listOf());
+  }});
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.dispatches().length, 0);assert.equal(checkWrites(f.calls).length, 0);
+  assert.equal(f.db.sql.prepare('SELECT COUNT(*) AS n FROM selection_controls').get().n, 0);
+});
+
+test('locator recovery cannot transfer a command to newly changed selections', async t => {
+  let armed = false, reads = 0;
+  const f = await commentMock(t, {onCall(call, {pr}) {
+    if (armed && call.path.endsWith('/pulls/12') && ++reads === 2) pr.body = pr.body.replace('2.14.2', '2.14.3');
+  }});
+  assert.equal((await worker.fetch(signed({...payload, number: 12}, 'pull_request'), f.environment)).status, 200);
+  f.db.sql.prepare('UPDATE selection_controls SET external_id = ?').run('node-repair:12:' + '0'.repeat(64));
+  armed = true;
+  assert.equal((await f.submit()).status, 200);
+  assert.equal(f.dispatches().length, 0);assert.equal(checkWrites(f.calls).length, 0);
+});

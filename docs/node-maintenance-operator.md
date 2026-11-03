@@ -180,6 +180,14 @@ delivery. They are not extra setup for repository users:
    `repair-app/migrations/0002_description_requests.sql` once after migration
    0001. It adds the nullable edit fingerprint and unique index without changing
    existing request rows or locks. Every request path needs the updated schema.
+   Before deploying direct selection-control lookups, apply
+   `repair-app/migrations/0003_lookup_indexes.sql`. It adds request lookup and
+   cleanup indexes and a replaceable control locator for each installed
+   repository. Existing requests and replay identities remain unchanged.
+   The first refresh discovers existing Checks; later refreshes read the saved
+   Check directly and verify its current GitHub identity. A changed selection
+   creates a new control without scanning old Checks. Exposed Checks are never
+   repainted. This migration does not alter the 90-day request retention policy.
 3. Deploy the reviewed Worker. Put the correct revision marker and selections
    in the pilot description, then verify a real command, exact inputs, reply
    link, replay and stale-command rejection in the isolated repository.

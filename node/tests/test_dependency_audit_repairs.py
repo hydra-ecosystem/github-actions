@@ -1038,6 +1038,71 @@ def test_peer_context_change_is_not_a_new_security_target(project):
     )
 
 
+def test_pnpm_location_index_keeps_aliases_scopes_and_peer_contexts():
+    lock = {
+        "packages": {"@scope/child@1.0.0": {}},
+        "snapshots": {
+            "@scope/child@1.0.0(peer@2.0.0)": {},
+            "parent@2.0.0": {
+                "dependencies": {"alias": "@scope/child@1.0.0(peer@2.0.0)"},
+                "optionalDependencies": {"@scope/child": "1.0.0(peer@2.0.0)"},
+            },
+        },
+        "importers": {
+            ".": {"devDependencies": {"alias": {"version": "@scope/child@1.0.0"}}}
+        },
+    }
+    paths = module["pnpm_path_index"](lock)
+    assert paths["@scope/child"] == {
+        "packages/@scope/child@1.0.0": "1.0.0",
+        "snapshots/@scope/child@1.0.0(peer@2.0.0)": "1.0.0",
+        "snapshots/parent@2.0.0/dependencies/alias": "1.0.0(peer@2.0.0)",
+        "snapshots/parent@2.0.0/optionalDependencies/@scope/child": "1.0.0(peer@2.0.0)",
+        "importers/./devDependencies/alias": "1.0.0",
+    }
+    assert paths["alias"] == {
+        "snapshots/parent@2.0.0/dependencies/alias": "@scope/child@1.0.0(peer@2.0.0)",
+        "importers/./devDependencies/alias": "@scope/child@1.0.0",
+    }
+    assert (
+        module["package_paths"](lock, "@scope/child", "pnpm") == paths["@scope/child"]
+    )
+    assert module["package_paths"](lock, "missing", "pnpm") == {}
+
+
+def test_repointed_alias_to_existing_package_is_still_a_security_target():
+    lock = {
+        "packages": {"child@1.0.0": {}, "child@1.0.1": {}},
+        "importers": {".": {"dependencies": {"alias": {"version": "child@1.0.0"}}}},
+    }
+    before = {"pnpm-lock.yaml": yaml.safe_dump(lock).encode()}
+    lock["importers"]["."]["dependencies"]["alias"]["version"] = "child@1.0.1"
+    after = {"pnpm-lock.yaml": yaml.safe_dump(lock).encode()}
+    assert module["changed_pnpm_targets"](before, after) == {"child@1.0.1"}
+
+
+@pytest.mark.parametrize("size", [50, 500])
+def test_changed_target_detection_traverses_lockfiles_linearly(monkeypatch, size):
+    visits = 0
+
+    class CountedEntries(dict):
+        def items(self):
+            nonlocal visits
+            visits += len(self)
+            return super().items()
+
+    lock = {
+        "packages": CountedEntries({f"pkg{i}@1.0.0": {} for i in range(size)}),
+        "snapshots": CountedEntries(
+            {f"pkg{i}@1.0.0": {"dependencies": {"leaf": "1.0.0"}} for i in range(size)}
+        ),
+    }
+    monkeypatch.setattr(yaml, "safe_load", lambda raw: lock)
+    files = {"pnpm-lock.yaml": b"same dependency graph"}
+    assert module["changed_pnpm_targets"](files, files) == set()
+    assert visits <= 6 * size
+
+
 @pytest.mark.parametrize(
     "selector,name",
     [
