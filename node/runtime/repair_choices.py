@@ -174,9 +174,8 @@ def render(items, *, head, base):
         return ""
     return (
         "\n## Upgrades requiring your authorization\n\n"
-        "These patches appear compatible with the checked parent constraints. "
-        "Repair validation has not run. Selecting a fix permits one attempt; "
-        "it does not approve merging.\n\n"
+        "Select upgrades to allow one attempt. Repair validation has not run. "
+        "This does not approve merging.\n\n"
         + START
         + "\n"
         + "\n".join(
@@ -187,25 +186,16 @@ def render(items, *, head, base):
         + END
         + "\n"
         + marker
-        + "\n\n| Package | Proposed upgrade | Why authorization is needed |\n"
-        "| --- | --- | --- |\n"
-        + "\n".join(
-            f"| `{item['name']}` | `{item['from']} → {item['to']}` | "
-            "An explicit project pin prevents the automatic upgrade. "
-            "The patch fits the checked parent constraints; repair validation has not run. |"
-            for item in items
-        )
         + "\n\n### Run selected fixes\n\n"
-        "Select the upgrades above, then tick **Run selected fixes** below. "
-        "Package selections alone start no work.\n\n"
+        "After selecting at least one upgrade, tick **Run selected fixes**. "
+        "Selections alone start no work.\n\n"
         "<!-- node-repair:run:v1 -->\n"
         "- [ ] Run selected fixes.\n"
         "<!-- /node-repair:run -->\n\n"
-        "The App replies with the accepted count and workflow status. "
-        "Only one repair can be active. The App does not reset this checkbox; "
-        "to submit another request after completion, untick and re-tick it.\n\n"
-        "Alternatively, post a **new comment** containing only `/repair selected` "
-        "and click GitHub's **Comment** button. Use either method once. "
+        "The App replies with the accepted fixes, workflow link and result. "
+        "To request another attempt after completion, untick and re-tick the run checkbox.\n\n"
+        "Or post a **new comment** containing only `/repair selected` "
+        "and click **Comment**. Use one method per request. "
         "Nothing merges automatically.\n"
     )
 
