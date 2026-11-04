@@ -1186,18 +1186,22 @@ def describe_pnpm_fixes(
             patched = detail.get("patchedRange")
             vulnerable_range = detail.get("range")
             if collect_proof and isinstance(vulnerable_range, str) and vulnerable_range:
-                vulnerable_versions = published(f"{name}@{vulnerable_range}")
                 affected_versions = {
                     node.rsplit("@", 1)[-1].split("(", 1)[0]
                     for node in detail.get("nodes", [])
                     if isinstance(node, str) and "@" in node
                 }
-                if (
-                    vulnerable_versions
-                    and affected_versions
-                    and affected_versions <= vulnerable_versions
+                # pnpm may return only the latest match for a range. Verify
+                # every affected exact version against the range independently.
+                if affected_versions and all(
+                    any(
+                        published(f"{name}@{version} {alternative.strip()}")
+                        == {version}
+                        for alternative in vulnerable_range.split("||")
+                    )
+                    for version in sorted(affected_versions)
                 ):
-                    detail["_verifiedVulnerableVersions"] = sorted(vulnerable_versions)
+                    detail["_verifiedVulnerableVersions"] = sorted(affected_versions)
             if patched in (None, "<0.0.0", ""):
                 detail["fixStatus"] = "No patched version declared by the registry."
                 continue
@@ -1294,6 +1298,13 @@ def describe_pnpm_fixes(
                         )
                     elif compatible_patches is not None:
                         compatible_patches &= override_patches
+            # Narrowed registry intersections prove these versions are patched
+            # too, even when the broad range query returned a newer major.
+            detail["_verifiedPatchedVersions"] = sorted(
+                patches
+                | (parent_compatible_patches or set())
+                | (override_patches or set())
+            )
             # Qualified rules match declared dependency ranges and parent
             # versions, with precedence between overlapping selectors. Registry
             # patch intersections alone do not prove their applicability. Retain
