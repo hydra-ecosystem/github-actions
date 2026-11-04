@@ -1128,8 +1128,7 @@ def cumulative_report(
         "| Package | Update | Severity | Advisories | Action / blocker | Security evidence |\n| --- | --- | --- | --- | --- | --- |\n"
         + "\n".join(rows)
     )
-    encoded = base64.b64encode(ENGINE["canonical_history"](record)).decode("ascii")
-    report += f"\n\n<!-- node-audit-history:v1:{encoded} -->\n"
+    report += "\n\n" + ENGINE["history_marker"](record) + "\n"
     if len(report.encode()) > 1048576:
         raise ValueError("Cumulative history exceeds its bound; no artifact sealed")
     return report

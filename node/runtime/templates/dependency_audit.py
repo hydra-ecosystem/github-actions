@@ -1,7 +1,6 @@
 """Prepare a best-effort npm or pnpm upgrade report for one standalone Node project."""
 
 import argparse
-import base64
 import copy
 import hashlib
 import html
@@ -23,6 +22,7 @@ import yaml
 
 LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
 NODE_RELEASES = runpy.run_path(str(Path(__file__).parents[1] / "node_releases.py"))
+HISTORY = runpy.run_path(str(Path(__file__).parents[1] / "history.py"))
 REPAIR_CHOICES = runpy.run_path(str(Path(__file__).parents[1] / "repair_choices.py"))
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
@@ -4063,10 +4063,7 @@ def prepare(
             "initial_ids": sorted(initial_ids or ()),
             "remaining_ids": sorted(remaining_ids or ()),
         }
-        encoded = base64.b64encode(canonical_history(record)).decode("ascii")
-        if len(encoded) > 524288:
-            raise ValueError("Historical audit evidence exceeds its bound")
-        report += f"\n<!-- node-audit-history:v1:{encoded} -->\n"
+        report += "\n" + history_marker(record, max_encoded=524288) + "\n"
         heading, separator, tail = report.partition("\n")
         report = (
             heading.replace("Validation failed or unavailable", "Validation pending")
@@ -4083,15 +4080,10 @@ def prepare(
 
 
 HISTORY_TITLE = "Node audit evidence v1"
-HISTORY_PATTERN = re.compile(
-    r"^<!-- node-audit-history:v1:([A-Za-z0-9+/=]+) -->$", re.M
-)
-
-
-def canonical_history(value):
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("ascii")
+HISTORY_PATTERN = HISTORY["PATTERN"]
+canonical_history = HISTORY["canonical"]
+history_marker = HISTORY["marker"]
+history_record = HISTORY["read"]
 
 
 def dependency_state(snapshot):
@@ -4099,33 +4091,6 @@ def dependency_state(snapshot):
         name: hashlib.sha256(data).hexdigest()
         for name, data in sorted({"package.json": snapshot[0], **snapshot[1]}.items())
     }
-
-
-def history_record(report):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("Duplicate history field")
-            result[key] = value
-        return result
-
-    if len(report) > 1048576:
-        raise ValueError("Audit report exceeds its bound")
-    text = report.decode("utf-8")
-    matches = HISTORY_PATTERN.findall(text)
-    if len(matches) != 1 or text.count("node-audit-history:") != 1:
-        raise ValueError("Missing or ambiguous sealed audit history")
-    raw = base64.b64decode(matches[0], validate=True)
-    record = json.loads(raw, object_pairs_hook=unique)
-    if (
-        canonical_history(record) != raw
-        or not isinstance(record, dict)
-        or type(record.get("version")) is not int
-        or record["version"] != 1
-    ):
-        raise ValueError("Noncanonical or unsupported audit history")
-    return record
 
 
 def check_prepared_history(report, directory):
