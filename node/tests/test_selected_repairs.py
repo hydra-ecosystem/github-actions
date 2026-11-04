@@ -526,6 +526,76 @@ def test_only_verified_compatible_exact_pins_receive_candidate_evidence(
     assert CHOICES["candidates"](data) == ([] if problem else [ITEM])
 
 
+@pytest.mark.parametrize(
+    "problem",
+    [
+        None,
+        "range-alternative",
+        "unaffected",
+        "unavailable",
+        "wrong-version",
+        "partial",
+    ],
+)
+def test_vulnerable_proof_checks_each_installed_version(monkeypatch, tmp_path, problem):
+    fn = ENGINE["describe_pnpm_fixes"]
+    data = findings(False)
+    finding = data["vulnerabilities"].pop("launch-editor")
+    data["vulnerabilities"]["body-parser"] = finding
+    detail = finding["via"][0]
+    affected = (
+        "<1.20.0 || >=1.20.2 <1.20.9"
+        if problem == "range-alternative"
+        else ">=1.20.7 <1.20.9"
+        if problem == "unaffected"
+        else "<1.20.9"
+    )
+    detail.update(range=affected, patchedRange=">=1.20.9", nodes=["body-parser@1.20.6"])
+    if problem == "partial":
+        detail["nodes"].append("body-parser@1.20.7")
+    files = {
+        "pnpm-workspace.yaml": b"overrides:\n  body-parser: 1.20.6\n",
+        "pnpm-lock.yaml": b"snapshots:\n  express@4.22.3:\n    dependencies:\n      body-parser: 1.20.6\n",
+    }
+
+    def registry(directory, command, package, *fields, **kwargs):
+        if package == "express@4.22.3":
+            value = {"dependencies": {"body-parser": "~1.20.5"}}
+        elif package == f"body-parser@{affected}":
+            value = "1.20.8"  # Real pnpm returns one matching version, not every match.
+        elif package == "body-parser@>=1.20.9":
+            value = "2.4.0"
+        elif package == "body-parser@~1.20.5 >=1.20.9":
+            value = "1.20.9"
+        elif package == "body-parser@1.20.6 >=1.20.9":
+            value = []
+        elif package.startswith("body-parser@1.20.6 "):
+            if problem == "unavailable":
+                value = None
+            elif problem == "unaffected" or package.endswith(" <1.20.0"):
+                value = []
+            else:
+                value = "1.20.8" if problem == "wrong-version" else "1.20.6"
+        elif package.startswith("body-parser@1.20.7 "):
+            value = None
+        else:
+            raise AssertionError(package)
+        return SimpleNamespace(
+            returncode=1 if value is None else 0, stdout=json.dumps(value)
+        )
+
+    monkeypatch.setitem(fn.__globals__, "run", registry)
+    monkeypatch.setitem(
+        fn.__globals__, "valid_snapshot", lambda _: (b"{}", files, {}, {})
+    )
+    monkeypatch.setitem(fn.__globals__, "restore_invalid_state", lambda *a, **k: False)
+    fn(tmp_path, data, files, [], float("inf"), {}, collect_proof=True)
+    expected = ["1.20.6"] if problem in (None, "range-alternative") else None
+    assert detail.get("_verifiedVulnerableVersions") == expected
+    assert detail["_verifiedRepairVersions"] == ["1.20.9"]
+    assert detail["_verifiedPatchedVersions"] == ["1.20.9", "2.4.0"]
+
+
 def test_mixed_report_places_folded_evidence_immediately_under_eligible_row():
     data = findings()
     blocked = copy.deepcopy(data["vulnerabilities"]["launch-editor"])
