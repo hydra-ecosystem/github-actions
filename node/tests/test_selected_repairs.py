@@ -1015,6 +1015,99 @@ def test_candidate_scope_preserves_unrelated_metadata_and_peer_suffixes(
         REPAIR["check_scope"](before, after, [ITEM])
 
 
+@pytest.mark.parametrize("name", ["qs", "@scope/qs"])
+@pytest.mark.parametrize("retain_other_version", [False, True])
+@pytest.mark.parametrize(
+    "problem",
+    [
+        None,
+        "new-version",
+        "metadata",
+        "edge",
+        "importer",
+        "dev-importer",
+        "optional-importer",
+        "alias",
+        "selected-edge",
+        "optional-edge",
+        "peer",
+        "nested-peer",
+        "snapshot",
+    ],
+)
+def test_scope_only_prunes_unreferenced_unselected_versions(
+    tmp_path, name, retain_other_version, problem
+):
+    def snapshot(version, prune):
+        repair_files(tmp_path, version)
+        lock = yaml.safe_load((tmp_path / "pnpm-lock.yaml").read_text())
+        parent = ITEM["name"] + "@" + version + "(peer@1.0.0)"
+        lock["snapshots"][parent]["dependencies"] = {
+            name: "2.0.0" if prune and retain_other_version else "1.0.0"
+        }
+        if prune and not retain_other_version:
+            lock["snapshots"][parent]["dependencies"] = {}
+        for dependency, target in [(name, "1.0.0"), ("obsolete-child", "3.0.0")]:
+            if not prune:
+                key = dependency + "@" + target
+                lock["packages"][key] = {"resolution": {"integrity": key}}
+                lock["snapshots"][key] = {}
+        if not prune:
+            lock["snapshots"][name + "@1.0.0"]["dependencies"] = {
+                "obsolete-child": "3.0.0"
+            }
+        if retain_other_version:
+            lock["packages"][name + "@2.0.0"] = {"resolution": {"integrity": "kept"}}
+            lock["snapshots"][name + "@2.0.0"] = {}
+        importer = lock["importers"]["."]
+        if problem in ("importer", "dev-importer", "optional-importer"):
+            section = {
+                "importer": "dependencies",
+                "dev-importer": "devDependencies",
+                "optional-importer": "optionalDependencies",
+            }[problem]
+            importer.setdefault(section, {})[name] = {
+                "specifier": "1.0.0",
+                "version": "1.0.0",
+            }
+        elif problem == "alias":
+            importer["dependencies"]["alias"] = {
+                "specifier": "npm:" + name + "@1.0.0",
+                "version": name + "@1.0.0",
+            }
+        elif problem in ("peer", "nested-peer"):
+            suffix = "(" + name + "@1.0.0)"
+            if problem == "nested-peer":
+                suffix = "(outer@1.0.0" + suffix + ")"
+            lock["snapshots"][parent + suffix] = lock["snapshots"].pop(parent)
+            parent += suffix
+            importer["dependencies"][ITEM["name"]]["version"] += suffix
+            lock["snapshots"]["untouched@1.0.0"]["dependencies"][ITEM["name"]] += suffix
+        if prune and problem:
+            if problem == "new-version":
+                lock["packages"][name + "@4.0.0"] = {}
+            elif problem == "metadata":
+                lock["packages"]["untouched@1.0.0"]["resolution"] = {}
+            elif problem == "edge":
+                lock["snapshots"]["untouched@1.0.0"]["dependencies"] = {}
+            elif problem == "selected-edge":
+                lock["snapshots"][parent]["dependencies"][name] = "1.0.0"
+            elif problem == "optional-edge":
+                lock["snapshots"][parent]["optionalDependencies"] = {name: "1.0.0"}
+            elif problem == "snapshot":
+                lock["snapshots"][name + "@1.0.0"] = {}
+        (tmp_path / "pnpm-lock.yaml").write_text(yaml.safe_dump(lock))
+        return ENGINE["valid_snapshot"](tmp_path)
+
+    before = snapshot(ITEM["from"], False)
+    after = snapshot(ITEM["to"], True)
+    if problem:
+        with pytest.raises(ValueError):
+            REPAIR["check_scope"](before, after, [ITEM])
+    else:
+        REPAIR["check_scope"](before, after, [ITEM])
+
+
 @pytest.mark.parametrize(
     "problem", [None, "parent", "direct", "young", "unavailable", "pin"]
 )
