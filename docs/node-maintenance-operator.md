@@ -441,3 +441,20 @@ reset or replacement. Repairs already reachable from the audited default branch
 do not block later publication. Upgrade and legacy proposals keep their existing
 publication behavior. Complete live repair acceptance remains required before
 general rollout.
+
+
+## History storage bounds
+
+New audit and repair artifacts use storage v2: identical audit objects, repeated
+strings and dependency-path prefixes are stored once inside the same artifact.
+The reader still accepts existing v1 artifacts. Both formats reconstruct the
+same complete logical history, including every attempt, historical field value,
+path string, duplicate and ordering. No old artifact or native receipt is rewritten.
+
+The report stays bounded at 1 MiB; normal audit history retains its 512 KiB
+encoded bound. The v2 reader checks backward-only references and computes complete
+expansion costs before allocating historical containers. It rejects histories
+above 8 MiB canonical logical JSON, 200000 values/table entries or depth 64.
+Repeated mutable containers are rebuilt independently. Invalid, cyclic,
+noncanonical or oversized history fails preparation; it never drops old evidence
+or skips producer, job, Check, artifact-digest or publication verification.

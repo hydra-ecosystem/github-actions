@@ -1,7 +1,6 @@
 """Prepare a best-effort npm or pnpm upgrade report for one standalone Node project."""
 
 import argparse
-import base64
 import copy
 import hashlib
 import html
@@ -23,6 +22,7 @@ import yaml
 
 LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
 NODE_RELEASES = runpy.run_path(str(Path(__file__).parents[1] / "node_releases.py"))
+HISTORY = runpy.run_path(str(Path(__file__).parents[1] / "history.py"))
 REPAIR_CHOICES = runpy.run_path(str(Path(__file__).parents[1] / "repair_choices.py"))
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
@@ -1186,18 +1186,22 @@ def describe_pnpm_fixes(
             patched = detail.get("patchedRange")
             vulnerable_range = detail.get("range")
             if collect_proof and isinstance(vulnerable_range, str) and vulnerable_range:
-                vulnerable_versions = published(f"{name}@{vulnerable_range}")
                 affected_versions = {
                     node.rsplit("@", 1)[-1].split("(", 1)[0]
                     for node in detail.get("nodes", [])
                     if isinstance(node, str) and "@" in node
                 }
-                if (
-                    vulnerable_versions
-                    and affected_versions
-                    and affected_versions <= vulnerable_versions
+                # pnpm may return only the latest match for a range. Verify
+                # every affected exact version against the range independently.
+                if affected_versions and all(
+                    any(
+                        published(f"{name}@{version} {alternative.strip()}")
+                        == {version}
+                        for alternative in vulnerable_range.split("||")
+                    )
+                    for version in sorted(affected_versions)
                 ):
-                    detail["_verifiedVulnerableVersions"] = sorted(vulnerable_versions)
+                    detail["_verifiedVulnerableVersions"] = sorted(affected_versions)
             if patched in (None, "<0.0.0", ""):
                 detail["fixStatus"] = "No patched version declared by the registry."
                 continue
@@ -1294,6 +1298,13 @@ def describe_pnpm_fixes(
                         )
                     elif compatible_patches is not None:
                         compatible_patches &= override_patches
+            # Narrowed registry intersections prove these versions are patched
+            # too, even when the broad range query returned a newer major.
+            detail["_verifiedPatchedVersions"] = sorted(
+                patches
+                | (parent_compatible_patches or set())
+                | (override_patches or set())
+            )
             # Qualified rules match declared dependency ranges and parent
             # versions, with precedence between overlapping selectors. Registry
             # patch intersections alone do not prove their applicability. Retain
@@ -4052,10 +4063,7 @@ def prepare(
             "initial_ids": sorted(initial_ids or ()),
             "remaining_ids": sorted(remaining_ids or ()),
         }
-        encoded = base64.b64encode(canonical_history(record)).decode("ascii")
-        if len(encoded) > 524288:
-            raise ValueError("Historical audit evidence exceeds its bound")
-        report += f"\n<!-- node-audit-history:v1:{encoded} -->\n"
+        report += "\n" + history_marker(record, max_encoded=524288) + "\n"
         heading, separator, tail = report.partition("\n")
         report = (
             heading.replace("Validation failed or unavailable", "Validation pending")
@@ -4072,15 +4080,10 @@ def prepare(
 
 
 HISTORY_TITLE = "Node audit evidence v1"
-HISTORY_PATTERN = re.compile(
-    r"^<!-- node-audit-history:v1:([A-Za-z0-9+/=]+) -->$", re.M
-)
-
-
-def canonical_history(value):
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("ascii")
+HISTORY_PATTERN = HISTORY["PATTERN"]
+canonical_history = HISTORY["canonical"]
+history_marker = HISTORY["marker"]
+history_record = HISTORY["read"]
 
 
 def dependency_state(snapshot):
@@ -4088,33 +4091,6 @@ def dependency_state(snapshot):
         name: hashlib.sha256(data).hexdigest()
         for name, data in sorted({"package.json": snapshot[0], **snapshot[1]}.items())
     }
-
-
-def history_record(report):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("Duplicate history field")
-            result[key] = value
-        return result
-
-    if len(report) > 1048576:
-        raise ValueError("Audit report exceeds its bound")
-    text = report.decode("utf-8")
-    matches = HISTORY_PATTERN.findall(text)
-    if len(matches) != 1 or text.count("node-audit-history:") != 1:
-        raise ValueError("Missing or ambiguous sealed audit history")
-    raw = base64.b64decode(matches[0], validate=True)
-    record = json.loads(raw, object_pairs_hook=unique)
-    if (
-        canonical_history(record) != raw
-        or not isinstance(record, dict)
-        or type(record.get("version")) is not int
-        or record["version"] != 1
-    ):
-        raise ValueError("Noncanonical or unsupported audit history")
-    return record
 
 
 def check_prepared_history(report, directory):

@@ -76,6 +76,11 @@ def fake_commands(monkeypatch, *, resolved=None, build=0, recent=()):
                         for v in ["1.2.4", "1.3.0", "2.0.0"]
                     }
                 )
+            elif args[2] == "version" and args[1] in (
+                "renderer@1.2.3 <1.3.0",
+                "renderer@1.2.4 <1.3.0",
+            ):
+                stdout = json.dumps(args[1].split("@", 1)[1].split()[0])
             elif args[2] == "version" and "<1.3.0" in args[1]:
                 stdout = json.dumps(["1.2.3", "1.2.4"])
             elif args[2] == "version" and ">=1.3.0" in args[1]:
@@ -620,7 +625,13 @@ def _clear_finding():
 def _collect_renderer_proof(site, before, monkeypatch):
     def registry(directory, *args, **kwargs):
         package = args[1]
-        versions = ["1.2.3", "1.2.4"] if "<1.3.0" in package else ["1.3.0"]
+        versions = (
+            ["1.2.3"]
+            if package == "renderer@1.2.3 <1.3.0"
+            else ["1.2.3", "1.2.4"]
+            if "<1.3.0" in package
+            else ["1.3.0"]
+        )
         return subprocess.CompletedProcess(args, 0, json.dumps(versions), "")
 
     monkeypatch.setitem(helper["describe_pnpm_fixes"].__globals__, "run", registry)
@@ -766,6 +777,8 @@ def test_security_fix_requires_original_range_proof_before_validation(
             write_fixed_lock()
         elif args[0] == "view":
             specifier = args[1]
+            if package_manager == "pnpm" and specifier == "renderer@1.2.3 <1.3.0":
+                return subprocess.CompletedProcess(args, 0, '"1.2.3"', "")
             if specifier.startswith(f"renderer@{selected} "):
                 constraint = specifier.removeprefix("renderer@")
                 arm = constraint.removeprefix(selected + " ")
@@ -1717,7 +1730,11 @@ def test_security_only_discards_disjoint_transitive_regeneration(site, monkeypat
                 args, 0 if fixed else 1, json.dumps(data), ""
             )
         if args[0] == "view":
-            versions = ["1.2.3"] if args[1] == "renderer@<1.3.0" else ["1.3.0"]
+            versions = (
+                ["1.2.3"]
+                if args[1] in {"renderer@<1.3.0", "renderer@1.2.3 <1.3.0"}
+                else ["1.3.0"]
+            )
             return subprocess.CompletedProcess(args, 0, json.dumps(versions), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -1844,7 +1861,11 @@ def test_security_only_rejects_disjoint_peer_context_transitive_regeneration(
                 args, 0 if fixed else 1, json.dumps(data), ""
             )
         if args[0] == "view":
-            versions = ["1.2.3"] if args[1] == "renderer@<1.3.0" else ["1.3.0"]
+            versions = (
+                ["1.2.3"]
+                if args[1] in {"renderer@<1.3.0", "renderer@1.2.3 <1.3.0"}
+                else ["1.3.0"]
+            )
             return subprocess.CompletedProcess(args, 0, json.dumps(versions), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
