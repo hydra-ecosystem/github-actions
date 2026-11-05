@@ -521,6 +521,13 @@ def check_caller(root, config, selected, github, default_branch="main"):
         raise ValueError(
             "Pinned workflows do not support localPatches; update both workflow pins"
         )
+    if (
+        "advisoryNotes" in config
+        and contract.get("advisory_notes", {}).get("config_key") != "advisoryNotes"
+    ):
+        raise ValueError(
+            "Pinned workflows do not support advisoryNotes; update both workflow pins"
+        )
     toolchain = CONFIGURATION["json_object"](
         source.read("node/runtime/toolchain.json"), "pinned toolchain support"
     ).get("supported", {})

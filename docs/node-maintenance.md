@@ -399,6 +399,7 @@ See the [tested versions](../node/runtime/toolchain.json).
 | --- | --- |
 | `validationScript` | Existing nonempty package script; default `"build"`. Names start with a letter or digit and contain only letters, digits, `:`, `_`, `.`, or `-`. |
 | `localPatches` | Project-local declarations identifying advisories mitigated by local patches. These are maintainer assertions, never inherited or counted as independently confirmed security fixes. See [local patches](#local-security-patches). |
+| `advisoryNotes` | Project-local text keyed by GHSA ID explaining decisions such as deferral. Display only; findings and repair eligibility stay unchanged. See [advisory notes](#advisory-notes). |
 | `minimumReleaseAgeDays` | Minimum release cooldown in days; nonnegative integer, default `10`. pnpm workspace policy must be at least this strict. |
 | `maintenance.mode` | `"security-only"` or `"security-and-maintenance"`. A schedule object defaults to security-only unless a mode is supplied locally or inherited. |
 | `maintenance.upgradeScope` | Maximum routine direct upgrade level: `"patch"`, `"minor"` including patches, or `"major"` including both (default). Security fixes are handled separately. |
@@ -467,6 +468,37 @@ permission without checking out or executing project code.
 Use a workflow revision whose `node/contract.json` includes `local_patches`
 support. Use `@v1` or update both immutable pins together; older version-6 revisions do not
 accept `localPatches`.
+
+## Advisory notes
+
+Add context for an advisory in `.github/node-maintenance.json`:
+
+```json
+{
+  "advisoryNotes": {
+    "GHSA-5gmw-xhrv-c9v3": "Deferred: the affected worker feature is disabled in this project. Reassess before enabling it or changing the parent dependency."
+  }
+}
+```
+
+Merge this field into the existing configuration. Up to 32 GHSA IDs are supported,
+each with nonempty single-line plain text of at most 2048 characters. The existing
+64 KiB configuration limit still applies. Formatting is displayed as text. Notes
+stay local to the repository and are not inherited from shared defaults.
+
+Matching notes appear beside current package findings in audit and selected-repair
+reports. They persist through report regeneration because they come from project
+configuration. Notes are omitted when their advisory is absent; the configuration
+entry remains for later matching audits. Review and remove stale notes yourself.
+
+A note explains a maintainer decision. It does not certify mitigation, suppress
+the advisory, change severity or counts, prevent a repair, or count as a fix.
+Use `localPatches` separately for actual local patch assertions. Notes are not
+copied into raw audit evidence or each retained repair attempt. Configuration
+is public project data and notes appear in published reports; do not include secrets.
+
+Use workflows whose `node/contract.json` declares `advisory_notes` support. Older
+version-6 revisions reject this field. Adoption needs no new permissions.
 
 ## Update or migrate an installation
 

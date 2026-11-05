@@ -308,9 +308,16 @@ def test_unavailable_release_tag_is_unverified_without_branch_fallback():
     assert "Release tag unavailable" in result["diagnostic"]
 
 
+@pytest.mark.parametrize(
+    "key,contract_key,value",
+    [
+        ("localPatches", "local_patches", ["GHSA-2345-6789-cfgh"]),
+        ("advisoryNotes", "advisory_notes", {"GHSA-2345-6789-cfgh": "Deferred."}),
+    ],
+)
 @pytest.mark.parametrize("failure", [None, "old-pin"])
 def test_fleet_verifies_compact_patch_assertions_and_pinned_support(
-    monkeypatch, failure
+    monkeypatch, failure, key, contract_key, value
 ):
     monkeypatch.setattr(
         subprocess,
@@ -320,16 +327,16 @@ def test_fleet_verifies_compact_patch_assertions_and_pinned_support(
     github = GitHub()
     files = github.repos["owner/project"]
     config = json.loads(files[".github/node-maintenance.json"])
-    config["localPatches"] = ["GHSA-2345-6789-cfgh"]
+    config[key] = value
     files[".github/node-maintenance.json"] = data(config)
     if failure == "old-pin":
         contract = json.loads(github.repos["owner/actions"]["node/contract.json"])
-        contract.pop("local_patches")
+        contract.pop(contract_key)
         github.repos["owner/actions"]["node/contract.json"] = data(contract)
     result = FLEET["check_repository"](github, "owner/project", SOURCE)
     assert result["status"] == ("ok" if failure is None else "failed")
     if failure == "old-pin":
-        assert "do not support localPatches" in result["diagnostic"]
+        assert f"do not support {key}" in result["diagnostic"]
 
 
 def test_fleet_checks_five_at_a_time_and_retains_order_and_failures(monkeypatch):

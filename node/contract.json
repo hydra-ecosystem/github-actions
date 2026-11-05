@@ -74,6 +74,13 @@
     "automatic_patch_removal": false,
     "notification": "one issue per repository for published official fixes"
   },
+  "advisory_notes": {
+    "config_key": "advisoryNotes",
+    "inherited": false,
+    "maximum_notes": 32,
+    "maximum_characters_per_note": 2048,
+    "effect": "display only; findings and repair eligibility are unchanged"
+  },
   "breaking_changes": {
     "previous_component": "docusaurus",
     "old_configuration": ".github/docusaurus.json",

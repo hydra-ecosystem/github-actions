@@ -1166,6 +1166,12 @@ def test_preparation_seals_only_three_members_without_validation(
 ):
     project = tmp_path / "project"
     project.mkdir()
+    (project / ".github").mkdir()
+    (project / ".github/node-maintenance.json").write_text(
+        json.dumps(
+            {"advisoryNotes": {"GHSA-587h-7wmj-h5pm": "Review upstream constraints."}}
+        )
+    )
     before = repair_files(project)
     changed = tmp_path / "changed"
     changed.mkdir()

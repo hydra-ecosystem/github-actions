@@ -1025,7 +1025,17 @@ def report_rows(report):
 
 
 def cumulative_report(
-    history, expected, directory, selected, snapshot, candidate, before, after, fixed
+    history,
+    expected,
+    directory,
+    selected,
+    snapshot,
+    candidate,
+    before,
+    after,
+    fixed,
+    *,
+    advisory_notes=None,
 ):
     project = directory.relative_to(Path.cwd().resolve()).as_posix()
     state = ENGINE["dependency_state"](snapshot)
@@ -1148,7 +1158,10 @@ def cumulative_report(
         "| Package | Update | Severity | Advisories | Action / blocker | Security evidence |\n| --- | --- | --- | --- | --- | --- |\n"
         + "\n".join(rows)
     )
-    report += "\n\n" + ENGINE["history_marker"](record) + "\n"
+    report += "\n\n" + ENGINE["ADVISORY_NOTES"]["render"](
+        after, {} if advisory_notes is None else advisory_notes
+    )
+    report += ENGINE["history_marker"](record) + "\n"
     if len(report.encode()) > 1048576:
         raise ValueError("Cumulative history exceeds its bound; no artifact sealed")
     return report
@@ -1448,6 +1461,7 @@ def prepare_candidate(expected, artifact):
     ):
         raise ValueError("Preparation requires a clean checkout of the expected head")
     directory, selected, snapshot = project_context()
+    config = PROJECT["CONFIGURATION"]["local_configuration"](root)
     history = native_history(expected, directory, snapshot)
     deadline = time.monotonic() + 40 * 60
     before = ENGINE["audit"](directory, deadline=deadline)
@@ -1503,7 +1517,16 @@ def prepare_candidate(expected, artifact):
     )
     validate_envelope(envelope, expected, envelope["project_directory"])
     report = cumulative_report(
-        history, expected, directory, selected, snapshot, candidate, proof, after, fixed
+        history,
+        expected,
+        directory,
+        selected,
+        snapshot,
+        candidate,
+        proof,
+        after,
+        fixed,
+        advisory_notes=config.get("advisoryNotes", {}),
     )
     if artifact.resolve() != artifact or artifact.is_relative_to(root):
         raise ValueError("Candidate artifacts must be outside the project checkout")

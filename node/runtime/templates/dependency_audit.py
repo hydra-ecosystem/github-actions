@@ -21,6 +21,7 @@ from urllib.parse import quote
 import yaml
 
 LOCAL_PATCHES = runpy.run_path(str(Path(__file__).parents[1] / "local_patches.py"))
+ADVISORY_NOTES = runpy.run_path(str(Path(__file__).parents[1] / "advisory_notes.py"))
 NODE_RELEASES = runpy.run_path(str(Path(__file__).parents[1] / "node_releases.py"))
 HISTORY = runpy.run_path(str(Path(__file__).parents[1] / "history.py"))
 REPAIR_CHOICES = runpy.run_path(str(Path(__file__).parents[1] / "repair_choices.py"))
@@ -3270,6 +3271,7 @@ def prepare(
     maintenance_mode="security-and-maintenance",
     upgrade_scope="major",
     local_patches=None,
+    advisory_notes=None,
     validate_only=False,
     prepare_only=False,
     platform=None,
@@ -3298,6 +3300,9 @@ def prepare(
             "Valid manifest, one deployment lockfile and package-manager policy are required"
         )
     declared_patches = LOCAL_PATCHES["validate_declarations"](local_patches or [])
+    advisory_notes = ADVISORY_NOTES["validate"](
+        {} if advisory_notes is None else advisory_notes
+    )
     scripts = initial_snapshot[2].get("scripts", {})
     if (
         not isinstance(validation_script, str)
@@ -3992,6 +3997,7 @@ def prepare(
     )
     if isinstance(after, str):
         report += f"{after}\n\n"
+    report += ADVISORY_NOTES["render"](after, advisory_notes)
     report += LOCAL_PATCHES["render"](patch_report)
     if initial_ids is not None and remaining_ids is not None:
         new_count = len(new_ids)
@@ -4479,11 +4485,18 @@ def main() -> None:
             or installed_manager.stdout.strip() != record["manager_version"]
         ):
             raise ValueError("Installed toolchain differs from sealed evidence")
+        project = runpy.run_path(str(Path(__file__).parents[1] / "project.py"))
+        config = (
+            project["CONFIGURATION"]["local_configuration"](Path.cwd())
+            if (Path.cwd() / ".github/node-maintenance.json").exists()
+            else {}
+        )
         report = prepare(
             directory,
             validation=validation,
             validate_only=True,
             validation_script=record["validation_script"],
+            advisory_notes=config.get("advisoryNotes", {}),
         )
         if node_plan is not None:
             node_proposal["verify_candidate"](Path.cwd().resolve(), node_plan)
@@ -4508,6 +4521,7 @@ def main() -> None:
         return
     try:
         patches = []
+        advisory_notes = {}
         node_plan = None
         if args.node_update is not None:
             node_proposal = runpy.run_path(
@@ -4525,6 +4539,7 @@ def main() -> None:
                 raise ValueError("Selected directory differs from the resolved project")
             resolved = json.loads(args.resolved_config.read_bytes())
             patches = resolved["configuration"].get("localPatches", [])
+            advisory_notes = resolved["configuration"].get("advisoryNotes", {})
         report = prepare(
             directory,
             validation=validation,
@@ -4533,6 +4548,7 @@ def main() -> None:
             maintenance_mode=args.maintenance_mode,
             upgrade_scope=args.upgrade_scope,
             local_patches=patches,
+            advisory_notes=advisory_notes,
             validate_only=args.validate_only,
             prepare_only=args.prepare_only,
             platform=NODE_RELEASES["collect"](node_plan),

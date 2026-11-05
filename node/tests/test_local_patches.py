@@ -598,7 +598,7 @@ def test_malformed_report_cannot_write_an_issue():
     assert not github.calls
 
 
-@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("changed", [None, "localPatches", "advisoryNotes"])
 def test_cli_freezes_assertions_and_comments_in_existing_configuration_snapshot(
     pnpm_project, monkeypatch, changed
 ):
@@ -609,6 +609,7 @@ def test_cli_freezes_assertions_and_comments_in_existing_configuration_snapshot(
         "directory": ".",
         "toolchain": {"node": "24"},
         "localPatches": [[ID, ASSERTION["comment"]]],
+        "advisoryNotes": {ID: "Deferred pending an upstream release."},
     }
     path.write_text(json.dumps(config))
     snapshot = root / "resolved.json"
@@ -617,6 +618,7 @@ def test_cli_freezes_assertions_and_comments_in_existing_configuration_snapshot(
     def prepare(directory, **kwargs):
         assert not changed
         assert kwargs["local_patches"] == config["localPatches"]
+        assert kwargs["advisory_notes"] == config["advisoryNotes"]
         kwargs["validation"].update(
             passed=True, audit_errors=[], local_patches=report()
         )
@@ -624,7 +626,9 @@ def test_cli_freezes_assertions_and_comments_in_existing_configuration_snapshot(
 
     monkeypatch.setitem(audit_module["main"].__globals__, "prepare", prepare)
     if changed:
-        config["localPatches"] = [ID]
+        config[changed] = (
+            [ID] if changed == "localPatches" else {ID: "Changed decision."}
+        )
         path.write_text(json.dumps(config))
     monkeypatch.chdir(root)
     monkeypatch.setattr(
