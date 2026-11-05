@@ -67,6 +67,12 @@ evidence. It does not prove patch application or security effectiveness, remove
 raw findings, or count as a confirmed security fix. See
 [declaring local patches](../docs/node-maintenance.md#local-security-patches).
 
+For decisions such as deferring an advisory, use project-local `advisoryNotes`
+instead of declaring a patch. These plain-text notes accompany matching current
+findings without changing evidence, severity, counts or repair eligibility. They
+are not inherited or duplicated into repair history. See
+[advisory notes](../docs/node-maintenance.md#advisory-notes).
+
 Upgrade audits attempt security fixes first, then routine stable upgrades.
 `maintenance.upgradeScope` limits routine **direct** upgrades to `patch`, `minor`
 (including patches), or `major` (the default, including both). Restricted scopes
