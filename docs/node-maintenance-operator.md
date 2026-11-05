@@ -211,8 +211,11 @@ Preparation checks out only the expected head without persisted credentials.
 It uses the configured toolchain, existing audit engine, release cooldown and
 parent/direct constraint evidence. Lifecycle and local/global pnpmfile hooks
 are disabled during metadata reads, audit and lockfile-only resolution.
-Unselected versions, unrelated lockfile metadata and changed peer suffixes
-fail preparation. No project validation script runs in this job.
+New unselected versions, unrelated lockfile metadata and changed peer suffixes
+fail preparation. Obsolete transitive versions may be removed only when the
+candidate has no remaining dependency or peer reference to them. Remaining
+unselected entries and edges must stay unchanged. No project validation script
+runs in this job.
 
 The preparation artifact contains exactly three regular files:
 

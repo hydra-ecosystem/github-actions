@@ -203,10 +203,27 @@ def check_scope(before, after, items):
     if expected != new:
         raise ValueError("The repair changed unapproved pnpm policy")
     versions = [ENGINE["locked_version_sets"](s[3]) for s in (before, after)]
+    old_versions, new_versions = versions
     selected = {item["name"]: item for item in items}
-    for name in versions[0].keys() | versions[1].keys():
-        if name not in selected and versions[0].get(name) != versions[1].get(name):
+    for name in old_versions.keys() | new_versions.keys():
+        if name not in selected and new_versions.get(name, set()) - old_versions.get(
+            name, set()
+        ):
             raise ValueError(f"The repair changed an unselected package: {name}")
+    removed = {
+        name: values - new_versions.get(name, set())
+        for name, values in old_versions.items()
+        if name not in selected
+    }
+    candidate_lock = yaml.safe_load(after[1]["pnpm-lock.yaml"])
+    for name, _, value in ENGINE["pnpm_locations"](candidate_lock):
+        references = [(name, value.split("(", 1)[0])]
+        for peer in re.findall(r"\(([^()]+)", value):
+            if "@" in peer:
+                peer_name, peer_version = peer.rsplit("@", 1)
+                references.append((peer_name, peer_version))
+        if any(version in removed.get(name, set()) for name, version in references):
+            raise ValueError("The repair removed a still-referenced package version")
     for item in items:
         if any(
             v.get(item["name"]) != {item[key]}
@@ -236,6 +253,9 @@ def check_scope(before, after, items):
             entries = lock.get(section, {})
             for key in list(entries):
                 name, separator, base = key.split("(", 1)[0].rpartition("@")
+                if separator and base in removed.get(name, set()):
+                    del entries[key]
+                    continue
                 if (
                     separator
                     and name in selected

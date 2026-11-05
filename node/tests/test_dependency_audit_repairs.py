@@ -428,12 +428,19 @@ def test_fresh_security_resolution_is_isolated_and_restores_failures(
         commands.append(args)
         if args[0] == "audit":
             return subprocess.CompletedProcess(command, 1, "5 advisories remain", "")
-        assert not (cwd / "pnpm-lock.yaml").exists()
+        assert (cwd / "pnpm-lock.yaml").exists()
+        assert args[:3] == ["update", "--no-save", "child"]
         assert "--ignore-scripts" in args and "--force" not in args
         assert "--config.optimistic-repeat-install=false" in args
-        modules = Path(args[args.index("--modules-dir") + 1])
+        modules = Path(
+            next(
+                a.split("=", 1)[1]
+                for a in args
+                if a.startswith("--config.modules-dir=")
+            )
+        )
         assert modules != cwd / "node_modules"
-        assert Path(args[args.index("--virtual-store-dir") + 1]) == modules / ".pnpm"
+        assert f"--config.virtual-store-dir={modules / '.pnpm'}" in args
         (cwd / "pnpm-lock.yaml").write_bytes(snapshot[1]["pnpm-lock.yaml"])
         if failure == "invalid":
             (cwd / "pnpm-lock.yaml").write_text("[")
@@ -442,18 +449,31 @@ def test_fresh_security_resolution_is_isolated_and_restores_failures(
         return subprocess.CompletedProcess(command, int(failure == "exit"), "", "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
+    monkeypatch.setitem(
+        module["fix_security"].__globals__, "describe_pnpm_fixes", lambda *a, **k: None
+    )
     notes = []
-    result = module["fix_security"](project, float("inf"), notes)
+    evidence = {
+        "package_manager": "pnpm",
+        "vulnerabilities": {
+            "child": {
+                "via": [
+                    {"fixVersion": "1.0.1", "_verifiedVulnerableVersions": ["1.0.0"]}
+                ]
+            }
+        },
+    }
+    result = module["fix_security"](project, float("inf"), notes, before=evidence)
     assert result.returncode == (1 if failure else 0)
     assert len(commands) == 2
     if failure:
         assert (project / "pnpm-lock.yaml").read_bytes() == snapshot[1][
             "pnpm-lock.yaml"
         ]
-        assert "regeneration failed" in notes[0]
+        assert "refresh failed" in notes[0]
     else:
         assert "child@1.0.1" in module["valid_snapshot"](project)[3]["packages"]
-        assert "Regenerated" in notes[0]
+        assert "Refreshed" in notes[0]
 
 
 def test_weakened_policy_prevents_fresh_resolution(project, monkeypatch):
@@ -674,7 +694,9 @@ def test_security_resolution_uses_verified_published_patch(
             return subprocess.CompletedProcess(command, 1, json.dumps(response), "")
         if args[0] == "view":
             value, code = ["4.3.0"], 0
-            if args[1] == "child@>=4.2.1" and metadata == "unavailable":
+            if args[1] == "child@4.2.0 <=4.2.0":
+                value = ["4.2.0"]
+            elif args[1] == "child@>=4.2.1" and metadata == "unavailable":
                 value, code = {"error": {"code": "ETIMEDOUT"}}, 1
             elif args[1] == "child@>=4.2.1" and metadata == "mutated":
                 policy = yaml.safe_load(workspace.read_bytes())
@@ -689,7 +711,8 @@ def test_security_resolution_uses_verified_published_patch(
             elif args[1] == "child@~4.2.0 >=4.2.1":
                 value = []
             return subprocess.CompletedProcess(command, code, json.dumps(value), "")
-        assert args[0] == "install" and "--ignore-scripts" in args
+        assert args[:3] == ["update", "--no-save", "child"]
+        assert "--ignore-scripts" in args
         exclusions = yaml.safe_load(workspace.read_bytes())["minimumReleaseAgeExclude"]
         assert "child@4.2.1" not in exclusions
         assert ("child@4.3.0" in exclusions) == (metadata == "published")
@@ -705,11 +728,19 @@ def test_security_resolution_uses_verified_published_patch(
     initial_audit = {
         "package_manager": "pnpm",
         "vulnerabilities": {
-            "child": {"via": [{"patchedRange": ">=4.2.1", "nodes": ["child@4.2.0"]}]}
+            "child": {
+                "via": [
+                    {
+                        "patchedRange": ">=4.2.1",
+                        "range": "<=4.2.0",
+                        "nodes": ["child@4.2.0"],
+                    }
+                ]
+            }
         },
     }
     result = module["fix_security"](project, float("inf"), notes, before=initial_audit)
-    assert result.returncode == 0
+    assert result.returncode == (0 if metadata == "published" else 1)
     assert not module["restore_invalid_state"](
         project, before, notes, "Security fix", security_fix=True
     )
@@ -720,7 +751,10 @@ def test_security_resolution_uses_verified_published_patch(
     assert yaml.safe_load(workspace.read_bytes())["blockExoticSubdeps"] is True
     assert commands.index(
         ["audit", "--fix=update", "--audit-level", "info", "--ignore-scripts"]
-    ) < next(i for i, args in enumerate(commands) if args[0] == "install")
+    ) < next(
+        (i for i, args in enumerate(commands) if args[0] == "update"), len(commands)
+    )
+    assert any(args[0] == "update" for args in commands) is (metadata == "published")
 
 
 @pytest.mark.parametrize("fix_exit", [0, 1])
@@ -923,6 +957,7 @@ def test_security_resolution_retains_verified_already_applied_patch(
                             else ">=1.0.1"
                         ),
                         "nodes": ["child@1.0.0"],
+                        "range": "<=1.0.0",
                     }
                 ]
             }
@@ -965,14 +1000,16 @@ def test_security_resolution_retains_verified_already_applied_patch(
             return subprocess.CompletedProcess(command, 1, json.dumps(response), "")
         if args[0] == "view":
             value, code = "1.0.1", 0
-            if args[1] in ("parent@1.0.0", "other-parent@1.0.0"):
+            if args[1] == "child@1.0.0 <=1.0.0":
+                value = "1.0.0"
+            elif args[1] in ("parent@1.0.0", "other-parent@1.0.0"):
                 value = {"dependencies": {"child": "^1.0.0"}}
             elif metadata == "unavailable":
                 value, code = {"error": {"code": "ETIMEDOUT"}}, 1
             elif metadata == "unrelated-target":
                 value = "2.0.0" if args[1] == "child@>=2.0.0" else []
             return subprocess.CompletedProcess(command, code, json.dumps(value), "")
-        assert args[0] == "install"
+        assert args[:3] == ["update", "--no-save", "child"]
         exclusions = yaml.safe_load(workspace.read_bytes())["minimumReleaseAgeExclude"]
         assert ("child@1.0.1" in exclusions) == retained
         lockfile.write_bytes(before[1]["pnpm-lock.yaml"])
@@ -981,17 +1018,14 @@ def test_security_resolution_retains_verified_already_applied_patch(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
-    assert (
-        module["fix_security"](
-            project,
-            float("inf"),
-            [],
-            before="Initial audit unavailable"
-            if metadata == "missing-initial"
-            else initial_audit,
-        ).returncode
-        == 0
-    )
+    assert module["fix_security"](
+        project,
+        float("inf"),
+        [],
+        before="Initial audit unavailable"
+        if metadata == "missing-initial"
+        else initial_audit,
+    ).returncode == (0 if retained and not already_locked else 1)
     assert not module["restore_invalid_state"](
         project, before, [], "Security fix", security_fix=True
     )
