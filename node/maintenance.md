@@ -31,7 +31,10 @@ or remove project overrides automatically.
 
 When pnpm's initial security fix leaves findings, the engine keeps the lockfile
 and refreshes named packages with verified compatible patches. It does not
-regenerate every dependency. A package name with both safe and vulnerable locked
+regenerate every dependency. It rebuilds only verified vulnerable package and
+snapshot records, retaining parent references and all other locked records.
+This prevents a shared parent's stale snapshot from replacing a resolved patch.
+A package name with both safe and vulnerable locked
 versions is not targeted, because that command would also update the safe
 instances. The final audit and unrelated-change guard still decide whether the
 proposal can be retained.
