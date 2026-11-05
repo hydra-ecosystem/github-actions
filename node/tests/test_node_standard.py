@@ -1427,13 +1427,7 @@ def test_info_advisory_is_reported_and_fix_attempt_includes_info(
         ],
         ["audit", "--fix=update", "--audit-level", "info", "--ignore-scripts"],
     ]
-    resolution = next(args for args in commands[2:] if args[0] == "install")
-    assert resolution[:4] == [
-        "install",
-        "--lockfile-only",
-        "--no-frozen-lockfile",
-        "--ignore-scripts",
-    ]
+    assert not any(args[0] in {"install", "update"} for args in commands[2:])
     lock = audit_module["valid_snapshot"](pnpm_project)[3]
     for report in (format_remaining_audit(data, lock), format_audit(data, lock)):
         for detail in (

@@ -268,7 +268,6 @@ def test_stable_install_restores_security_snapshot_after_direct_lock_downgrade(
             fixes += 1
             if fixes == 1:
                 set_lock("1.0.5")
-                code = 1
             else:
                 code = 1
         elif args[0] == "view":
@@ -280,8 +279,6 @@ def test_stable_install_restores_security_snapshot_after_direct_lock_downgrade(
         elif args[0] == "install" and "--lockfile-only" in args:
             installs += 1
             if installs == 1:
-                set_lock("1.0.5")
-            elif installs == 2:
                 set_lock("1.0.4")
             else:
                 code = 1
@@ -293,6 +290,7 @@ def test_stable_install_restores_security_snapshot_after_direct_lock_downgrade(
     for name, content in security_files.items():
         assert (project / name).read_bytes() == content
     assert fixes == 1
+    assert installs == 1
     assert "Stable upgrade resolution failed (exit 0)" in report
     assert (
         "restored the manifest and lockfile from the initial security fix attempt"

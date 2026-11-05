@@ -268,12 +268,19 @@ def test_fresh_security_resolution_is_isolated_and_restores_failures(
         commands.append(args)
         if args[0] == "audit":
             return subprocess.CompletedProcess(command, 1, "5 advisories remain", "")
-        assert not (cwd / "pnpm-lock.yaml").exists()
+        assert (cwd / "pnpm-lock.yaml").exists()
+        assert args[:3] == ["update", "--no-save", "child"]
         assert "--ignore-scripts" in args and "--force" not in args
         assert "--config.optimistic-repeat-install=false" in args
-        modules = Path(args[args.index("--modules-dir") + 1])
+        modules = Path(
+            next(
+                a.split("=", 1)[1]
+                for a in args
+                if a.startswith("--config.modules-dir=")
+            )
+        )
         assert modules != cwd / "node_modules"
-        assert Path(args[args.index("--virtual-store-dir") + 1]) == modules / ".pnpm"
+        assert f"--config.virtual-store-dir={modules / '.pnpm'}" in args
         (cwd / "pnpm-lock.yaml").write_bytes(snapshot[1]["pnpm-lock.yaml"])
         if failure == "invalid":
             (cwd / "pnpm-lock.yaml").write_text("[")
@@ -282,17 +289,30 @@ def test_fresh_security_resolution_is_isolated_and_restores_failures(
         return subprocess.CompletedProcess(command, int(failure == "exit"), "", "")
 
     monkeypatch.setattr(subprocess, "run", invoke)
+    monkeypatch.setitem(
+        module["fix_security"].__globals__, "describe_pnpm_fixes", lambda *a, **k: None
+    )
     notes = []
-    module["fix_security"](project, float("inf"), notes)
+    evidence = {
+        "package_manager": "pnpm",
+        "vulnerabilities": {
+            "child": {
+                "via": [
+                    {"fixVersion": "1.0.1", "_verifiedVulnerableVersions": ["1.0.0"]}
+                ]
+            }
+        },
+    }
+    module["fix_security"](project, float("inf"), notes, before=evidence)
     assert len(commands) == 2
     if failure:
         assert (project / "pnpm-lock.yaml").read_bytes() == snapshot[1][
             "pnpm-lock.yaml"
         ]
-        assert "regeneration failed" in notes[0]
+        assert "refresh failed" in notes[0]
     else:
         assert "child@1.0.1" in module["valid_snapshot"](project)[3]["packages"]
-        assert "Regenerated" in notes[0]
+        assert "Refreshed" in notes[0]
 
 
 def test_weakened_policy_prevents_fresh_resolution(project, monkeypatch):

@@ -29,6 +29,13 @@ retain changes only when before/after audit evidence confirms a security fix;
 unrelated changes are discarded. The engine does not force incompatible upgrades
 or remove project overrides automatically.
 
+When pnpm's initial security fix leaves findings, the engine keeps the lockfile
+and refreshes named packages with verified compatible patches. It does not
+regenerate every dependency. A package name with both safe and vulnerable locked
+versions is not targeted, because that command would also update the safe
+instances. The final audit and unrelated-change guard still decide whether the
+proposal can be retained.
+
 Node runtime updates use Node's official release index, independently of package
 advisory counts. A Node-only security update can therefore open a PR when no npm
 or pnpm dependency fix is available. Reports show the original declaration, the

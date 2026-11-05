@@ -969,7 +969,7 @@ def test_security_only_rejects_unseparable_independent_direct_upgrade(
             value["importers"]["."]["dependencies"]["renderer"]["version"] = "1.3.0"
             lock_path.write_text(yaml.safe_dump(value))
             return subprocess.CompletedProcess(args, 1, "", "")
-        if args[0] == "install" and "--lockfile-only" in args:
+        if args[0] == "update" and "--lockfile-only" in args:
             value = yaml.safe_load(yaml.safe_dump(resolution_base))
             value["importers"]["."]["dependencies"]["renderer"]["version"] = "1.3.0"
             value["importers"]["."]["dependencies"]["unaffected"]["version"] = "1.1.0"
@@ -989,9 +989,13 @@ def test_security_only_rejects_unseparable_independent_direct_upgrade(
 
     monkeypatch.setitem(helper["prepare"].__globals__, "run", invoke)
     monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
-    monkeypatch.setitem(
-        helper["prepare"].__globals__, "describe_pnpm_fixes", lambda *a, **k: None
-    )
+
+    def describe(directory, findings, *args, **kwargs):
+        for detail in findings["vulnerabilities"].get("renderer", {}).get("via", []):
+            detail["fixVersion"] = "1.3.0"
+            detail["_verifiedVulnerableVersions"] = ["1.2.3"]
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "describe_pnpm_fixes", describe)
     report = helper["prepare"](site, maintenance_mode="security-only")
     final = helper["valid_snapshot"](site)
     assert helper["direct_versions"](final) == helper["direct_versions"](original)
@@ -1131,7 +1135,7 @@ def test_security_only_rejects_an_affected_direct_without_a_confirmed_fix(
             )
         if (
             package_manager == "pnpm"
-            and args[0] == "install"
+            and args[0] == "update"
             and "--lockfile-only" in args
         ):
             write_fixed_lock()
@@ -1139,9 +1143,12 @@ def test_security_only_rejects_an_affected_direct_without_a_confirmed_fix(
 
     monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
     monkeypatch.setitem(helper["prepare"].__globals__, "run", invoke)
-    monkeypatch.setitem(
-        helper["prepare"].__globals__, "describe_pnpm_fixes", lambda *a, **k: None
-    )
+
+    def describe(directory, findings, *args, **kwargs):
+        for detail in findings["vulnerabilities"].get("fixed", {}).get("via", []):
+            detail["fixVersion"] = "1.1.0"
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "describe_pnpm_fixes", describe)
     monkeypatch.setitem(
         helper["prepare"].__globals__, "describe_npm_fixes", lambda *a, **k: None
     )
@@ -1354,7 +1361,7 @@ def test_security_only_retains_a_required_direct_parent_for_a_confirmed_fix(
             )
         if (
             package_manager == "pnpm"
-            and args[0] == "install"
+            and args[0] == "update"
             and "--lockfile-only" in args
         ):
             write_fixed_lock()
@@ -1362,9 +1369,12 @@ def test_security_only_retains_a_required_direct_parent_for_a_confirmed_fix(
 
     monkeypatch.setitem(helper["prepare"].__globals__, "audit", audit)
     monkeypatch.setitem(helper["prepare"].__globals__, "run", invoke)
-    monkeypatch.setitem(
-        helper["prepare"].__globals__, "describe_pnpm_fixes", lambda *a, **k: None
-    )
+
+    def describe(directory, findings, *args, **kwargs):
+        for detail in findings["vulnerabilities"].get("child", {}).get("via", []):
+            detail["fixVersion"] = "1.1.0"
+
+    monkeypatch.setitem(helper["prepare"].__globals__, "describe_pnpm_fixes", describe)
     monkeypatch.setitem(
         helper["prepare"].__globals__, "describe_npm_fixes", lambda *a, **k: None
     )
@@ -1653,14 +1663,17 @@ def test_security_only_allows_related_transitive_lockfile_changes(site):
     assert helper["security_only_direct_violation"](before, after, {"renderer"}) is None
 
 
-def test_security_only_discards_disjoint_transitive_regeneration(site, monkeypatch):
+@pytest.mark.parametrize("unrelated_churn", [False, True])
+def test_security_only_refresh_keeps_fixes_without_disjoint_churn(
+    site, monkeypatch, unrelated_churn
+):
     manifest = json.loads((site / "package.json").read_text())
     manifest["dependencies"] = {"renderer": "^1.2.3", "carrier": "1.0.0"}
     (site / "package.json").write_text(json.dumps(manifest))
 
-    def write_lock(fixed):
+    def write_lock(fixed, *, churn=False):
         renderer = "1.3.0" if fixed else "1.2.3"
-        unrelated = "2.1.0" if fixed else "2.0.0"
+        unrelated = "2.1.0" if churn else "2.0.0"
         lock = {
             "lockfileVersion": "9.0",
             "importers": {
@@ -1694,9 +1707,9 @@ def test_security_only_discards_disjoint_transitive_regeneration(site, monkeypat
         commands.append(args)
         if args[:2] == ("audit", "--fix=update"):
             return subprocess.CompletedProcess(args, 1, "", "")
-        if args[:2] == ("install", "--lockfile-only"):
-            assert not (site / "pnpm-lock.yaml").exists()
-            write_lock(True)
+        if args[:2] == ("update", "--no-save"):
+            assert "renderer" in args and "unrelated" not in args
+            write_lock(True, churn=unrelated_churn)
         if args[:2] == ("audit", "--json"):
             fixed = (
                 "renderer@1.3.0"
@@ -1747,8 +1760,9 @@ def test_security_only_discards_disjoint_transitive_regeneration(site, monkeypat
     assert "unrelated@2.0.0" in lock["packages"]
     assert "unrelated@2.1.0" not in lock["packages"]
     assert validation["passed"]
-    assert "Discarded dependency changes" in report
-    assert any(args[:2] == ("install", "--lockfile-only") for args in commands)
+    assert ("renderer@1.3.0" in lock["packages"]) is not unrelated_churn
+    assert ("Discarded dependency changes" in report) is unrelated_churn
+    assert not any(args[:2] == ("install", "--lockfile-only") for args in commands)
 
 
 @pytest.mark.parametrize("update_renderer_child", [False, True])
@@ -1825,8 +1839,8 @@ def test_security_only_rejects_disjoint_peer_context_transitive_regeneration(
         commands.append(args)
         if args[:2] == ("audit", "--fix=update"):
             return subprocess.CompletedProcess(args, 1, "", "")
-        if args[:2] == ("install", "--lockfile-only"):
-            assert not (site / "pnpm-lock.yaml").exists()
+        if args[:2] == ("update", "--no-save"):
+            assert (site / "pnpm-lock.yaml").exists()
             write_lock(True)
         if args[:2] == ("audit", "--json"):
             fixed = (
@@ -1880,7 +1894,7 @@ def test_security_only_rejects_disjoint_peer_context_transitive_regeneration(
     assert "intermediate@2.0.0(peer@2.0.0)" in final["snapshots"]
     assert validation["passed"]
     assert "Discarded dependency changes" in report
-    assert any(args[:2] == ("install", "--lockfile-only") for args in commands)
+    assert any(args[:2] == ("update", "--no-save") for args in commands)
 
 
 @pytest.mark.parametrize("nested", [False, True])
