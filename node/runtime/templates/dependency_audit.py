@@ -830,22 +830,45 @@ def fix_security(
             return result
         current = valid_snapshot(directory)
         assert current is not None
-        # pnpm can reintroduce vulnerable pins during automatic peer resolution.
-        # A fresh compatible resolution avoids those pins, including the installed
-        # virtual store's lockfile, without adding overrides or running scripts.
-        (directory / "pnpm-lock.yaml").unlink()
+        # Refresh verified security targets without deleting the lockfile:
+        # a full regeneration also moves unrelated dependencies. A name selector
+        # updates every installed version, so retain mixed safe/vulnerable names.
+        targets = []
+        verified_names = {item.rpartition("@")[0] for item in verified}
+        for name, vulnerability in original["vulnerabilities"].items():
+            if name not in verified_names or not re.fullmatch(
+                REPAIR_CHOICES["PACKAGE"], name
+            ):
+                continue
+            locked = {
+                version.split("(", 1)[0]
+                for version in package_paths(snapshot[3], name, "pnpm").values()
+            }
+            vulnerable = {
+                version
+                for detail in vulnerability["via"]
+                for version in detail.get("_verifiedVulnerableVersions", [])
+            }
+            if locked and locked <= vulnerable:
+                targets.append(name)
+        if not targets:
+            if not verified:
+                restore_snapshot(directory, snapshot)
+            diagnostics.append(
+                "Skipped pnpm security refresh: no verified wholly vulnerable package targets."
+            )
+            return result
         with TemporaryDirectory(prefix="dependency-audit-resolution-") as modules:
             resolved = run(
                 directory,
-                "install",
+                "update",
+                "--no-save",
+                *sorted(targets),
                 "--lockfile-only",
-                "--no-frozen-lockfile",
                 "--ignore-scripts",
                 "--config.optimistic-repeat-install=false",
-                "--modules-dir",
-                modules,
-                "--virtual-store-dir",
-                str(Path(modules) / ".pnpm"),
+                f"--config.modules-dir={modules}",
+                f"--config.virtual-store-dir={Path(modules) / '.pnpm'}",
                 deadline=deadline,
             )
         failed = bool(resolved.returncode) or valid_snapshot(directory) is None
@@ -853,10 +876,10 @@ def fix_security(
             restore_snapshot(directory, current)
         if notes is not None:
             notes.append(
-                "Regenerated the pnpm lockfile within existing manifest constraints "
+                "Refreshed verified pnpm security targets within existing constraints "
                 "using isolated module metadata after audit --fix=update left findings."
                 if not failed
-                else f"Compatible lockfile regeneration failed (exit {resolved.returncode}); "
+                else f"Targeted security refresh failed (exit {resolved.returncode}); "
                 "restored the preceding security-fix proposal."
             )
         return result if failed else resolved
