@@ -833,7 +833,7 @@ def fix_security(
         # Refresh verified security targets without deleting the lockfile:
         # a full regeneration also moves unrelated dependencies. A name selector
         # updates every installed version, so retain mixed safe/vulnerable names.
-        targets = []
+        targets = {}
         verified_names = {item.rpartition("@")[0] for item in verified}
         for name, vulnerability in original["vulnerabilities"].items():
             if name not in verified_names or not re.fullmatch(
@@ -850,7 +850,7 @@ def fix_security(
                 for version in detail.get("_verifiedVulnerableVersions", [])
             }
             if locked and locked <= vulnerable:
-                targets.append(name)
+                targets[name] = vulnerable
         if not targets:
             if not verified:
                 restore_snapshot(directory, snapshot)
@@ -858,6 +858,16 @@ def fix_security(
                 "Skipped pnpm security refresh: no verified wholly vulnerable package targets."
             )
             return result
+        # A shared parent can reuse a vulnerable snapshot after another path
+        # resolves its patch. Rebuild only proven vulnerable target records;
+        # retain parent references so pnpm still applies their constraints.
+        lock = yaml.safe_load(current[1]["pnpm-lock.yaml"])
+        for section in ("packages", "snapshots"):
+            for key in list(lock.get(section, {})):
+                name, _, version = key.split("(", 1)[0].rpartition("@")
+                if version in targets.get(name, set()):
+                    del lock[section][key]
+        (directory / "pnpm-lock.yaml").write_text(yaml.safe_dump(lock, sort_keys=False))
         with TemporaryDirectory(prefix="dependency-audit-resolution-") as modules:
             resolved = run(
                 directory,
