@@ -209,6 +209,13 @@ run to exercise installation, project checks, and publication.
 
 ## Change the weekly schedule
 
+This repository also runs its setup check after pushes to `main` that change
+`.github/workflows/node-*.yml`, `node/**`, `defaults/node-maintenance.json`, or
+`defaults/node-repositories.json`. These triggers observe changes in this host;
+the periodic scan still covers changes in the listed repositories. Other hosts
+can add a push trigger for their own workflow and inventory paths while keeping
+their existing schedule and manual trigger.
+
 This repository checks its inventory every Monday at 03:00 UTC (11:00 in
 Singapore). The caller example above uses the same weekly schedule.
 To change it, edit the `schedule` block in the host workflow:
@@ -220,8 +227,8 @@ To change it, edit the `schedule` block in the host workflow:
   workflow_dispatch:
 ```
 
-Remove the `schedule` block to run only manually. Keep `workflow_dispatch` for
-on-demand checks. A reusable workflow uses its caller's schedule; it does not
-inherit this repository's cron. This schedule is independent of the security
-and upgrade cadences in each maintenance installation; do not add the fleet
+Remove the `schedule` and `push` blocks, if present, to run only manually. Keep
+`workflow_dispatch` for on-demand checks. A reusable workflow uses its caller's
+schedule; it does not inherit this repository's cron. This schedule is independent
+of the security and upgrade cadences in each maintenance installation; do not add the fleet
 cron to those installations' maintenance configuration.

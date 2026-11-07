@@ -786,7 +786,18 @@ def test_workflow_splits_read_access_and_host_issue_write_access():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/node-fleet-check.yml").read_text()
     )
-    assert {"workflow_call", "workflow_dispatch", "schedule"} == set(workflow["on"])
+    assert {"workflow_call", "workflow_dispatch", "schedule", "push"} == set(
+        workflow["on"]
+    )
+    assert workflow["on"]["push"] == {
+        "branches": ["main"],
+        "paths": [
+            ".github/workflows/node-*.yml",
+            "defaults/node-maintenance.json",
+            "defaults/node-repositories.json",
+            "node/**",
+        ],
+    }
     assert workflow["on"]["schedule"] == [{"cron": "0 3 * * 1"}]
     assert workflow["name"] == "Node maintenance setup check"
     assert workflow["jobs"]["check"]["steps"][0]["with"]["inventory-path"] == (
