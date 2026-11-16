@@ -1,0 +1,9 @@
+{
+  "ignore_dirs": [
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "temp"
+  ]
+}
