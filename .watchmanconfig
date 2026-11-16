@@ -1,0 +1,11 @@
+{
+  "ignore_dirs": [
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node/runtime/__pycache__",
+    "node/tests/__pycache__",
+    "temp"
+  ]
+}

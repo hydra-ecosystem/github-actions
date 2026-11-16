@@ -65,6 +65,21 @@ All three source fields are required. Change `repository` and `path` to use your
 own file. `ref` can be a branch, tag, or full commit SHA. Sources are fetched
 without credentials; private defaults repositories are not supported.
 
+Fetching each source allows up to three attempts within a 90-second retry
+budget, with a socket inactivity timeout of at most 15 seconds. The budget
+limits retries, not total transfer time; a slowly arriving response body can
+exceed it. Only HTTP 429, identified
+HTTP 403 throttling, and HTTP 500/502/503/504 are retried. Retries honor
+`Retry-After` and exhausted-quota reset times. Without a server delay,
+throttling waits 60 seconds and server errors wait one second. A delay beyond
+the remaining budget stops immediately with a retry-later diagnostic.
+Other access errors and redirects stop without retry or a source fallback.
+
+HTTP failures retain a bounded GitHub JSON error message, rate-limit headers,
+`Retry-After`, and the GitHub request ID for diagnosis. Other response headers
+and non-JSON response bodies are not copied into reports. A fetch failure
+does not by itself show that the project's declarations are invalid.
+
 **Replace the basic setup's explicit policy fields rather than appending this
 source to them.** Local fields keep overriding the source. In particular, the
 basic `security-only` mode conflicts with inherited nonempty upgrade schedules.
