@@ -66,7 +66,9 @@ own file. `ref` can be a branch, tag, or full commit SHA. Sources are fetched
 without credentials; private defaults repositories are not supported.
 
 Fetching each source allows up to three attempts within a 90-second retry
-budget, with a request timeout of at most 15 seconds. Only HTTP 429, identified
+budget, with a socket inactivity timeout of at most 15 seconds. The budget
+limits retries, not total transfer time; a slowly arriving response body can
+exceed it. Only HTTP 429, identified
 HTTP 403 throttling, and HTTP 500/502/503/504 are retried. Retries honor
 `Retry-After` and exhausted-quota reset times. Without a server delay,
 throttling waits 60 seconds and server errors wait one second. A delay beyond
