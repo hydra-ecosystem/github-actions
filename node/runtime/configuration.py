@@ -1,11 +1,14 @@
 """Resolve public GitHub defaults as bounded JSON data, without credentials."""
 
+import http.client
 import json
 import re
 import runpy
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 SCHEDULING = runpy.run_path(str(Path(__file__).with_name("scheduling.py")))
@@ -16,6 +19,8 @@ MAX_BYTES = 65536
 MAX_SOURCES = 8
 SHARED_KEYS = {"toolchain", "maintenance", "minimumReleaseAgeDays", "schedule"}
 LOCAL_KEYS = {"directory", "validationScript", "localPatches", "advisoryNotes"}
+FETCH_ATTEMPTS = 3
+FETCH_BUDGET = 90
 
 
 def json_object(data, location, max_bytes=MAX_BYTES):
@@ -124,29 +129,100 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def http_failure(error):
+    def clean(value, limit):
+        return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value))[:limit]
+
+    retained = {
+        key.lower(): clean(value, 128)
+        for key, value in (error.headers or {}).items()
+        if key.lower()
+        in {
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset",
+            "x-ratelimit-resource",
+            "retry-after",
+            "x-github-request-id",
+        }
+    }
+    message = ""
+    try:
+        body = json.loads(error.read(4096))
+        if isinstance(body, dict) and isinstance(body.get("message"), str):
+            message = clean(body["message"], 512)
+    except (OSError, http.client.HTTPException, ValueError, RecursionError):
+        pass
+    finally:
+        error.close()
+    detail = f"HTTP {error.code}"
+    if message:
+        detail += f"; GitHub message: {message}"
+    detail += "".join(f"; {key}={value}" for key, value in retained.items())
+
+    now = time.time()
+    delays = []
+    retry_after = retained.get("retry-after", "")
+    if retry_after.isascii() and retry_after.isdigit():
+        delays.append(int(retry_after))
+    elif retry_after:
+        try:
+            delays.append(parsedate_to_datetime(retry_after).timestamp() - now)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    exhausted = retained.get("x-ratelimit-remaining") == "0"
+    reset = retained.get("x-ratelimit-reset", "")
+    if exhausted and reset.isascii() and reset.isdigit():
+        delays.append(int(reset) - now + 1)
+    throttled = error.code == 429 or (
+        error.code == 403
+        and (
+            exhausted
+            or any(
+                marker in message.lower()
+                for marker in ("api rate limit exceeded", "secondary rate limit")
+            )
+            or bool(delays)
+        )
+    )
+    if throttled or error.code in {500, 502, 503, 504}:
+        return detail, max(1, max(delays) if delays else (60 if throttled else 1))
+    return detail, None
+
+
 def public_read(url, accept="application/json"):
     # Never attach GITHUB_TOKEN: only public sources are supported. Redirects
     # fail rather than sending a request to a different origin or repository.
     request = urllib.request.Request(
         url, headers={"Accept": accept, "User-Agent": "node-audit-shared-defaults"}
     )
-    try:
-        with urllib.request.build_opener(NoRedirect()).open(
-            request, timeout=15
-        ) as response:
-            data = response.read(MAX_BYTES + 1)
-    except urllib.error.HTTPError as error:
-        raise ValueError(
-            f"Cannot read public defaults source {url}: HTTP {error.code}; "
-            "check public access, repository, path and ref"
-        ) from error
-    except (OSError, urllib.error.URLError) as error:
-        raise ValueError(
-            f"Cannot read public defaults source {url}: {error}"
-        ) from error
-    if len(data) > MAX_BYTES:
-        raise ValueError(f"{url}: defaults response exceeds {MAX_BYTES} bytes")
-    return data
+    deadline = time.monotonic() + FETCH_BUDGET
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(
+                request, timeout=min(15, max(0.001, deadline - time.monotonic()))
+            ) as response:
+                data = response.read(MAX_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            detail, delay = http_failure(error)
+            if delay is not None:
+                if attempt < FETCH_ATTEMPTS and delay < deadline - time.monotonic():
+                    time.sleep(delay)
+                    if time.monotonic() < deadline:
+                        continue
+                advice = f"remote service unavailable or throttled; retry later (stopped after {attempt} attempts within the {FETCH_BUDGET}s retry budget)"
+            else:
+                advice = "check public access, repository, path and ref"
+            raise ValueError(
+                f"Cannot read public defaults source {url}: {detail}; {advice}"
+            ) from error
+        except (OSError, urllib.error.URLError) as error:
+            raise ValueError(
+                f"Cannot read public defaults source {url}: {error}"
+            ) from error
+        if len(data) > MAX_BYTES:
+            raise ValueError(f"{url}: defaults response exceeds {MAX_BYTES} bytes")
+        return data
 
 
 def merge_shared(inherited, explicit, *, inherit_schedule=True):

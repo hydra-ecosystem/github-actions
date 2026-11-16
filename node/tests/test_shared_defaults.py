@@ -1,3 +1,5 @@
+import io
+import http.client
 import json
 import re
 import runpy
@@ -5,6 +7,7 @@ import subprocess
 import sys
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -528,18 +531,269 @@ def test_public_download_never_uses_tokens_and_bounds_responses(monkeypatch):
     assert "Authorization" not in requests[0].headers
 
 
-def test_http_failure_is_actionable_without_a_fallback(monkeypatch):
+@pytest.mark.parametrize("status", [302, 401, 403, 404, 501])
+def test_http_failure_is_actionable_without_a_fallback(monkeypatch, status):
     client = runpy.run_path(str(RUNTIME / "configuration.py"))
+    calls = []
 
     class Opener:
         def open(self, request, timeout):
-            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, status, "denied", {}, None)
 
     monkeypatch.setattr(
         client["urllib"].request, "build_opener", lambda handler: Opener()
     )
-    with pytest.raises(ValueError, match="HTTP 404.*public access"):
+    with pytest.raises(ValueError, match=rf"HTTP {status}.*public access"):
         client["public_read"]("https://api.github.com/example")
+    assert calls == ["https://api.github.com/example"]
+
+
+@pytest.fixture
+def fetch_clock(monkeypatch):
+    client = runpy.run_path(str(RUNTIME / "configuration.py"))
+    clock, sleeps = [1000.0], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setitem(
+        client["public_read"].__globals__,
+        "time",
+        SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0], sleep=sleep),
+    )
+    return client, clock, sleeps
+
+
+@pytest.mark.parametrize(
+    "status,headers,message,delay",
+    [
+        (500, {}, "", 1),
+        (502, {}, "", 1),
+        (503, {"Retry-After": "2"}, "", 2),
+        (504, {}, "", 1),
+        (429, {}, "", 60),
+        (429, {"Retry-After": "invalid"}, "", 60),
+        (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1004"}, "", 5),
+        (403, {"Retry-After": "4"}, "", 4),
+        (403, {}, "You have exceeded a secondary rate limit", 60),
+        (503, {"Retry-After": "Thu, 01 Jan 1970 00:16:44 GMT"}, "", 4),
+    ],
+)
+def test_public_fetch_recovers_without_credentials_or_source_fallback(
+    monkeypatch, fetch_clock, status, headers, message, delay
+):
+    client, _, sleeps = fetch_clock
+    requests = []
+    failure_body = io.BytesIO(json.dumps({"message": message}).encode())
+
+    class Opener:
+        def open(self, request, timeout):
+            assert 0 < timeout <= 15
+            requests.append(request)
+            if len(requests) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url, status, "failed", headers, failure_body
+                )
+            return io.BytesIO(b"{}")
+
+    def opener(handler):
+        assert isinstance(handler, client["NoRedirect"])
+        return Opener()
+
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-be-sent")
+    monkeypatch.setattr(client["urllib"].request, "build_opener", opener)
+    assert client["public_read"]("https://api.github.com/example") == b"{}"
+    assert sleeps == [delay]
+    assert len(requests) == 2
+    assert all(
+        request.full_url == "https://api.github.com/example" for request in requests
+    )
+    assert all(request.get_header("Authorization") is None for request in requests)
+    assert failure_body.closed
+
+
+def truncated_error_response(status, headers):
+    reasons = {404: "Not Found", 503: "Service Unavailable"}
+    header_lines = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    payload = (
+        f"HTTP/1.1 {status} {reasons[status]}\r\n"
+        f"Transfer-Encoding: chunked\r\n{header_lines}\r\n4\r\noo"
+    ).encode()
+
+    class InMemorySocket:
+        def makefile(self, mode):
+            assert mode == "rb"
+            return io.BytesIO(payload)
+
+    response = http.client.HTTPResponse(InMemorySocket())
+    response.begin()
+    return response
+
+
+def test_public_fetch_recovers_after_truncated_chunked_error(monkeypatch, fetch_clock):
+    client, _, sleeps = fetch_clock
+    calls = []
+    failed_responses = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                response = truncated_error_response(503, {"Retry-After": "1"})
+                failed_responses.append(response)
+                raise urllib.error.HTTPError(
+                    request.full_url, 503, "failed", response.headers, response
+                )
+            return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(
+        client["urllib"].request, "build_opener", lambda handler: Opener()
+    )
+    assert client["public_read"]("https://api.github.com/example") == b"{}"
+    assert calls == ["https://api.github.com/example"] * 2
+    assert sleeps == [1]
+    assert failed_responses[0].closed
+
+
+def test_public_fetch_caps_retries_after_persistent_truncated_chunked_error(
+    monkeypatch, fetch_clock
+):
+    client, _, sleeps = fetch_clock
+    calls = []
+    failed_responses = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            response = truncated_error_response(
+                503,
+                {"Retry-After": "2", "X-GitHub-Request-Id": "request-id"},
+            )
+            failed_responses.append(response)
+            raise urllib.error.HTTPError(
+                request.full_url, 503, "failed", response.headers, response
+            )
+
+    monkeypatch.setattr(
+        client["urllib"].request, "build_opener", lambda handler: Opener()
+    )
+    with pytest.raises(ValueError, match=r"HTTP 503.*retry-after=2.*3 attempts.*90s"):
+        client["public_read"]("https://api.github.com/example")
+    assert len(calls) == 3
+    assert sleeps == [2, 2]
+    assert all(response.closed for response in failed_responses)
+
+
+def test_public_fetch_reports_nonretryable_truncated_chunked_error(
+    monkeypatch, fetch_clock
+):
+    client, _, sleeps = fetch_clock
+    calls = []
+    failed_responses = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            response = truncated_error_response(
+                404, {"X-GitHub-Request-Id": "request-id"}
+            )
+            failed_responses.append(response)
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "failed", response.headers, response
+            )
+
+    monkeypatch.setattr(
+        client["urllib"].request, "build_opener", lambda handler: Opener()
+    )
+    with pytest.raises(
+        ValueError, match=r"HTTP 404.*x-github-request-id=request-id.*public access"
+    ):
+        client["public_read"]("https://api.github.com/example")
+    assert calls == ["https://api.github.com/example"]
+    assert sleeps == []
+    assert failed_responses[0].closed
+
+
+@pytest.mark.parametrize(
+    "status,headers,oversleep,attempts,waits",
+    [
+        (503, {}, 0, 3, [1, 1]),
+        (429, {"Retry-After": "91"}, 0, 1, []),
+        (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4600"}, 0, 1, []),
+        (503, {"Retry-After": "50"}, 0, 2, [50]),
+        (503, {"Retry-After": "1"}, 90, 1, [1]),
+    ],
+)
+def test_public_fetch_stops_at_attempt_or_time_budget(
+    monkeypatch, fetch_clock, status, headers, oversleep, attempts, waits
+):
+    client, clock, sleeps = fetch_clock
+    calls = []
+    real_sleep = client["public_read"].__globals__["time"].sleep
+
+    def delayed_sleep(seconds):
+        real_sleep(seconds)
+        clock[0] += oversleep
+
+    client["public_read"].__globals__["time"].sleep = delayed_sleep
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError(
+                request.full_url, status, "failed", headers, None
+            )
+
+    monkeypatch.setattr(
+        client["urllib"].request, "build_opener", lambda handler: Opener()
+    )
+    with pytest.raises(
+        ValueError, match=rf"HTTP {status}.*retry later.*{attempts} attempts.*90s"
+    ):
+        client["public_read"]("https://api.github.com/example")
+    assert len(calls) == attempts
+    assert sleeps == waits
+
+
+def test_public_failure_retains_only_bounded_sanitized_diagnostics(monkeypatch):
+    client = runpy.run_path(str(RUNTIME / "configuration.py"))
+    reads = []
+
+    class Body(io.BytesIO):
+        def read(self, size):
+            reads.append(size)
+            return super().read(size)
+
+    body = Body(json.dumps({"message": "denied\n\x1b" + "x" * 600}).encode())
+    headers = {
+        "X-GitHub-Request-Id": "request\n\x1b-id",
+        "X-RateLimit-Limit": "60",
+        "X-RateLimit-Remaining": "38",
+        "X-RateLimit-Reset": "2000",
+        "X-RateLimit-Resource": "core",
+        "Set-Cookie": "must-not-be-retained",
+    }
+
+    class Opener:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 403, "failed", headers, body)
+
+    monkeypatch.setattr(
+        client["urllib"].request, "build_opener", lambda handler: Opener()
+    )
+    with pytest.raises(ValueError) as result:
+        client["public_read"]("https://api.github.com/example")
+    diagnostic = str(result.value)
+    assert "GitHub message: denied  " in diagnostic
+    assert "x" * 513 not in diagnostic
+    assert "x-github-request-id=request  -id" in diagnostic
+    for key in ("limit", "remaining", "reset", "resource"):
+        assert f"x-ratelimit-{key}=" in diagnostic
+    assert "must-not-be-retained" not in diagnostic
+    assert "\n" not in diagnostic and "\x1b" not in diagnostic
+    assert reads == [4096] and body.closed
 
 
 def test_pinned_source_uses_the_exact_commit_without_resolving_a_branch(
